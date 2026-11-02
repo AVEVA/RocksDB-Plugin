@@ -26,7 +26,8 @@ AVEVA::RocksDB::Plugin::Azure::Impl::BasicWriteableFileImpl<TBlob>::BasicWriteab
                                     // One GetProperties call yields both the size and the capacity.
                                     [&blob] {
                                         const auto info = BlobOperations::GetInfo(*blob);
-                                        return BlobState{info.Size, info.Capacity};
+                                        return BlobState{.Size = CountFromSigned(info.Size),
+                                                         .Capacity = CountFromSigned(info.Capacity)};
                                     }()) {}
 
 template <typename TBlob>
@@ -35,9 +36,10 @@ BasicWriteableFileImpl<TBlob>::BasicWriteableFileImpl(
     std::shared_ptr<Core::FileCache> fileCache,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
     const Core::ByteCount bufferSize, const BlobState knownState)
-    : m_w(name, std::move(runtime), std::move(blob), std::move(fileCache), std::move(logger), knownState.Capacity),
-      m_bufferSize(SignedBytes(bufferSize)), m_lastPageOffset(0), m_size(knownState.Size), m_bufferOffset(0),
-      m_bufferState(BufferState::Flushed) {
+    : m_w(name, std::move(runtime), std::move(blob), std::move(fileCache), std::move(logger),
+          SignedBytes(knownState.Capacity)),
+      m_bufferSize(SignedBytes(bufferSize)), m_lastPageOffset(0), m_size(SignedBytes(knownState.Size)),
+      m_bufferOffset(0), m_bufferState(BufferState::Flushed) {
     // One page is not enough: a partial page cannot be flushed, so Append could never free space.
     if (m_bufferSize < 2 * SignedPageSize) {
         throw std::invalid_argument("Buffer size cannot be smaller than two pages");
@@ -57,9 +59,10 @@ BasicWriteableFileImpl<TBlob>::BasicWriteableFileImpl(
         m_lastPageOffset = lastPageOffset;
         if (lastPageBytes > 0) // There is a partially filled page
         {
-            const auto bytesDownloaded =
-                BlobOperations::DownloadToBuffer(*m_w.H.Blob, m_buffer, m_lastPageOffset, lastPageBytes);
-            BlobHelpers::RequireFullDownload(m_w.H.Name, m_lastPageOffset, lastPageBytes, bytesDownloaded);
+            const auto bytesDownloaded = BlobOperations::DownloadToBuffer(
+                *m_w.H.Blob, m_buffer, OffsetFromSigned(m_lastPageOffset), CountFromSigned(lastPageBytes));
+            BlobHelpers::RequireFullDownload(m_w.H.Name, OffsetFromSigned(m_lastPageOffset),
+                                             CountFromSigned(lastPageBytes), bytesDownloaded);
             // The tail already matches the blob, so it stays "flushed" until Append changes it; otherwise a
             // reopen and close would upload an identical page, change the ETag and invalidate readers.
             m_bufferOffset = lastPageBytes;
@@ -317,7 +320,7 @@ void BasicWriteableFileImpl<TBlob>::StartUpload(std::shared_ptr<const std::vecto
     m_uploads->Begin();
     try {
         // Fenced writes fail the upload without a request; checking here keeps that from needing the executor.
-        m_w.H.Runtime->ThrowIfWritesFenced();
+        m_w.H.Runtime->Fence().ThrowIfFenced();
     } catch (...) {
         m_uploads->Complete(std::current_exception());
         return;
@@ -342,7 +345,7 @@ BasicWriteableFileImpl<TBlob>::RunUpload(std::shared_ptr<UploadTracker> tracker,
                                          std::shared_ptr<const std::vector<char>> data, const int64_t offset) {
     std::exception_ptr error;
     try {
-        co_await BlobOperations::UploadPagesAsync(*runtime, *blob, std::move(data), offset);
+        co_await BlobOperations::UploadPagesAsync(runtime, *blob, std::move(data), OffsetFromSigned(offset));
     } catch (...) {
         error = std::current_exception();
     }
@@ -406,15 +409,15 @@ template <typename TBlob> void BasicWriteableFileImpl<TBlob>::ReportUploadError(
             std::rethrow_exception(m_uploads->Error);
         }
     }
-    m_w.H.Runtime->ThrowIfWritesFenced();
+    m_w.H.Runtime->Fence().ThrowIfFenced();
 }
 
 template <typename TBlob> int64_t BasicWriteableFileImpl<TBlob>::GetFileSize() const noexcept { return m_size; }
 
 template <typename TBlob>
-int64_t BasicWriteableFileImpl<TBlob>::GetUniqueId(char* id, const int64_t maxIdSize) const noexcept {
-    const auto length = std::min(static_cast<int64_t>(m_w.H.Name.size()), maxIdSize);
-    std::copy_n(m_w.H.Name.begin(), length, id);
+std::size_t BasicWriteableFileImpl<TBlob>::GetUniqueId(const std::span<char> id) const noexcept {
+    const auto length = std::min(m_w.H.Name.size(), id.size());
+    std::copy_n(m_w.H.Name.begin(), length, id.begin());
     return length;
 }
 

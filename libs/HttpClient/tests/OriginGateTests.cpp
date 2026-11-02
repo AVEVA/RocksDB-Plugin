@@ -47,7 +47,7 @@ constexpr auto Canceled = std::errc::operation_canceled;
 
 TEST(OriginGate, EnforcesTheLimitPerOriginAndHandsSlotsOverInOrder) {
     asio::io_context context;
-    const auto gate = std::make_shared<OriginGate>(context.get_executor(), 1);
+    const auto gate = std::make_shared<OriginGate>(context.get_executor(), AVEVA::ConnectionCount{1}, nullptr);
     std::optional<OriginGate::Slot> slots[3];
     std::error_code errors[3];
     std::vector<int> order;
@@ -79,7 +79,7 @@ TEST(OriginGate, EnforcesTheLimitPerOriginAndHandsSlotsOverInOrder) {
 
 TEST(OriginGate, CancellingAWaiterFailsItWithoutLosingTheSlot) {
     asio::io_context context;
-    const auto gate = std::make_shared<OriginGate>(context.get_executor(), 1);
+    const auto gate = std::make_shared<OriginGate>(context.get_executor(), AVEVA::ConnectionCount{1}, nullptr);
     std::optional<OriginGate::Slot> first;
     std::optional<OriginGate::Slot> second;
     std::optional<OriginGate::Slot> third;
@@ -110,7 +110,7 @@ TEST(OriginGate, CancellingAWaiterFailsItWithoutLosingTheSlot) {
 
 TEST(OriginGate, CloseFailsWaitersAndLaterAcquires) {
     asio::io_context context;
-    const auto gate = std::make_shared<OriginGate>(context.get_executor(), 1);
+    const auto gate = std::make_shared<OriginGate>(context.get_executor(), AVEVA::ConnectionCount{1}, nullptr);
     std::optional<OriginGate::Slot> held;
     std::optional<OriginGate::Slot> waiting;
     std::optional<OriginGate::Slot> late;

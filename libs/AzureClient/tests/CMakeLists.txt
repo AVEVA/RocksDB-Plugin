@@ -107,6 +107,7 @@ gtest_discover_tests(aveva-azure-client-public-api-tests DISCOVERY_TIMEOUT 60 PR
 # loopback CPU evidence only, never Azure network results.
 add_executable(aveva-azure-client-e2e-benchmark EndToEndAllocationBenchmark.cpp)
 target_link_libraries(aveva-azure-client-e2e-benchmark PRIVATE aveva::azure-client aveva::http-client Boost::asio OpenSSL::Crypto GTest::gtest_main)
+aveva_azure_client_enable_clang_tidy(aveva-azure-client-e2e-benchmark)
 if(MSVC)
     target_compile_options(aveva-azure-client-e2e-benchmark PRIVATE /bigobj)
 endif()

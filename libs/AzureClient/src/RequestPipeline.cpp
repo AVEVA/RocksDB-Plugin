@@ -99,28 +99,27 @@ namespace RetryDetail {
 }
 
 void ResolveCopySourceAuthorization(HttpRequest& request, std::string_view bearerToken) {
-    auto& headers = request.GetHeaders();
-    const auto it = std::ranges::find_if(headers, [](const HttpHeader& header) {
+    const auto& headers = request.GetHeaders();
+    const auto marked = std::ranges::any_of(headers, [](const HttpHeader& header) {
         return IEquals(header.GetName(), XMsCopySourceAuthorizationHeaderName) == StringMatch::Match &&
                header.GetValue() == CopySourceClientCredentialMarker;
     });
-    if (it == headers.end()) {
+    if (!marked) {
         return;
     }
-    if (bearerToken.empty()) {
-        headers.erase(it);
-    } else {
-        it->SetValue(MakeBearerValue(bearerToken));
+    const HeaderName name{std::string{XMsCopySourceAuthorizationHeaderName}};
+    request.RemoveHeaders(name);
+    if (!bearerToken.empty()) {
+        request.AddHeader(HttpHeader(name, HeaderValue{MakeBearerValue(bearerToken)}));
     }
 }
 
 [[nodiscard]] std::error_code CanceledError() noexcept { return std::make_error_code(std::errc::operation_canceled); }
 
 void SetBearerAuthorization(HttpRequest& request, std::string_view token) {
-    std::erase_if(request.GetHeaders(), [](const HttpHeader& header) {
-        return IEquals(header.GetName(), AuthorizationHeaderName) == StringMatch::Match;
-    });
-    request.AddHeader(HttpHeader{std::string{AuthorizationHeaderName}, MakeBearerValue(token)});
+    const HeaderName name{std::string{AuthorizationHeaderName}};
+    request.RemoveHeaders(name);
+    request.AddHeader(HttpHeader(name, HeaderValue{MakeBearerValue(token)}));
 }
 
 [[nodiscard]] ReplaySafety ReplaySafetyOf(const HttpRequest& request) {

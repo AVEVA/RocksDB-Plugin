@@ -3,8 +3,12 @@
 
 #pragma once
 
+#include "DiagnosticsSink.hpp"
 #include "StreamTypes.hpp"
 #include "SweeperNotifier.hpp"
+
+#include "AVEVA/HttpClient/Units.hpp"
+
 #include <boost/asio/post.hpp>
 #include <boost/beast/core/flat_buffer.hpp>
 #include <boost/container_hash/hash.hpp>
@@ -13,8 +17,6 @@
 #include <boost/unordered/unordered_node_map.hpp>
 #include <gsl/pointers>
 #include <openssl/ssl.h>
-
-#include "Timeouts.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -113,6 +115,13 @@ enum class SocketHealth : std::uint8_t { Dead, Alive };
 /// <summary>Whether an origin entry currently holds idle connections or is retained empty for reuse.</summary>
 enum class OriginState : std::uint8_t { Active, Dormant };
 
+struct TotalIdleCapTag;
+/// <summary>
+/// How many idle connections a pool keeps across all origins, as opposed to the per-origin
+/// <see cref="ConnectionCount"/>; a distinct type so the two caps cannot be swapped.
+/// </summary>
+using TotalIdleCap = StrongInteger<TotalIdleCapTag, std::size_t>;
+
 namespace ConnectionPoolDetail {
 namespace intrusive = boost::intrusive;
 
@@ -151,13 +160,7 @@ class ConnectionPool {
     /// Bounds idle sockets across all origins, so a client that talks to many hosts cannot hold them
     /// unboundedly.
     /// </summary>
-    static constexpr std::size_t DefaultMaxTotalIdle = 256;
-
-    /// <summary>
-    /// The largest idle timeout accepted; larger values would overflow when converted to the clock's
-    /// nanosecond ticks, so they are clamped to this.
-    /// </summary>
-    static constexpr std::chrono::seconds MaxIdleTimeout{EffectivelyInfinite};
+    static constexpr TotalIdleCap DefaultMaxTotalIdle{256};
 
     /// <summary>
     /// The default for how long a connection must have been idle before it is probed for liveness on reuse.
@@ -170,33 +173,21 @@ class ConnectionPool {
     /// Constructs a pool of idle keep-alive connections.
     /// </summary>
     /// <param name="maxIdlePerKey">How many idle connections to keep per origin; 0 disables pooling.</param>
-    /// <param name="idleTimeout">How long a connection may sit idle before it is closed; clamped to
-    /// <see cref="MaxIdleTimeout"/>.</param>
+    /// <param name="idleTimeout">How long a connection may sit idle before it is closed.</param>
     /// <param name="maxTotalIdle">How many idle connections to keep across all origins; 0 disables pooling.</param>
     /// <param name="notifier">Invoked (outside the lock) when a release makes an empty pool non-empty, so an
     /// owner can schedule Sweep().</param>
     /// <param name="probeThreshold">Connections idle at least this long are probed for liveness when taken;
     /// zero probes every reused connection.</param>
-    ConnectionPool(std::size_t maxIdlePerKey, std::chrono::milliseconds idleTimeout,
-                   std::size_t maxTotalIdle = DefaultMaxTotalIdle, Notifier notifier = {},
-                   std::chrono::milliseconds probeThreshold = DefaultProbeThreshold)
-        : m_maxIdlePerKey(maxIdlePerKey),
-          m_idleTimeout(std::clamp(idleTimeout, std::chrono::milliseconds::zero(),
-                                   std::chrono::duration_cast<std::chrono::milliseconds>(MaxIdleTimeout))),
-          m_maxTotalIdle(maxTotalIdle), m_notifier(std::move(notifier)),
-          m_probeThreshold(std::max(probeThreshold, std::chrono::milliseconds::zero())) {}
-
-    /// <summary>
-    /// Whole-second timeouts, including values (such as seconds::max()) that would overflow if converted to
-    /// milliseconds directly; they are clamped first.
-    /// </summary>
-    ConnectionPool(std::size_t maxIdlePerKey, std::chrono::seconds idleTimeout,
-                   std::size_t maxTotalIdle = DefaultMaxTotalIdle, Notifier notifier = {},
-                   std::chrono::milliseconds probeThreshold = DefaultProbeThreshold)
-        : ConnectionPool(maxIdlePerKey,
-                         std::chrono::duration_cast<std::chrono::milliseconds>(
-                             std::clamp(idleTimeout, std::chrono::seconds::zero(), MaxIdleTimeout)),
-                         maxTotalIdle, std::move(notifier), probeThreshold) {}
+    /// <param name="diagnostics">Where a connection that could not be handed to its executor is reported; null
+    /// reports nothing.</param>
+    ConnectionPool(ConnectionCount maxIdlePerKey, Timeout idleTimeout, TotalIdleCap maxTotalIdle = DefaultMaxTotalIdle,
+                   Notifier notifier = {}, std::chrono::milliseconds probeThreshold = DefaultProbeThreshold,
+                   std::shared_ptr<const DiagnosticsSink> diagnostics = nullptr)
+        : m_maxIdlePerKey(maxIdlePerKey.Value()), m_idleTimeout(idleTimeout.Value()),
+          m_maxTotalIdle(maxTotalIdle.Value()), m_notifier(std::move(notifier)),
+          m_probeThreshold(std::max(probeThreshold, std::chrono::milliseconds::zero())),
+          m_diagnostics(std::move(diagnostics)) {}
 
     /// <summary>
     /// Closes connections idle past the timeout without needing a request to arrive. Runs on the sweeper's
@@ -212,7 +203,7 @@ class ConnectionPool {
             DropExpired(Clock::now(), retired);
             remaining = m_lru.size();
         }
-        retired.clear_and_dispose(ExecutorDisposer{});
+        retired.clear_and_dispose(ExecutorDisposer{this});
         return remaining;
     }
 
@@ -245,7 +236,7 @@ class ConnectionPool {
     /// Release declines every connection, so a request that was in flight during shutdown closes its connection
     /// itself instead of parking it where it would be destroyed after its executor is gone.
     /// </summary>
-    void Clear() {
+    void Clear() noexcept {
         LruList retired;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
@@ -254,8 +245,9 @@ class ConnectionPool {
             m_origins.clear();
             retired.swap(m_lru);
             m_recycled.clear_and_dispose(NodeDisposer{});
+            // Clear runs on shutdown paths that must not fail, so it only unlinks and frees; nothing here allocates.
         }
-        retired.clear_and_dispose(ExecutorDisposer{});
+        retired.clear_and_dispose(ExecutorDisposer{this});
     }
 
     /// <summary>
@@ -299,19 +291,18 @@ class ConnectionPool {
                 // DropExpired has already removed every timed-out node, so this list holds only usable
                 // connections. A dormant origin (empty list) has nothing to hand out.
                 Origin& origin = it->second;
-                Node& node = origin.idle.back(); // Newest, and least likely to have been closed by the peer.
-                origin.idle.pop_back();
-                idleFor = now - node.idleSince;
-                m_lru.erase(m_lru.iterator_to(node));
-                connection.emplace(std::move(node.connection));
-                Recycle(node);
+                // Newest, and least likely to have been closed by the peer.
+                const UnlinkedNode node = Unlink(origin.idle.back());
+                idleFor = now - node.Get().idleSince;
+                connection.emplace(std::move(node.Get().connection));
+                Recycle(lock, node);
                 if (origin.idle.empty()) {
                     MakeDormant(origin);
                 }
             }
         }
         // Closing the retired sockets runs outside the lock, on their own executors.
-        retired.clear_and_dispose(ExecutorDisposer{});
+        retired.clear_and_dispose(ExecutorDisposer{this});
         return connection;
     }
 
@@ -336,7 +327,8 @@ class ConnectionPool {
         }
         LruList retired;
         // Closes retired sockets after the lock is released on every path, including a throwing allocation.
-        const boost::scope::scope_exit disposeRetired{[&retired] { retired.clear_and_dispose(ExecutorDisposer{}); }};
+        const boost::scope::scope_exit disposeRetired{
+            [this, &retired] { retired.clear_and_dispose(ExecutorDisposer{this}); }};
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             if (m_lifecycle == Lifecycle::Closed) {
@@ -347,14 +339,15 @@ class ConnectionPool {
 
             // Everything that can throw happens before any pool state changes, so a bad_alloc
             // leaves the pool consistent and the socket owned by the caller's (RAII) parameter.
-            Node& node = *Obtain();
+            const UnlinkedNode obtained = Obtain(lock);
             decltype(m_origins.try_emplace(key)) emplaced;
             try {
                 emplaced = m_origins.try_emplace(key);
             } catch (...) {
-                Recycle(node);
+                Recycle(lock, obtained);
                 throw;
             }
+            Node& node = obtained.Get();
             auto [it, inserted] = emplaced;
             Origin& origin = it->second;
             if (inserted) {
@@ -402,15 +395,17 @@ class ConnectionPool {
     /// fails.
     /// </summary>
     /// <param name="connection">The connection to destroy.</param>
-    static void DisposeConnection(PooledConnection<Stream>&& connection) noexcept {
+    void DisposeConnection(PooledConnection<Stream>&& connection) const noexcept {
         if constexpr (requires { connection.stream->get_executor(); }) {
             if (connection.stream) {
                 auto executor = connection.stream->get_executor();
                 try {
                     boost::asio::post(
                         executor, [moved = std::move(connection)]() mutable { moved = PooledConnection<Stream>{}; });
-                } catch (...) {
-                    // The handler (and the connection in it) is destroyed right here instead.
+                } catch (const std::exception& error) {
+                    // The handler (and the connection in it) has been destroyed right here instead.
+                    DiagnosticsSink::Report(m_diagnostics, HttpDiagnosticKind::SwallowedException,
+                                            HttpRequestPhase::Queued, {}, {}, {}, error.what());
                 }
             }
         }
@@ -423,42 +418,40 @@ class ConnectionPool {
     /// <param name="connection">The idle connection to probe.</param>
     /// <returns>Alive if the connection still looks usable.</returns>
     static SocketHealth Probe(PooledConnection<Stream>& connection) noexcept {
+        // Nothing below throws: it only reads the socket's state through non-throwing calls.
         if constexpr (!requires { beast::get_lowest_layer(*connection.stream).socket(); }) {
             return SocketHealth::Alive; // Stream types without a real socket (test doubles) cannot be probed.
-        } else
-            try {
-                auto& socket = beast::get_lowest_layer(*connection.stream).socket();
-                if (!socket.is_open()) {
-                    return SocketHealth::Dead;
-                }
-                if constexpr (requires { connection.stream->native_handle(); }) {
-                    // Decrypted bytes already buffered by TLS never show up on the socket.
-                    if (SSL_pending(connection.stream->native_handle()) > 0) {
-                        return SocketHealth::Dead;
-                    }
-                }
-#if defined(_WIN32)
-                // A zero-timeout poll avoids toggling the socket's blocking mode.
-                WSAPOLLFD pollFd{};
-                pollFd.fd = socket.native_handle();
-                pollFd.events = POLLRDNORM;
-                const int ready = ::WSAPoll(&pollFd, 1, 0);
-                return ready == 0 ? SocketHealth::Alive : SocketHealth::Dead;
-#else
-                // MSG_DONTWAIT makes just this call non-blocking, so the socket's mode is never toggled.
-                char probe = 0;
-                const auto received = ::recv(socket.native_handle(), &probe, 1, MSG_PEEK | MSG_DONTWAIT);
-                // EAGAIN == EWOULDBLOCK on Linux, so comparing both trips -Wlogical-op.
-                const auto wouldBlock = errno == EAGAIN
-#if EAGAIN != EWOULDBLOCK
-                                        || errno == EWOULDBLOCK
-#endif
-                    ;
-                return received < 0 && wouldBlock ? SocketHealth::Alive : SocketHealth::Dead;
-#endif
-            } catch (...) {
+        } else {
+            auto& socket = beast::get_lowest_layer(*connection.stream).socket();
+            if (!socket.is_open()) {
                 return SocketHealth::Dead;
             }
+            if constexpr (requires { connection.stream->native_handle(); }) {
+                // Decrypted bytes already buffered by TLS never show up on the socket.
+                if (SSL_pending(connection.stream->native_handle()) > 0) {
+                    return SocketHealth::Dead;
+                }
+            }
+#if defined(_WIN32)
+            // A zero-timeout poll avoids toggling the socket's blocking mode.
+            WSAPOLLFD pollFd{};
+            pollFd.fd = socket.native_handle();
+            pollFd.events = POLLRDNORM;
+            const int ready = ::WSAPoll(&pollFd, 1, 0);
+            return ready == 0 ? SocketHealth::Alive : SocketHealth::Dead;
+#else
+            // MSG_DONTWAIT makes just this call non-blocking, so the socket's mode is never toggled.
+            char probe = 0;
+            const auto received = ::recv(socket.native_handle(), &probe, 1, MSG_PEEK | MSG_DONTWAIT);
+            // EAGAIN == EWOULDBLOCK on Linux, so comparing both trips -Wlogical-op.
+            const auto wouldBlock = errno == EAGAIN
+#if EAGAIN != EWOULDBLOCK
+                                    || errno == EWOULDBLOCK
+#endif
+                ;
+            return received < 0 && wouldBlock ? SocketHealth::Alive : SocketHealth::Dead;
+#endif
+        }
     }
 
     struct Origin;
@@ -526,10 +519,21 @@ class ConnectionPool {
     }
 
     /// <summary>
+    /// Intrusive lists link nodes but do not own them, so ownership leaves a <c>std::unique_ptr</c> only here, when a
+    /// node is first linked, and goes back into one in <see cref="Destroy"/>.
+    /// </summary>
+    static Node& Adopt(std::unique_ptr<Node> node) noexcept { return *node.release(); }
+
+    /// <summary>
+    /// Frees a node no list links any more.
+    /// </summary>
+    static void Destroy(Node* node) noexcept { const std::unique_ptr<Node> owned(node); }
+
+    /// <summary>
     /// Destroys a node (and with it its socket) when an intrusive list is cleared.
     /// </summary>
     struct NodeDisposer {
-        void operator()(gsl::owner<Node*> node) const noexcept { delete node; }
+        void operator()(Node* node) const noexcept { Destroy(node); }
     };
 
     /// <summary>
@@ -537,11 +541,36 @@ class ConnectionPool {
     /// first when the stream has one. Falls back to destroying it in place if posting fails.
     /// </summary>
     struct ExecutorDisposer {
-        void operator()(gsl::owner<Node*> node) const noexcept {
-            DisposeConnection(std::move(node->connection));
-            delete node;
+        const ConnectionPool* pool;
+
+        void operator()(Node* node) const noexcept {
+            pool->DisposeConnection(std::move(node->connection));
+            Destroy(node);
         }
     };
+
+    /// <summary>
+    /// A node on neither the idle nor the LRU list. Only the pool can make one, and only where it has just taken a
+    /// node off both lists (or out of the recycle bin), so <see cref="Recycle"/> can never be handed a linked node.
+    /// </summary>
+    class UnlinkedNode {
+      public:
+        [[nodiscard]] Node& Get() const noexcept { return *m_node; }
+
+      private:
+        friend ConnectionPool;
+        explicit UnlinkedNode(Node& node) noexcept : m_node(&node) {}
+        gsl::not_null<Node*> m_node;
+    };
+
+    /// <summary>
+    /// Takes a pooled node off its origin's idle list and the LRU list.
+    /// </summary>
+    UnlinkedNode Unlink(Node& node) noexcept {
+        node.origin->idle.erase(node.origin->idle.iterator_to(node));
+        m_lru.erase(m_lru.iterator_to(node));
+        return UnlinkedNode(node);
+    }
 
     /// <summary>
     /// Unlinks every connection that has been idle past the timeout and hands it to the caller
@@ -570,27 +599,27 @@ class ConnectionPool {
     /// Returns a node to hold a connection, reusing a retired one when possible. May throw.
     /// </summary>
     /// <returns>An unlinked node owned by the pool.</returns>
-    gsl::owner<Node*> Obtain() {
+    UnlinkedNode Obtain(const std::lock_guard<std::mutex>& /*heldMutex*/) {
         if (m_recycled.empty()) {
-            return new Node();
+            return UnlinkedNode(Adopt(std::make_unique<Node>()));
         }
         Node& node = m_recycled.back();
         m_recycled.pop_back();
-        return &node;
+        return UnlinkedNode(node);
     }
 
     /// <summary>
     /// Clears a node and keeps it for reuse, freeing it once enough are already held.
     /// </summary>
-    /// <param name="node">The node to recycle; must already be unlinked from both lists.</param>
-    void Recycle(Node& node) {
-        node.connection = PooledConnection<Stream>{};
-        node.origin = nullptr;
+    /// <param name="node">The node to recycle.</param>
+    void Recycle(const std::lock_guard<std::mutex>& /*heldMutex*/, UnlinkedNode node) noexcept {
+        node.Get().connection = PooledConnection<Stream>{};
+        node.Get().origin = nullptr;
         if (m_recycled.size() >= MaxRecycledNodes) {
-            delete &node;
+            Destroy(&node.Get());
             return;
         }
-        m_recycled.push_back(node);
+        m_recycled.push_back(node.Get());
     }
 
     /// <summary>
@@ -603,6 +632,7 @@ class ConnectionPool {
     std::size_t m_maxTotalIdle;
     const Notifier m_notifier;
     std::chrono::milliseconds m_probeThreshold;
+    std::shared_ptr<const DiagnosticsSink> m_diagnostics;
     mutable std::mutex m_mutex;
     enum class Lifecycle : std::uint8_t { Open, Closed };
     Lifecycle m_lifecycle = Lifecycle::Open; // Guarded by m_mutex.

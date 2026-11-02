@@ -62,10 +62,10 @@ TEST(SuppressedErrorResponseTests, OtherFailuresAreStillReported) {
     PageBlobClient blockBlob{httpClient, MakeBlobClientOptions()};
     BlobContainerClient container{httpClient, MakeBlobContainerClientOptions()};
 
-    EXPECT_FALSE(RunSuppressed(httpClient, AVEVA::HttpStatusCode{403}, "AuthorizationFailure", [&] {
+    EXPECT_FALSE(RunSuppressed(httpClient, ::AVEVA::HttpStatus::Forbidden, "AuthorizationFailure", [&] {
                      return blockBlob.DeleteIfExistsAsync();
                  }).Succeeded);
-    EXPECT_FALSE(RunSuppressed(httpClient, AVEVA::HttpStatusCode{409}, "ContainerBeingDeleted", [&] {
+    EXPECT_FALSE(RunSuppressed(httpClient, ::AVEVA::HttpStatus::Conflict, "ContainerBeingDeleted", [&] {
                      return container.CreateIfNotExistsAsync();
                  }).Succeeded);
 }

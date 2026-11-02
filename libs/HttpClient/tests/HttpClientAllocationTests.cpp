@@ -102,7 +102,7 @@ class PublicClientDriver {
         --m_remaining;
         AVEVA::HttpRequest request;
         request.SetMethod(AVEVA::HttpMethod::Get);
-        request.SetUrl(m_url);
+        request.SetUrl(AVEVA::HttpUrl{m_url});
         m_started = std::chrono::steady_clock::now();
         HttpClientTests::SendWith(m_client, std::move(request), AVEVA::HttpRequestOptions{},
                                   [this](std::error_code error, AVEVA::HttpResponse response) {
@@ -226,10 +226,14 @@ TEST(HttpClientDiagnosticsAllocation, DisabledSinkAllocatesNothingForTheEvent) {
     EXPECT_EQ(AllocationFailure::allocationCount, 0U);
 }
 
-TEST(HttpClientDiagnosticsAllocation, FailureBuildingTheEventIsSwallowed) {
+TEST(HttpClientDiagnosticsAllocation, FailureCopyingTheEventTextStillReportsTheEvent) {
     int calls = 0;
+    std::size_t messageLength = 0;
     AVEVA::HttpClientOptions options;
-    options.SetDiagnosticsCallback([&](const AVEVA::HttpDiagnostic&) { ++calls; });
+    options.SetDiagnosticsCallback(AVEVA::HttpDiagnosticsCallback{[&](const AVEVA::HttpDiagnostic& event) noexcept {
+        ++calls;
+        messageLength = event.Message.Value().size();
+    }});
     const auto sink = AVEVA::Private::DiagnosticsSink::For(options);
     const std::string host(64, 'h');
     const std::string message(64, 'm');
@@ -239,9 +243,11 @@ TEST(HttpClientDiagnosticsAllocation, FailureBuildingTheEventIsSwallowed) {
                                             host, "443", {}, message);
     AllocationFailure::allocationsUntilFailure = -1;
     AllocationFailure::failureMinimumSize = 0;
-    EXPECT_EQ(calls, 0);
+    EXPECT_EQ(calls, 1);
+    EXPECT_EQ(messageLength, 0U);
 
     AVEVA::Private::DiagnosticsSink::Report(sink, AVEVA::HttpDiagnosticKind::Timeout, AVEVA::HttpRequestPhase::Queued,
                                             host, "443", {}, message);
-    EXPECT_EQ(calls, 1);
+    EXPECT_EQ(calls, 2);
+    EXPECT_EQ(messageLength, message.size());
 }

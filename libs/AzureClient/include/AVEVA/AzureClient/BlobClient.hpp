@@ -121,7 +121,7 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     /// server-side copy, never as a key or in a log line (use ResourceUrl() for those).
     /// </summary>
     /// <returns>The blob's URL including any SAS query string.</returns>
-    [[nodiscard]] std::string Url() const { return Private::BuildBlobUrl(*m_target); }
+    [[nodiscard]] SecretUrl Url() const { return SecretUrl{Private::BuildBlobUrl(*m_target)}; }
 
     /// <summary>
     /// The blob's URL without any query string (no SAS), stable for the blob's lifetime and safe to log or to use as
@@ -159,8 +159,8 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     /// <returns>The content and properties of the blob, or the error that failed the request.</returns>
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::DownloadBlobResult>>
     DownloadAsync(DownloadBlobOptions options = {}, std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return Private::DownloadBlobAsync(*m_httpClient, m_target, std::move(options),
-                                          Core::Resolve(std::move(requestOptions)));
+        return DownloadImpl(*m_httpClient, m_target, m_httpOwner, std::move(options),
+                            Core::Resolve(std::move(requestOptions)));
     }
 
     /// <summary>
@@ -168,17 +168,11 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     /// <paramref name="path"/> only on success.
     /// </summary>
     /// <remarks>
-    /// DownloadToAsync overload set (the first argument picks the destination, the options type picks the mode):
-    /// <list type="bullet">
-    /// <item>(path, DownloadToOptions) - whole blob (or DownloadToOptions::Range), chunked and optionally
-    /// parallel.</item>
-    /// <item>(path, DownloadBlobOptions) - honours DownloadBlobOptions::Range; goes through the same chunked
-    /// engine.</item>
-    /// <item>(span, DownloadBlobOptions) - the range straight into caller memory.</item>
-    /// </list>
-    /// File writes never run on the threads completing HTTP requests: they go to DownloadToOptions::WriteScheduler,
-    /// else the transport's GetDownloadWriter() if it has one (::AVEVA::HttpClient does not), else the download fails
-    /// with operation_not_supported.
+    /// The first argument picks the destination and each destination has its own options type: a file takes
+    /// DownloadToOptions (range, chunking, parallelism and where the file is written from), memory takes
+    /// DownloadBlobOptions. File writes never run on the threads completing HTTP requests: they go to
+    /// DownloadToOptions::WriteScheduler, else the transport's GetDownloadWriter() if it has one (::AVEVA::HttpClient
+    /// does not), else the download fails with operation_not_supported.
     /// </remarks>
     /// <param name="path">The file to write the blob to.</param>
     /// <param name="options">The range, chunking and parallelism of the download.</param>
@@ -187,8 +181,8 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::DownloadBlobToResult>>
     DownloadToAsync(std::filesystem::path path, DownloadToOptions options = {},
                     std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return Private::DownloadBlobToFileAsync(*m_httpClient, m_target, std::move(options), std::move(path),
-                                                Core::Resolve(std::move(requestOptions)));
+        return DownloadToFileImpl(*m_httpClient, m_target, m_httpOwner, std::move(options), std::move(path),
+                                  Core::Resolve(std::move(requestOptions)));
     }
 
     /// <summary>
@@ -204,25 +198,8 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::DownloadBlobToResult>>
     DownloadToAsync(std::span<char> destination, DownloadBlobOptions options,
                     std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return Private::DownloadBlobToSpanAsync(*m_httpClient, m_target,
-                                                Private::ToDownloadToOptions(std::move(options)), destination,
-                                                Core::Resolve(std::move(requestOptions)));
-    }
-
-    /// <summary>
-    /// Chunked download of the range selected by <paramref name="options"/> into <paramref name="path"/>; see the
-    /// path overload taking DownloadToOptions for how the file is replaced.
-    /// </summary>
-    /// <param name="path">The file to write the blob to.</param>
-    /// <param name="options">The range and conditions of the download.</param>
-    /// <param name="requestOptions">Per-request options; the client's defaults apply when empty.</param>
-    /// <returns>The number of bytes written and the blob's properties, or the error that failed the download.</returns>
-    [[nodiscard]] boost::asio::awaitable<BlobResult<Models::DownloadBlobToResult>>
-    DownloadToAsync(std::filesystem::path path, DownloadBlobOptions options,
-                    std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return Private::DownloadBlobToFileAsync(*m_httpClient, m_target,
-                                                Private::ToDownloadToOptions(std::move(options)), std::move(path),
-                                                Core::Resolve(std::move(requestOptions)));
+        return DownloadToSpanImpl(*m_httpClient, m_target, m_httpOwner, std::move(options), destination,
+                                  Core::Resolve(std::move(requestOptions)));
     }
 
     /// <summary>
@@ -362,6 +339,49 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     using Core::m_httpClient;
     using Core::m_httpOwner;
     using Core::m_target;
+
+    /// <summary>The body of DownloadAsync; see DeleteImpl for why it is a static coroutine.</summary>
+    /// <param name="http">The HTTP client to send the requests with.</param>
+    /// <param name="target">The blob to download.</param>
+    /// <param name="options">The range and conditions of the download.</param>
+    /// <param name="requestOptions">The resolved per-request options.</param>
+    /// <returns>The content and properties of the blob, or the error that failed the download.</returns>
+    static boost::asio::awaitable<BlobResult<Models::DownloadBlobResult>>
+    DownloadImpl(THttp& http, std::shared_ptr<const Target> target, std::shared_ptr<THttp> /*owner*/,
+                 DownloadBlobOptions options, AzureRequestOptions requestOptions) {
+        co_return co_await Private::DownloadBlobAsync(http, std::move(target), std::move(options),
+                                                      std::move(requestOptions));
+    }
+
+    /// <summary>The body of the file DownloadToAsync; see DeleteImpl for why it is a static coroutine.</summary>
+    /// <param name="http">The HTTP client to send the requests with.</param>
+    /// <param name="target">The blob to download.</param>
+    /// <param name="options">The range, chunking and parallelism of the download.</param>
+    /// <param name="path">The file to write the blob to.</param>
+    /// <param name="requestOptions">The resolved per-request options.</param>
+    /// <returns>The number of bytes written and the blob's properties, or the error that failed the download.</returns>
+    static boost::asio::awaitable<BlobResult<Models::DownloadBlobToResult>>
+    DownloadToFileImpl(THttp& http, std::shared_ptr<const Target> target, std::shared_ptr<THttp> /*owner*/,
+                       DownloadToOptions options, std::filesystem::path path, AzureRequestOptions requestOptions) {
+        co_return co_await Private::DownloadBlobToFileAsync(http, std::move(target), std::move(options),
+                                                            std::move(path), std::move(requestOptions));
+    }
+
+    /// <summary>The body of the span DownloadToAsync; see DeleteImpl for why it is a static coroutine.</summary>
+    /// <param name="http">The HTTP client to send the requests with.</param>
+    /// <param name="target">The blob to download.</param>
+    /// <param name="options">The range and conditions of the download.</param>
+    /// <param name="destination">The caller's memory, which the caller keeps valid until the operation
+    /// completes.</param>
+    /// <param name="requestOptions">The resolved per-request options.</param>
+    /// <returns>The number of bytes stored and the blob's properties, or the error that failed the download.</returns>
+    static boost::asio::awaitable<BlobResult<Models::DownloadBlobToResult>>
+    DownloadToSpanImpl(THttp& http, std::shared_ptr<const Target> target, std::shared_ptr<THttp> /*owner*/,
+                       DownloadBlobOptions options, std::span<char> destination, AzureRequestOptions requestOptions) {
+        co_return co_await Private::DownloadBlobToSpanAsync(http, std::move(target),
+                                                            Private::ToDownloadToOptions(std::move(options)),
+                                                            destination, std::move(requestOptions));
+    }
 
     /// <summary>The body of DeleteAsync and DeleteIfExistsAsync.</summary>
     /// <remarks>

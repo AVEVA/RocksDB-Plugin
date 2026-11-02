@@ -10,6 +10,9 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/TaskGroup.hpp"
 
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
+#include <AVEVA/HttpClient/HttpBody.hpp>
+
+#include <gsl/pointers>
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/this_coro.hpp>
@@ -40,7 +43,8 @@
 // RequestFailedException, so a sequence of them reads as straight-line code. A caller that is itself a coroutine
 // co_awaits them directly. The only place that blocks is the plain function of the same name without the suffix
 // (`GetInfo`, `SetSize`, ...), a one-line `Block` used by RocksDB's synchronous entry points; it must never run on a
-// thread of the host io_context. Arguments are taken by reference, so they must outlive the operation.
+// thread of the host io_context. Clients and buffers are taken by reference, so they must outlive the operation; the
+// runtime is shared, so a coroutine frame (and the SizeInvalidation in it) never outlives it.
 namespace AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations {
 /// <summary>Whether CreateIfNotExists made the blob or found it already there.</summary>
 enum class CreateOutcome : std::uint8_t { AlreadyExisted, Created };
@@ -49,6 +53,24 @@ enum class CreateOutcome : std::uint8_t { AlreadyExisted, Created };
 enum class ServerSideCopy : std::uint8_t { Declined, Done };
 
 template <typename T> using Task = boost::asio::awaitable<T>;
+
+/// <summary>The blob a copy reads from; distinct from Destination so the two cannot be swapped.</summary>
+template <typename TBlob> class Source {
+    TBlob* m_blob;
+
+  public:
+    explicit Source(TBlob& blob) noexcept : m_blob(&blob) {}
+    [[nodiscard]] TBlob& Blob() const noexcept { return *m_blob; }
+};
+
+/// <summary>The blob a copy writes to; distinct from Source so the two cannot be swapped.</summary>
+template <typename TBlob> class Destination {
+    TBlob* m_blob;
+
+  public:
+    explicit Destination(TBlob& blob) noexcept : m_blob(&blob) {}
+    [[nodiscard]] TBlob& Blob() const noexcept { return *m_blob; }
+};
 
 /// <summary>
 /// Size and ETag of a blob, read together so that they describe the same version of the blob.
@@ -63,15 +85,15 @@ namespace Detail {
 // `stopToken` cancels the operation, which then throws. Never call on a thread running the client's executor.
 template <class TBlob, class Awaitable>
 auto BlockStoppable(TBlob& client, std::stop_token stopToken, const char* stoppedMessage, Awaitable operation) {
-    AssertNotRunningOn(client.get_executor());
+    ThrowIfRunningOn(client.get_executor());
     if (stopToken.stop_requested()) {
         throw std::system_error(std::make_error_code(std::errc::operation_canceled), stoppedMessage);
     }
     return Spawn(client.get_executor(), std::move(operation), std::move(stopToken)).get();
 }
 
-inline AzureClient::Models::BlobByteRange ToRange(int64_t offset, int64_t length) {
-    return AzureClient::Models::BlobByteRange{static_cast<uint64_t>(offset), static_cast<uint64_t>(length)};
+inline AzureClient::Models::BlobByteRange ToRange(const Core::ByteOffset offset, const Core::ByteCount length) {
+    return AzureClient::Models::BlobByteRange{offset.Value(), length.Value()};
 }
 
 // A body that disagrees with the server's Content-Range would otherwise surface as a silent short read.
@@ -80,10 +102,10 @@ template <typename TResult> std::optional<RequestFailedException> DownloadLength
     if (result.ContentRange.has_value() && result.ContentRange->Length.has_value() &&
         *result.ContentRange->Length != result.BytesWritten) {
         return RequestFailedException(
-            HttpStatusCode{200}, "",
-            "Downloaded " + std::to_string(result.BytesWritten) + " bytes but the server reported " +
-                std::to_string(*result.ContentRange->Length),
-            "", AzureClient::make_error_code(AzureClient::BlobStorageErrorCode::InvalidResponse));
+            HttpStatusCode{200}, ServiceErrorCode{""},
+            ErrorMessage{"Downloaded " + std::to_string(result.BytesWritten) + " bytes but the server reported " +
+                         std::to_string(*result.ContentRange->Length)},
+            ServiceRequestId{""}, AzureClient::make_error_code(AzureClient::BlobStorageErrorCode::InvalidResponse));
     }
     return std::nullopt;
 }
@@ -125,15 +147,17 @@ template <typename TBlob> [[nodiscard]] BlobInfo GetInfo(TBlob& client, std::sto
 // Drops the blob's cached logical size when the enclosing mutation ends, whether or not it succeeded: a failure part
 // way through may still have changed the blob.
 template <typename TBlob> class SizeInvalidation {
-    const ClientRuntimeBase& m_runtime;
+    std::shared_ptr<const ClientRuntimeBase> m_runtime;
     std::string m_url;
 
   public:
-    SizeInvalidation(const ClientRuntimeBase& runtime, const TBlob& client)
-        : m_runtime(runtime), m_url(client.ResourceUrl()) {}
+    SizeInvalidation(std::shared_ptr<const ClientRuntimeBase> runtime, const TBlob& client)
+        : m_runtime(std::move(runtime)), m_url(client.ResourceUrl()) {}
     SizeInvalidation(const SizeInvalidation&) = delete;
     SizeInvalidation& operator=(const SizeInvalidation&) = delete;
-    ~SizeInvalidation() { m_runtime.InvalidateBlobSize(m_url); }
+    SizeInvalidation(SizeInvalidation&&) = delete;
+    SizeInvalidation& operator=(SizeInvalidation&&) = delete;
+    ~SizeInvalidation() { m_runtime->MetadataCache().Invalidate(m_url); }
 };
 
 // A single request, so the size and ETag describe the same version of the blob.
@@ -148,114 +172,130 @@ template <typename TBlob> [[nodiscard]] BlobMetadata GetMetadata(TBlob& client) 
 
 // The blob's logical size, served from the runtime's short-lived cache when it is fresh.
 template <typename TBlob>
-[[nodiscard]] Task<int64_t> GetCachedSizeAsync(const ClientRuntimeBase& runtime, TBlob& client) {
+[[nodiscard]] Task<int64_t> GetCachedSizeAsync(std::shared_ptr<const ClientRuntimeBase> runtime, TBlob& client) {
     const auto& url = client.ResourceUrl();
-    if (const auto cached = runtime.CachedBlobSize(url)) {
+    if (const auto cached = runtime->MetadataCache().Size(url)) {
         co_return *cached;
     }
-    const auto epoch = runtime.BlobSizeEpoch();
+    const auto epoch = runtime->MetadataCache().SizeEpoch();
     auto info = co_await GetInfoAsync(client);
-    runtime.CacheBlobMetadata(url, info.Size, std::move(info.ETag), epoch);
+    runtime->MetadataCache().StoreMetadata(url, info.Size, std::move(info.ETag), epoch);
     co_return info.Size;
 }
 
-template <typename TBlob> [[nodiscard]] int64_t GetCachedSize(const ClientRuntimeBase& runtime, TBlob& client) {
+template <typename TBlob>
+[[nodiscard]] int64_t GetCachedSize(const std::shared_ptr<const ClientRuntimeBase>& runtime, TBlob& client) {
     return Block(client, GetCachedSizeAsync(runtime, client));
 }
 
 // Size and ETag from the runtime's cache when fresh, otherwise one properties request that then fills the cache. Used
 // when a file is opened, which RocksDB does for many files.
 template <typename TBlob>
-[[nodiscard]] Task<ClientRuntimeBase::CachedMetadata> GetCachedMetadataAsync(const ClientRuntimeBase& runtime,
-                                                                             TBlob& client) {
+[[nodiscard]] Task<BlobMetadataCache::CachedMetadata>
+GetCachedMetadataAsync(std::shared_ptr<const ClientRuntimeBase> runtime, TBlob& client) {
     const auto& url = client.ResourceUrl();
-    if (auto cached = runtime.CachedBlobMetadata(url)) {
+    if (auto cached = runtime->MetadataCache().Metadata(url)) {
         co_return std::move(*cached);
     }
-    const auto epoch = runtime.BlobSizeEpoch();
-    const auto fetchedAt = runtime.MetadataNow();
+    const auto epoch = runtime->MetadataCache().SizeEpoch();
+    const auto fetchedAt = runtime->MetadataCache().Now();
     auto info = co_await GetInfoAsync(client);
-    runtime.CacheBlobMetadata(url, info.Size, info.ETag, epoch);
-    co_return ClientRuntimeBase::CachedMetadata{info.Size, std::move(info.ETag), fetchedAt};
+    runtime->MetadataCache().StoreMetadata(url, info.Size, info.ETag, epoch);
+    co_return BlobMetadataCache::CachedMetadata{info.Size, std::move(info.ETag), fetchedAt};
 }
 
 template <typename TBlob>
-[[nodiscard]] ClientRuntimeBase::CachedMetadata GetCachedMetadata(const ClientRuntimeBase& runtime, TBlob& client) {
+[[nodiscard]] BlobMetadataCache::CachedMetadata
+GetCachedMetadata(const std::shared_ptr<const ClientRuntimeBase>& runtime, TBlob& client) {
     return Block(client, GetCachedMetadataAsync(runtime, client));
 }
 
 // Returns the blob's new ETag, which the response already carries, so callers need no follow-up properties request.
 template <typename TBlob>
-Task<std::string> SetSizeAsync(const ClientRuntimeBase& runtime, TBlob& client, int64_t size) {
-    const auto writeBudget = runtime.ThrowIfWritesFenced();
+Task<std::string> SetSizeAsync(std::shared_ptr<const ClientRuntimeBase> runtime, TBlob& client,
+                               const Core::ByteCount size) {
+    const auto writeBudget = runtime->Fence().ThrowIfFenced();
     const SizeInvalidation<TBlob> invalidate(runtime, client);
     AzureClient::SetBlobMetadataOptions options;
-    options.Metadata.emplace(std::string(BlobHelpers::SizeMetadataKey), std::to_string(size));
+    options.Metadata.emplace(std::string(BlobHelpers::SizeMetadataKey), std::to_string(size.Value()));
     auto result = Unwrap(co_await client.SetMetadataAsync(
         std::move(options), BoundByWriteDeadline(writeBudget, client.GetDefaultRequestOptions())));
     co_return std::move(result.ETag);
 }
 
-template <typename TBlob> std::string SetSize(const ClientRuntimeBase& runtime, TBlob& client, int64_t size) {
+template <typename TBlob>
+std::string SetSize(const std::shared_ptr<const ClientRuntimeBase>& runtime, TBlob& client,
+                    const Core::ByteCount size) {
     return Block(client, SetSizeAsync(runtime, client, size));
 }
 
 template <typename TBlob>
-Task<void> SetCapacityAsync(const ClientRuntimeBase& runtime, TBlob& client, int64_t capacity) {
-    const auto writeBudget = runtime.ThrowIfWritesFenced();
+Task<void> SetCapacityAsync(std::shared_ptr<const ClientRuntimeBase> runtime, TBlob& client,
+                            const Core::ByteCount capacity) {
+    const auto writeBudget = runtime->Fence().ThrowIfFenced();
     const SizeInvalidation<TBlob> invalidate(runtime, client);
-    Unwrap(co_await client.ResizeAsync(static_cast<uint64_t>(capacity), AzureClient::ResizePageBlobOptions{},
+    Unwrap(co_await client.ResizeAsync(AzureClient::PageBlobSize{capacity.Value()},
+                                       AzureClient::ResizePageBlobOptions{},
                                        BoundByWriteDeadline(writeBudget, client.GetDefaultRequestOptions())));
 }
 
-template <typename TBlob> void SetCapacity(const ClientRuntimeBase& runtime, TBlob& client, int64_t capacity) {
+template <typename TBlob>
+void SetCapacity(const std::shared_ptr<const ClientRuntimeBase>& runtime, TBlob& client,
+                 const Core::ByteCount capacity) {
     Block(client, SetCapacityAsync(runtime, client, capacity));
 }
 
 // Creates the page blob with the given capacity and a zero logical size, replacing any existing blob: Put Page
 // Blob without If-None-Match overwrites, so this is one request for both the new and the existing case.
 template <typename TBlob>
-Task<void> CreateOrReplaceAsync(const ClientRuntimeBase& runtime, TBlob& client, int64_t capacity) {
-    const auto writeBudget = runtime.ThrowIfWritesFenced();
+Task<void> CreateOrReplaceAsync(std::shared_ptr<const ClientRuntimeBase> runtime, TBlob& client,
+                                const Core::ByteCount capacity) {
+    const auto writeBudget = runtime->Fence().ThrowIfFenced();
     const SizeInvalidation<TBlob> invalidate(runtime, client);
     AzureClient::CreatePageBlobOptions options;
     options.Metadata.emplace(std::string(BlobHelpers::SizeMetadataKey), "0");
-    Unwrap(co_await client.CreateAsync(static_cast<uint64_t>(capacity), std::move(options),
+    Unwrap(co_await client.CreateAsync(AzureClient::PageBlobSize{capacity.Value()}, std::move(options),
                                        BoundByWriteDeadline(writeBudget, client.GetDefaultRequestOptions())));
 }
 
-template <typename TBlob> void CreateOrReplace(const ClientRuntimeBase& runtime, TBlob& client, int64_t capacity) {
+template <typename TBlob>
+void CreateOrReplace(const std::shared_ptr<const ClientRuntimeBase>& runtime, TBlob& client,
+                     const Core::ByteCount capacity) {
     Block(client, CreateOrReplaceAsync(runtime, client, capacity));
 }
 
 // Creates the page blob with the given capacity unless it already exists.
 template <typename TBlob>
-Task<CreateOutcome> CreateIfNotExistsAsync(const ClientRuntimeBase& runtime, TBlob& client, int64_t capacity) {
-    const auto writeBudget = runtime.ThrowIfWritesFenced();
+Task<CreateOutcome> CreateIfNotExistsAsync(std::shared_ptr<const ClientRuntimeBase> runtime, TBlob& client,
+                                           const Core::ByteCount capacity) {
+    const auto writeBudget = runtime->Fence().ThrowIfFenced();
     const SizeInvalidation<TBlob> invalidate(runtime, client);
     // The client suppresses BlobAlreadyExists and reports it through Response::Error() instead of failing.
-    const auto response = UnwrapResponse(
-        co_await client.CreateIfNotExistsAsync(static_cast<uint64_t>(capacity), AzureClient::CreatePageBlobOptions{},
-                                               BoundByWriteDeadline(writeBudget, client.GetDefaultRequestOptions())));
+    const auto response = UnwrapResponse(co_await client.CreateIfNotExistsAsync(
+        AzureClient::PageBlobSize{capacity.Value()}, AzureClient::CreatePageBlobOptions{},
+        BoundByWriteDeadline(writeBudget, client.GetDefaultRequestOptions())));
     co_return response.Error().has_value() ? CreateOutcome::AlreadyExisted : CreateOutcome::Created;
 }
 
 template <typename TBlob>
-CreateOutcome CreateIfNotExists(const ClientRuntimeBase& runtime, TBlob& client, int64_t capacity) {
+CreateOutcome CreateIfNotExists(const std::shared_ptr<const ClientRuntimeBase>& runtime, TBlob& client,
+                                const Core::ByteCount capacity) {
     return Block(client, CreateIfNotExistsAsync(runtime, client, capacity));
 }
 
 // Deletes the blob if it exists, fenced and bounded by the write deadline like every other mutation so a stale lease
 // holder cannot delete after losing the lease. Reports whether the blob was there to delete.
-template <typename TBlob> Task<AzureClient::PriorState> DeleteAsync(const ClientRuntimeBase& runtime, TBlob& client) {
-    const auto writeBudget = runtime.ThrowIfWritesFenced();
+template <typename TBlob>
+Task<AzureClient::PriorState> DeleteAsync(std::shared_ptr<const ClientRuntimeBase> runtime, TBlob& client) {
+    const auto writeBudget = runtime->Fence().ThrowIfFenced();
     const SizeInvalidation<TBlob> invalidate(runtime, client);
     const auto response = UnwrapResponse(co_await client.DeleteIfExistsAsync(
         AzureClient::DeleteBlobOptions{}, BoundByWriteDeadline(writeBudget, client.GetDefaultRequestOptions())));
     co_return response.Error().has_value() ? AzureClient::PriorState::AlreadyAbsent : AzureClient::PriorState::Existed;
 }
 
-template <typename TBlob> AzureClient::PriorState Delete(const ClientRuntimeBase& runtime, TBlob& client) {
+template <typename TBlob>
+AzureClient::PriorState Delete(const std::shared_ptr<const ClientRuntimeBase>& runtime, TBlob& client) {
     return Block(client, DeleteAsync(runtime, client));
 }
 
@@ -263,45 +303,18 @@ template <typename TBlob> AzureClient::PriorState Delete(const ClientRuntimeBase
 // per-blob errors of the result.
 template <typename TContainer>
 [[nodiscard]] Task<AzureClient::Models::DeleteBlobsResult>
-DeleteBatchAsync(const ClientRuntimeBase& runtime, TContainer& container, std::vector<std::string> names,
-                 AzureClient::DeleteBlobsOptions options) {
-    const auto writeBudget = runtime.ThrowIfWritesFenced();
+DeleteBatchAsync(std::shared_ptr<const ClientRuntimeBase> runtime, TContainer& container,
+                 std::vector<std::string> names, AzureClient::DeleteBlobsOptions options) {
+    const auto writeBudget = runtime->Fence().ThrowIfFenced();
     co_return Unwrap(co_await container.DeleteBlobsAsync(
         std::move(names), std::move(options), BoundByWriteDeadline(writeBudget, container.GetDefaultRequestOptions())));
 }
 
 template <typename TContainer>
-[[nodiscard]] AzureClient::Models::DeleteBlobsResult DeleteBatch(const ClientRuntimeBase& runtime,
-                                                                 TContainer& container, std::vector<std::string> names,
-                                                                 AzureClient::DeleteBlobsOptions options) {
+[[nodiscard]] AzureClient::Models::DeleteBlobsResult
+DeleteBatch(const std::shared_ptr<const ClientRuntimeBase>& runtime, TContainer& container,
+            std::vector<std::string> names, AzureClient::DeleteBlobsOptions options) {
     return Block(container, DeleteBatchAsync(runtime, container, std::move(names), std::move(options)));
-}
-
-// Downloads [offset, offset + length) to a local file; a non-positive length produces an empty file. A stop request
-// cancels the transfer, which then throws; the client removes its partial file, so nothing is left at `path`.
-template <typename TBlob>
-void DownloadToFile(TBlob& client, const std::filesystem::path& path, int64_t offset, int64_t length,
-                    std::stop_token stopToken = {},
-                    std::optional<AzureClient::DownloadWriteScheduler> writeScheduler = {}) {
-    // An explicit zero-length range is rejected by the client, and there is nothing to fetch for an empty blob.
-    if (length <= 0) {
-        std::ofstream file(path, std::ios::binary | std::ios::trunc);
-        if (!file) {
-            throw std::runtime_error("Could not create empty file '" + path.string() + "'");
-        }
-        return;
-    }
-
-    AzureClient::DownloadToOptions options;
-    options.Range = Detail::ToRange(offset, length);
-    options.ChunkSize = Configuration::Transfer::DownloadChunkSize.Value();
-    options.Concurrency = Configuration::Transfer::DownloadConcurrency;
-    options.WriteScheduler = std::move(writeScheduler);
-
-    // The download is cancelled through the awaiting coroutine's slot; the client removes its partial file.
-    Detail::BlockStoppable(
-        client, std::move(stopToken), "Download stopped",
-        Unwrapped(client.DownloadToAsync(path, std::move(options), client.GetDefaultRequestOptions())));
 }
 
 // Downloads into a caller-owned buffer and returns the number of bytes written. The buffer must stay alive until the
@@ -309,34 +322,123 @@ void DownloadToFile(TBlob& client, const std::filesystem::path& path, int64_t of
 // successful ranged response without Content-Range is accepted; the body length is the source of truth, and a range
 // larger than the buffer fails instead of being truncated or overflowing.
 template <typename TBlob>
-[[nodiscard]] Task<int64_t> DownloadAsync(TBlob& client, std::span<char> buffer, int64_t offset, int64_t length,
-                                          std::string ifMatch = {}) {
+[[nodiscard]] Task<Core::ByteCount> DownloadAsync(TBlob& client, std::span<char> buffer, const Core::ByteOffset offset,
+                                                  const Core::ByteCount length, std::string ifMatch = {}) {
     AzureClient::DownloadBlobOptions options;
     options.Range = Detail::ToRange(offset, length);
     if (!ifMatch.empty()) {
         options.Conditions.IfMatch = std::move(ifMatch);
     }
     // The body is copied once, straight into the caller's buffer.
-    const auto result = Unwrap(co_await client.DownloadToAsync(buffer, std::move(options),
-                                                               TransferOptions(client, static_cast<uint64_t>(length))));
+    const auto result =
+        Unwrap(co_await client.DownloadToAsync(buffer, std::move(options), TransferOptions(client, length.Value())));
     Detail::CheckDownloadLength(result);
-    co_return static_cast<int64_t>(result.BytesWritten);
+    co_return Core::ByteCount{static_cast<uint64_t>(result.BytesWritten)};
 }
 
 template <typename TBlob>
-[[nodiscard]] int64_t Download(TBlob& client, std::span<char> buffer, int64_t offset, int64_t length,
-                               std::string ifMatch) {
+[[nodiscard]] Core::ByteCount Download(TBlob& client, std::span<char> buffer, const Core::ByteOffset offset,
+                                       const Core::ByteCount length, std::string ifMatch) {
     return Block(client, DownloadAsync(client, buffer, offset, length, std::move(ifMatch)));
 }
 
-// Returns the number of bytes written to `buffer`; a non-positive length returns 0 without a request.
+// Returns the number of bytes written to `buffer`; a zero length returns 0 without a request.
 template <typename TBlob>
-[[nodiscard]] int64_t DownloadToBuffer(TBlob& client, std::span<char> buffer, int64_t offset, int64_t length) {
-    if (length <= 0) {
-        return 0;
+[[nodiscard]] Core::ByteCount DownloadToBuffer(TBlob& client, std::span<char> buffer, const Core::ByteOffset offset,
+                                               const Core::ByteCount length) {
+    if (length == Core::ByteCount{}) {
+        return Core::ByteCount{};
     }
 
     return Download(client, buffer, offset, length, std::string());
+}
+
+namespace Detail {
+// Fills `bytes` bytes of `wave` at `at` from the blob at `from + at`; a short body fails instead of leaving a hole.
+template <typename TBlob>
+Task<void> DownloadChunkAsync(TBlob& client, std::shared_ptr<std::vector<char>> wave, const size_t at,
+                              const size_t bytes, const Core::ByteOffset from) {
+    const auto blobOffset = from.Value() + at;
+    const auto received = co_await DownloadAsync(client, std::span<char>(*wave).subspan(at, bytes),
+                                                 Core::ByteOffset{blobOffset}, Core::ByteCount{bytes});
+    if (received != Core::ByteCount{bytes}) {
+        throw std::runtime_error("Unexpected end of blob while downloading at offset " + std::to_string(blobOffset));
+    }
+}
+
+// Fills `wave` from the blob range starting at `blobOffset`, a chunk per request with up to DownloadConcurrency in
+// flight. Any short chunk fails the wave, so a file is never published with a hole in it.
+template <typename TBlob>
+Task<void> DownloadWaveAsync(TBlob& client, std::shared_ptr<std::vector<char>> wave,
+                             const Core::ByteOffset blobOffset) {
+    const auto chunkSize = static_cast<size_t>(Configuration::Transfer::DownloadChunkSize.Value());
+    TaskGroup downloads(co_await boost::asio::this_coro::executor,
+                        ConcurrencyLimit{Configuration::Transfer::DownloadConcurrency});
+    co_await downloads.Scope([&](TaskGroup& running) -> Task<void> {
+        for (size_t start = 0; start < wave->size(); start += chunkSize) {
+            const auto length = std::min(chunkSize, wave->size() - start);
+            co_await running.Spawn(DownloadChunkAsync(client, wave, start, length, blobOffset));
+        }
+    });
+}
+
+// Removes a download's destination unless the download completed, so a failure never leaves a truncated file.
+class PartialFile {
+  public:
+    enum class Outcome : std::uint8_t { Incomplete, Complete };
+
+    explicit PartialFile(std::filesystem::path path) : m_path(std::move(path)) {}
+    PartialFile(const PartialFile&) = delete;
+    PartialFile& operator=(const PartialFile&) = delete;
+    PartialFile(PartialFile&&) = delete;
+    PartialFile& operator=(PartialFile&&) = delete;
+    ~PartialFile() {
+        if (m_outcome == Outcome::Incomplete) {
+            std::error_code ignored;
+            std::filesystem::remove(m_path, ignored);
+        }
+    }
+    void MarkComplete() noexcept { m_outcome = Outcome::Complete; }
+
+  private:
+    std::filesystem::path m_path;
+    Outcome m_outcome = Outcome::Incomplete;
+};
+} // namespace Detail
+
+// Downloads [offset, offset + length) to a local file; a zero length produces an empty file without a request. Each
+// wave of chunks is fetched on the client's executor and written to disk here, on the caller's thread, so the plugin
+// needs no thread of its own for the blocking writes. A stop request cancels the transfer, which then throws; a failed
+// download removes its partial file, so nothing is left at `path`.
+template <typename TBlob>
+void DownloadToFile(TBlob& client, const std::filesystem::path& path, const Core::ByteOffset offset,
+                    const Core::ByteCount length, std::stop_token stopToken = {}) {
+    Detail::PartialFile partial(path);
+    {
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
+        if (!file) {
+            throw std::runtime_error("Could not create file '" + path.string() + "'");
+        }
+        const auto waveBytes =
+            Configuration::Transfer::DownloadChunkSize.Value() * Configuration::Transfer::DownloadConcurrency;
+        auto wave = std::make_shared<std::vector<char>>();
+        for (uint64_t done = 0; done < length.Value();) {
+            const auto bytes = std::min<uint64_t>(waveBytes, length.Value() - done);
+            wave->resize(static_cast<size_t>(bytes));
+            Detail::BlockStoppable(client, stopToken, "Download stopped",
+                                   Detail::DownloadWaveAsync(client, wave, Core::ByteOffset{offset.Value() + done}));
+            file.write(wave->data(), static_cast<std::streamsize>(wave->size()));
+            if (!file) {
+                throw std::runtime_error("Could not write file '" + path.string() + "'");
+            }
+            done += bytes;
+        }
+        file.close();
+        if (!file) {
+            throw std::runtime_error("Could not finish writing file '" + path.string() + "'");
+        }
+    }
+    partial.MarkComplete();
 }
 
 /// <summary>Bytes downloaded by DownloadForReadAsync.</summary>
@@ -352,14 +454,14 @@ struct DownloadedBytes {
 /// transport retries included; that is how a caller's deadline is enforced.
 /// </summary>
 template <typename TBlob>
-[[nodiscard]] Task<DownloadedBytes> DownloadForReadAsync(TBlob& client, int64_t blobOffset, int64_t readLength,
-                                                         std::string ifMatch) {
+[[nodiscard]] Task<DownloadedBytes> DownloadForReadAsync(TBlob& client, const Core::ByteOffset blobOffset,
+                                                         const Core::ByteCount readLength, std::string ifMatch) {
     AzureClient::DownloadBlobOptions options;
     options.Range = Detail::ToRange(blobOffset, readLength);
     options.Conditions.IfMatch = std::move(ifMatch);
-    auto requestOptions = TransferOptions(client, static_cast<uint64_t>(readLength));
+    auto requestOptions = TransferOptions(client, readLength.Value());
     // The lease lives in this frame, which outlives the transfer, so it can never write into freed memory.
-    auto buffer = DownloadBufferPool::Shared().Acquire(static_cast<size_t>(readLength));
+    auto buffer = DownloadBufferPool::Shared().Acquire(static_cast<size_t>(readLength.Value()));
     const auto downloaded = Unwrap(co_await client.DownloadToAsync(std::span<char>(buffer->Data(), buffer->Size()),
                                                                    std::move(options), std::move(requestOptions)));
     Detail::CheckDownloadLength(downloaded);
@@ -370,47 +472,52 @@ template <typename TBlob>
 // Views `buffer`, so the caller must keep it alive until the operation completes; prefer the shared-buffer overload
 // when ownership can be handed over.
 template <typename TBlob>
-[[nodiscard]] Task<void> UploadPagesAsync(const ClientRuntimeBase& runtime, TBlob& client, std::span<const char> buffer,
-                                          int64_t blobOffset) {
-    const auto writeBudget = runtime.ThrowIfWritesFenced();
-    Unwrap(co_await client.UploadPagesAsync(static_cast<uint64_t>(blobOffset), std::as_bytes(buffer),
-                                            AzureClient::UploadPagesOptions{},
-                                            BoundByWriteDeadline(writeBudget, TransferOptions(client, buffer.size()))));
+[[nodiscard]] Task<void> UploadPagesAsync(std::shared_ptr<const ClientRuntimeBase> runtime, TBlob& client,
+                                          std::span<const char> buffer, const Core::ByteOffset blobOffset) {
+    const auto writeBudget = runtime->Fence().ThrowIfFenced();
+    Unwrap(co_await client.UploadPagesAsync(
+        AzureClient::PageOffset{blobOffset.Value()}, ::AVEVA::HttpBody{std::string(buffer.begin(), buffer.end())},
+        AzureClient::UploadPagesOptions{}, BoundByWriteDeadline(writeBudget, TransferOptions(client, buffer.size()))));
 }
 
 template <typename TBlob>
-void UploadPages(const ClientRuntimeBase& runtime, TBlob& client, std::span<const char> buffer, int64_t blobOffset) {
+void UploadPages(const std::shared_ptr<const ClientRuntimeBase>& runtime, TBlob& client, std::span<const char> buffer,
+                 const Core::ByteOffset blobOffset) {
     Block(client, UploadPagesAsync(runtime, client, buffer, blobOffset));
 }
 
 // The request views `data` and keeps it alive itself, so the payload is never copied.
 template <typename TBlob>
-[[nodiscard]] Task<void> UploadPagesAsync(const ClientRuntimeBase& runtime, TBlob& client,
-                                          std::shared_ptr<const std::vector<char>> data, int64_t blobOffset) {
-    const auto writeBudget = runtime.ThrowIfWritesFenced();
+[[nodiscard]] Task<void> UploadPagesAsync(std::shared_ptr<const ClientRuntimeBase> runtime, TBlob& client,
+                                          std::shared_ptr<const std::vector<char>> data,
+                                          const Core::ByteOffset blobOffset) {
+    const auto writeBudget = runtime->Fence().ThrowIfFenced();
     const auto size = data->size();
-    Unwrap(co_await client.UploadPagesAsync(static_cast<uint64_t>(blobOffset), std::move(data),
-                                            AzureClient::UploadPagesOptions{},
-                                            BoundByWriteDeadline(writeBudget, TransferOptions(client, size))));
+    const auto bytes = std::as_bytes(std::span(*data));
+    Unwrap(co_await client.UploadPagesAsync(
+        AzureClient::PageOffset{blobOffset.Value()},
+        ::AVEVA::HttpBody(bytes, gsl::not_null<std::shared_ptr<const void>>(std::move(data))),
+        AzureClient::UploadPagesOptions{}, BoundByWriteDeadline(writeBudget, TransferOptions(client, size))));
 }
 
 template <typename TBlob>
-void UploadPages(const ClientRuntimeBase& runtime, TBlob& client, std::shared_ptr<const std::vector<char>> data,
-                 int64_t blobOffset) {
+void UploadPages(const std::shared_ptr<const ClientRuntimeBase>& runtime, TBlob& client,
+                 std::shared_ptr<const std::vector<char>> data, const Core::ByteOffset blobOffset) {
     Block(client, UploadPagesAsync(runtime, client, std::move(data), blobOffset));
 }
 
 /// <summary>A run of populated bytes in a page blob.</summary>
 struct PageChunk {
-    int64_t Offset = 0;
-    int64_t Length = 0;
+    Core::ByteOffset Offset;
+    Core::ByteCount Length;
 };
 
 // The parts of the first `size` bytes that hold data, split to at most Configuration::Transfer::MaxCopyChunkSize.
 // Never-written and cleared pages read as zeros, so a copy need not transfer them. The listing is guarded by `etag`
 // (ignored when empty), so a concurrent write fails the call instead of being silently missed.
 template <typename TBlob>
-[[nodiscard]] Task<std::vector<PageChunk>> PlanPageCopyAsync(TBlob& source, int64_t size, std::string etag) {
+[[nodiscard]] Task<std::vector<PageChunk>> PlanPageCopyAsync(TBlob& source, const Core::ByteCount size,
+                                                             std::string etag) {
     std::vector<PageChunk> chunks;
     AzureClient::GetPageRangesOptions options;
     if (!etag.empty()) {
@@ -419,11 +526,11 @@ template <typename TBlob>
     do {
         auto page = Unwrap(co_await source.GetPageRangesAsync(options));
         for (const auto& range : page.Ranges) {
-            auto offset = static_cast<int64_t>(range.Offset);
-            const auto end = (std::min)(size, offset + static_cast<int64_t>(range.Length));
+            auto offset = static_cast<uint64_t>(range.Offset);
+            const auto end = (std::min)(size.Value(), offset + static_cast<uint64_t>(range.Length));
             while (offset < end) {
-                const auto length = (std::min)(end - offset, SignedBytes(Configuration::Transfer::MaxCopyChunkSize));
-                chunks.push_back({offset, length});
+                const auto length = (std::min)(end - offset, Configuration::Transfer::MaxCopyChunkSize.Value());
+                chunks.push_back({Core::ByteOffset{offset}, Core::ByteCount{length}});
                 offset += length;
             }
         }
@@ -438,16 +545,18 @@ template <typename TBlob>
 // when empty), so a write to the source mid-copy fails instead of producing a torn destination. A final chunk that is
 // not page sized is padded with zeros; the logical size is carried separately by SetSize.
 template <typename TBlob>
-Task<void> CopyPagesAsync(const ClientRuntimeBase& runtime, TBlob& source, TBlob& destination, int64_t size,
-                          std::string etag) {
+Task<void> CopyPagesAsync(std::shared_ptr<const ClientRuntimeBase> runtime, const Source<TBlob> from,
+                          const Destination<TBlob> to, const Core::ByteCount size, std::string etag) {
+    auto& source = from.Blob();
+    auto& destination = to.Blob();
     const auto chunks = co_await PlanPageCopyAsync(source, size, etag);
     if (chunks.empty()) {
         co_return;
     }
 
-    constexpr auto PageSize = SignedPageSize;
-    const auto paddedLength = [](int64_t length) {
-        return static_cast<size_t>((length + PageSize - 1) / PageSize * PageSize);
+    constexpr auto PageSize = Configuration::PageBlob::PageSize.Value();
+    const auto paddedLength = [](const Core::ByteCount length) {
+        return static_cast<size_t>((length.Value() + PageSize - 1) / PageSize * PageSize);
     };
 
     using Buffer = std::shared_ptr<std::vector<char>>;
@@ -466,28 +575,29 @@ Task<void> CopyPagesAsync(const ClientRuntimeBase& runtime, TBlob& source, TBlob
         return buffers.emplace_back(std::make_shared<std::vector<char>>(bufferSize));
     };
 
-    TaskGroup uploads(co_await boost::asio::this_coro::executor, Configuration::Transfer::MaxConcurrentPageCopies);
+    TaskGroup uploads(co_await boost::asio::this_coro::executor,
+                      ConcurrencyLimit{Configuration::Transfer::MaxConcurrentPageCopies});
     co_await uploads.Scope([&](TaskGroup& running) -> Task<void> {
         for (const auto& chunk : chunks) {
             Buffer buffer = acquire(paddedLength(chunk.Length));
-            const auto downloaded =
-                co_await DownloadAsync(source, std::span<char>(*buffer).first(static_cast<size_t>(chunk.Length)),
-                                       chunk.Offset, chunk.Length, etag);
+            const auto dataLength = static_cast<size_t>(chunk.Length.Value());
+            const auto downloaded = co_await DownloadAsync(source, std::span<char>(*buffer).first(dataLength),
+                                                           chunk.Offset, chunk.Length, etag);
             if (downloaded != chunk.Length) {
                 throw std::runtime_error("Unexpected end of blob while copying pages at offset " +
-                                         std::to_string(chunk.Offset));
+                                         std::to_string(chunk.Offset.Value()));
             }
             // Zeroes the padding after the data, which would otherwise hold a previous chunk's bytes.
-            std::fill(buffer->begin() + chunk.Length, buffer->end(), '\0');
+            std::fill(buffer->begin() + static_cast<std::ptrdiff_t>(dataLength), buffer->end(), '\0');
             co_await running.Spawn(UploadPagesAsync(runtime, destination, std::move(buffer), chunk.Offset));
         }
     });
 }
 
 template <typename TBlob>
-void CopyPages(const ClientRuntimeBase& runtime, TBlob& source, TBlob& destination, int64_t size,
-               const std::string& etag) {
-    Block(source, CopyPagesAsync(runtime, source, destination, size, etag));
+void CopyPages(const std::shared_ptr<const ClientRuntimeBase>& runtime, const Source<TBlob> source,
+               const Destination<TBlob> destination, const Core::ByteCount size, const std::string& etag) {
+    Block(source.Blob(), CopyPagesAsync(runtime, source, destination, size, etag));
 }
 
 enum class CopySourceAccess : std::uint8_t { Permitted, Unauthorized };
@@ -512,9 +622,15 @@ enum class CopySourceAccess : std::uint8_t { Permitted, Unauthorized };
 // forwarded, e.g. Shared Key) nothing has been copied yet and Declined is returned so the caller can fall back to
 // CopyPages. Any other failure throws.
 template <typename TBlob>
-[[nodiscard]] Task<ServerSideCopy> CopyPagesServerSideAsync(const ClientRuntimeBase& runtime, TBlob& source,
-                                                            TBlob& destination, int64_t size, std::string etag) {
-    runtime.ThrowIfWritesFenced();
+[[nodiscard]] Task<ServerSideCopy> CopyPagesServerSideAsync(std::shared_ptr<const ClientRuntimeBase> runtime,
+                                                            const Source<TBlob> from, const Destination<TBlob> to,
+                                                            const Core::ByteCount size, std::string etag) {
+    auto& source = from.Blob();
+    auto& destination = to.Blob();
+    // Fails fast before the listing when writes are already fenced. The budget is not carried over: every copy
+    // request below takes it afresh and bounds itself with BoundByWriteDeadline, because the listing consumes part of
+    // it.
+    static_cast<void>(runtime->Fence().ThrowIfFenced());
     // A destination that cannot forward a bearer token cannot authorize a SAS-less source either; the service would
     // refuse the copy, so skip the doomed request and let the caller copy the bytes through the client.
     if (destination.ForwardableCredential() == AzureClient::CredentialPresence::Absent &&
@@ -525,20 +641,20 @@ template <typename TBlob>
     if (chunks.empty()) {
         co_return ServerSideCopy::Done;
     }
-    constexpr auto PageSize = SignedPageSize;
+    constexpr auto PageSize = Configuration::PageBlob::PageSize.Value();
     const auto sourceUrl = source.Url();
     const auto copyRange =
         [&](PageChunk chunk) -> Task<AzureClient::BlobResult<AzureClient::Models::UploadPagesResult>> {
         // Planning and earlier requests consume the lease budget, so it is taken afresh for every request; a relative
         // duration captured earlier would let this one outlive the write deadline.
-        const auto writeBudget = runtime.ThrowIfWritesFenced();
+        const auto writeBudget = runtime->Fence().ThrowIfFenced();
         AzureClient::UploadPagesFromUrlOptions options;
         options.SourceIfMatch = etag;
         options.SourceAuth = AzureClient::SourceAuthorization::ClientCredential;
-        const auto length = (chunk.Length + PageSize - 1) / PageSize * PageSize;
+        const auto length = (chunk.Length.Value() + PageSize - 1) / PageSize * PageSize;
         co_return co_await destination.UploadPagesFromUrlAsync(
-            static_cast<uint64_t>(chunk.Offset), sourceUrl, static_cast<uint64_t>(chunk.Offset),
-            static_cast<uint64_t>(length), std::move(options),
+            AzureClient::PageOffset{chunk.Offset.Value()}, sourceUrl,
+            AzureClient::SourcePageOffset{chunk.Offset.Value()}, AzureClient::PageLength{length}, std::move(options),
             BoundByWriteDeadline(writeBudget, destination.GetDefaultRequestOptions()));
     };
     const auto copyRangeChecked = [&](PageChunk chunk) -> Task<void> { Unwrap(co_await copyRange(chunk)); };
@@ -551,7 +667,8 @@ template <typename TBlob>
         ThrowRequestFailed(first.error());
     }
 
-    TaskGroup copies(co_await boost::asio::this_coro::executor, Configuration::Transfer::MaxConcurrentPageCopies);
+    TaskGroup copies(co_await boost::asio::this_coro::executor,
+                     ConcurrencyLimit{Configuration::Transfer::MaxConcurrentPageCopies});
     co_await copies.Scope([&](TaskGroup& running) -> Task<void> {
         for (size_t index = 1; index < chunks.size(); ++index) {
             co_await running.Spawn(copyRangeChecked(chunks[index]));
@@ -561,8 +678,9 @@ template <typename TBlob>
 }
 
 template <typename TBlob>
-[[nodiscard]] ServerSideCopy CopyPagesServerSide(const ClientRuntimeBase& runtime, TBlob& source, TBlob& destination,
-                                                 int64_t size, const std::string& etag) {
-    return Block(source, CopyPagesServerSideAsync(runtime, source, destination, size, etag));
+[[nodiscard]] ServerSideCopy CopyPagesServerSide(const std::shared_ptr<const ClientRuntimeBase>& runtime,
+                                                 const Source<TBlob> source, const Destination<TBlob> destination,
+                                                 const Core::ByteCount size, const std::string& etag) {
+    return Block(source.Blob(), CopyPagesServerSideAsync(runtime, source, destination, size, etag));
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations

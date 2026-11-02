@@ -57,6 +57,14 @@ using AVEVA::HttpRequest;
 using AVEVA::HttpResponse;
 
 constexpr std::size_t ThreadCount = 4;
+constexpr unsigned int ClientMaxRetries = 5U;
+// Download shape: several chunks per blob with every chunk of a blob in flight at once.
+constexpr std::size_t DownloadChunkBytes = 4096U;
+constexpr std::size_t ChunksInFlight = 4U;
+// Blob content is a per-blob rotation of the alphabet so a mix-up between blobs or offsets shows as a mismatch.
+constexpr std::size_t PositionStride = 31U;
+constexpr std::size_t BlobStride = 7U;
+constexpr std::size_t AlphabetLength = 26U;
 
 [[nodiscard]] std::string_view HeaderValue(const HttpRequest& request, std::string_view name) {
     for (const HttpHeader& header : request.GetHeaders()) {
@@ -68,12 +76,14 @@ constexpr std::size_t ThreadCount = 4;
     return {};
 }
 
+[[nodiscard]] HttpHeader H(std::string name, std::string value) {
+    return HttpHeader(AVEVA::HeaderName{std::move(name)}, AVEVA::HeaderValue{std::move(value)});
+}
+
 [[nodiscard]] std::string BodyOf(const HttpRequest& request) {
-    if (request.GetBodyStorage() == AVEVA::BodyStorage::Owned) {
-        return request.GetBody();
-    }
-    const auto view = request.GetBodyView();
-    return {reinterpret_cast<const char*>(view.data()), view.size()};
+    const AVEVA::HttpBody body = request.GetBody();
+    const auto bytes = body.Bytes();
+    return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
 }
 
 // A thread-safe in-memory block blob service. Every completion is posted to a thread pool, so
@@ -111,17 +121,19 @@ class ThreadPoolBlobService final {
   private:
     [[nodiscard]] static HttpResponse Ok(AVEVA::HttpStatusCode status, std::vector<HttpHeader> extra = {},
                                          std::string body = {}) {
-        std::vector<HttpHeader> headers{
-            {"ETag", "\"0x1\""}, {"Last-Modified", "Fri, 26 Jun 2015 18:59:17 GMT"}, {"x-ms-request-id", "req"}};
+        std::vector<HttpHeader> headers{H("ETag", "\"0x1\""), H("Last-Modified", "Fri, 26 Jun 2015 18:59:17 GMT"),
+                                        H("x-ms-request-id", "req")};
         headers.insert(headers.end(), extra.begin(), extra.end());
         return HttpResponse{status, std::move(headers), std::move(body)};
     }
 
     HttpResponse Handle(const HttpRequest& request) {
-        if (++m_requests % 17 == 0) {
+        // Throttle a prime-spaced share of requests so retries interleave unevenly with the other threads.
+        constexpr int throttleEvery = 17;
+        if (++m_requests % throttleEvery == 0) {
             ++m_throttled;
             return HttpResponse{
-                AVEVA::HttpStatus::ServiceUnavailable, {{"x-ms-error-code", "ServerBusy"}, {"Retry-After", "0"}}, ""};
+                AVEVA::HttpStatus::ServiceUnavailable, {H("x-ms-error-code", "ServerBusy"), H("Retry-After", "0")}, ""};
         }
 
         const std::string& url = request.GetUrl();
@@ -142,17 +154,17 @@ class ThreadPoolBlobService final {
         const std::scoped_lock lock(m_mutex);
         if (request.GetMethod() == HttpMethod::Put) {
             m_blobs[path] = BodyOf(request);
-            return Ok(AVEVA::HttpStatusCode{201});
+            return Ok(::AVEVA::HttpStatus::Created);
         }
 
         const auto blob = m_blobs.find(path);
         if (blob == m_blobs.end()) {
-            return HttpResponse{AVEVA::HttpStatus::NotFound, {{"x-ms-error-code", "BlobNotFound"}}, ""};
+            return HttpResponse{AVEVA::HttpStatus::NotFound, {H("x-ms-error-code", "BlobNotFound")}, ""};
         }
         const std::string& content = blob->second;
         const std::string_view range = HeaderValue(request, "Range");
         if (request.GetMethod() != HttpMethod::Get || range.empty()) {
-            return Ok(AVEVA::HttpStatus::Ok, {{"Content-Length", std::to_string(content.size())}},
+            return Ok(AVEVA::HttpStatus::Ok, {H("Content-Length", std::to_string(content.size()))},
                       request.GetMethod() == HttpMethod::Get ? content : "");
         }
         // "bytes=first-last"
@@ -163,9 +175,9 @@ class ThreadPoolBlobService final {
         std::string body = content.substr(static_cast<std::size_t>(first), last - first + 1U);
         const std::string contentLength = std::to_string(body.size());
         return Ok(AVEVA::HttpStatus::PartialContent,
-                  {{"Content-Range", "bytes " + std::to_string(first) + "-" + std::to_string(last) + "/" +
-                                         std::to_string(content.size())},
-                   {"Content-Length", contentLength}},
+                  {H("Content-Range", "bytes " + std::to_string(first) + "-" + std::to_string(last) + "/" +
+                                          std::to_string(content.size())),
+                   H("Content-Length", contentLength)},
                   std::move(body));
     }
 
@@ -189,7 +201,7 @@ template <class T> T BlockOn(ThreadPoolBlobService& service, boost::asio::awaita
     options.ServiceEndpoint = "https://account.blob.core.windows.net";
     options.ContainerName = "container";
     options.SharedKey = {.AccountName = "account", .AccountKey = "a2V5LWJ5dGVzLWZvci10aHJlYWQtc2FuaXRpemVyLXRlc3Q="};
-    options.Retry.MaxRetries = 5;
+    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{ClientMaxRetries};
     options.Retry.InitialDelay = std::chrono::milliseconds{0};
     options.Retry.MaxDelay = std::chrono::milliseconds{1};
     return options;
@@ -200,25 +212,25 @@ template <class T> T BlockOn(ThreadPoolBlobService& service, boost::asio::awaita
 struct ContentIndex {
     std::size_t Value;
 
-    constexpr ContentIndex(std::size_t value) noexcept : Value(value) {}
+    explicit constexpr ContentIndex(std::size_t value) noexcept : Value(value) {}
 };
 
 struct BlobCountValue {
     std::size_t Value;
 
-    constexpr BlobCountValue(std::size_t value) noexcept : Value(value) {}
+    explicit constexpr BlobCountValue(std::size_t value) noexcept : Value(value) {}
 };
 
 struct BlobSizeValue {
     std::size_t Value;
 
-    constexpr BlobSizeValue(std::size_t value) noexcept : Value(value) {}
+    explicit constexpr BlobSizeValue(std::size_t value) noexcept : Value(value) {}
 };
 
 [[nodiscard]] std::string MakeContent(ContentIndex index, std::size_t size) {
     std::string content(size, '\0');
     for (std::size_t i = 0; i < size; ++i) {
-        content.at(i) = static_cast<char>('a' + (((i * 31U) + (index.Value * 7U)) % 26U));
+        content.at(i) = static_cast<char>('a' + (((i * PositionStride) + (index.Value * BlobStride)) % AlphabetLength));
     }
     return content;
 }
@@ -235,7 +247,7 @@ struct ConcurrentBlobData {
     data.Contents.reserve(blobCount.Value);
     for (std::size_t i = 0; i < blobCount.Value; ++i) {
         data.Clients.push_back(container.GetPageBlobClient("blob-" + std::to_string(i)));
-        data.Contents.push_back(MakeContent(i, blobSize.Value));
+        data.Contents.push_back(MakeContent(ContentIndex{i}, blobSize.Value));
     }
     return data;
 }
@@ -251,8 +263,15 @@ void DownloadAndVerifyAllBlobs(ThreadPoolBlobService& service, std::vector<PoolP
             service.get_executor(), clients.at(i).DownloadToAsync(dir / ("blob-" + std::to_string(i)), downloadOptions),
             boost::asio::use_future));
     }
+    // Every download must finish before any assertion may return early: the coroutines still reference the clients
+    // and the scratch directory.
+    std::vector<std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>> results;
+    results.reserve(downloads.size());
+    for (auto& download : downloads) {
+        results.push_back(download.get());
+    }
     for (std::size_t i = 0; i < clients.size(); ++i) {
-        const auto result = downloads.at(i).get();
+        const auto& result = results.at(i);
         ASSERT_TRUE(result.has_value()) << result.error().Message;
         std::ifstream in(dir / ("blob-" + std::to_string(i)), std::ios::binary);
         const std::string actual{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
@@ -276,8 +295,8 @@ TEST(MultiThreadedExecutorTests, ConcurrentChunkedDownloadsOnAThreadPool) {
     boost::asio::thread_pool writers{2};
     DownloadToOptions downloadOptions;
     downloadOptions.WriteScheduler = writers.get_executor();
-    downloadOptions.ChunkSize = 4096U;
-    downloadOptions.Concurrency = 4U;
+    downloadOptions.ChunkSize = AVEVA::AzureClient::ChunkSize{DownloadChunkBytes};
+    downloadOptions.Concurrency = AVEVA::AzureClient::Concurrency{ChunksInFlight};
     DownloadAndVerifyAllBlobs(service, data.Clients, data.Contents, downloadOptions);
     writers.join();
     EXPECT_GT(service.Throttled(), 0U) << "the retry path was not exercised";

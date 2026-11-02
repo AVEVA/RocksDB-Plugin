@@ -25,7 +25,7 @@ class HttpRequestOptions {
     /// The deadline covering the whole request.
     /// </summary>
     /// <returns>The timeout; 30 seconds unless set otherwise.</returns>
-    [[nodiscard]] std::chrono::milliseconds GetTimeout() const noexcept;
+    [[nodiscard]] Timeout GetTimeout() const noexcept;
 
     /// <summary>
     /// The maximum response body size in bytes.
@@ -42,8 +42,8 @@ class HttpRequestOptions {
     /// <summary>
     /// Sets the deadline covering the whole request.
     /// </summary>
-    /// <param name="timeout">The deadline. A non-positive value makes the request invalid.</param>
-    void SetTimeout(std::chrono::milliseconds timeout) noexcept;
+    /// <param name="timeout">The deadline.</param>
+    void SetTimeout(Timeout timeout) noexcept;
 
     /// <summary>
     /// Sets the maximum response body size in bytes; larger responses fail with
@@ -73,7 +73,7 @@ class HttpRequestOptions {
 
   private:
     TruncatedTlsBodyPolicy m_truncatedTlsBodyPolicy = TruncatedTlsBodyPolicy::Reject;
-    std::chrono::milliseconds m_timeout{30000};
+    Timeout m_timeout{std::chrono::seconds{30}};
     ByteCount m_responseBodyLimit{8 * 1024 * 1024};
     ByteCount m_responseHeaderLimit{64 * 1024};
 };

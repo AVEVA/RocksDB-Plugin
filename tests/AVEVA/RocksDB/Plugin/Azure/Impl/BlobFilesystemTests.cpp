@@ -3,6 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/BlobFilesystem.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/HandleFactory.hpp"
 
 #include <rocksdb/file_system.h>
 
@@ -11,9 +12,11 @@
 #include <memory>
 
 using AVEVA::RocksDB::Plugin::Azure::BlobFilesystem;
+using AVEVA::RocksDB::Plugin::Azure::Impl::HandleFactory;
 
 TEST(BlobFilesystemTests, SupportedOpsAdvertisesOnlyAsyncIO) {
-    BlobFilesystem filesystem(rocksdb::FileSystem::Default(), nullptr, nullptr);
+    const auto owned = HandleFactory::Create<BlobFilesystem>(rocksdb::FileSystem::Default(), nullptr, nullptr);
+    auto& filesystem = *owned;
 
     int64_t supported = 0;
     filesystem.SupportedOps(supported);
@@ -22,7 +25,8 @@ TEST(BlobFilesystemTests, SupportedOpsAdvertisesOnlyAsyncIO) {
 }
 
 TEST(BlobFilesystemTests, AreFilesSameComparesNormalizedPaths) {
-    BlobFilesystem filesystem(rocksdb::FileSystem::Default(), nullptr, nullptr);
+    const auto owned = HandleFactory::Create<BlobFilesystem>(rocksdb::FileSystem::Default(), nullptr, nullptr);
+    auto& filesystem = *owned;
     bool same = false;
     ASSERT_TRUE(filesystem.AreFilesSame("db//a.sst", "db/a.sst", {}, &same, nullptr).ok());
     EXPECT_TRUE(same);
@@ -33,7 +37,8 @@ TEST(BlobFilesystemTests, AreFilesSameComparesNormalizedPaths) {
 }
 
 TEST(BlobFilesystemTests, ReuseWritableFileIsNotSupported) {
-    BlobFilesystem filesystem(rocksdb::FileSystem::Default(), nullptr, nullptr);
+    const auto owned = HandleFactory::Create<BlobFilesystem>(rocksdb::FileSystem::Default(), nullptr, nullptr);
+    auto& filesystem = *owned;
     std::unique_ptr<rocksdb::FSWritableFile> file;
     const auto status = filesystem.ReuseWritableFile("db/new.log", "db/old.log", {}, &file, nullptr);
     EXPECT_TRUE(status.IsNotSupported());
@@ -41,7 +46,8 @@ TEST(BlobFilesystemTests, ReuseWritableFileIsNotSupported) {
 }
 
 TEST(BlobFilesystemTests, TruncateRejectsSizesBeyondInt64) {
-    BlobFilesystem filesystem(rocksdb::FileSystem::Default(), nullptr, nullptr);
+    const auto owned = HandleFactory::Create<BlobFilesystem>(rocksdb::FileSystem::Default(), nullptr, nullptr);
+    auto& filesystem = *owned;
     const auto status = filesystem.Truncate("db/a.sst", static_cast<size_t>(INT64_MAX) + 1, {}, nullptr);
     EXPECT_TRUE(status.IsInvalidArgument());
 }

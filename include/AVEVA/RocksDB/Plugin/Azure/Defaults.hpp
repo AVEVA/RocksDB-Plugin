@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #pragma once
+#include "AVEVA/RocksDB/Plugin/Azure/SignedByteCount.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/Units.hpp"
 
 namespace AVEVA::RocksDB::Plugin::Azure {
@@ -12,6 +13,6 @@ struct Defaults {
     /// <summary>Initial capacity of a newly created data file.</summary>
     static constexpr Core::ByteCount DataFileInitialSize{128 * 512 * 2};
     /// <summary>Cap on bytes held by RocksDB prefetch buffers across all files of a filesystem.</summary>
-    static constexpr Core::ByteCount MaxPrefetchBytes{static_cast<std::uint64_t>(256) * 1024 * 1024};
+    static constexpr SignedByteCount MaxPrefetchBytes{Core::ByteCount{static_cast<std::uint64_t>(256) * 1024 * 1024}};
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure

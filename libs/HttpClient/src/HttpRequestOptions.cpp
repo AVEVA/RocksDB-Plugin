@@ -4,11 +4,11 @@
 #include "AVEVA/HttpClient/HttpRequestOptions.hpp"
 
 namespace AVEVA {
-std::chrono::milliseconds HttpRequestOptions::GetTimeout() const noexcept { return m_timeout; }
+Timeout HttpRequestOptions::GetTimeout() const noexcept { return m_timeout; }
 
 ByteCount HttpRequestOptions::GetResponseBodyLimit() const noexcept { return m_responseBodyLimit; }
 
-void HttpRequestOptions::SetTimeout(std::chrono::milliseconds timeout) noexcept { m_timeout = timeout; }
+void HttpRequestOptions::SetTimeout(Timeout timeout) noexcept { m_timeout = timeout; }
 
 void HttpRequestOptions::SetResponseBodyLimit(ByteCount responseBodyLimit) noexcept {
     m_responseBodyLimit = responseBodyLimit;

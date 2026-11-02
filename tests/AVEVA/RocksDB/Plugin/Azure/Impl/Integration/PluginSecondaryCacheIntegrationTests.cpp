@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Plugin.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp"
+#include "AVEVA/RocksDB/Plugin/Support/TempDirectory.hpp"
 #include "IntegrationTestHelpers.hpp"
 
 #include <rocksdb/cache.h>
@@ -15,8 +15,10 @@
 #include <rocksdb/secondary_cache.h>
 #include <rocksdb/table.h>
 
+#include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 
 using AVEVA::RocksDB::Plugin::Azure::Plugin;
@@ -28,31 +30,31 @@ using AVEVA::RocksDB::Plugin::Azure::Impl::Testing::AzureIntegrationTestBase;
 // ---------------------------------------------------------------------------
 class PluginSecondaryCacheIntegrationTests : public AzureIntegrationTestBase {
   protected:
-    std::filesystem::path m_cacheDir;
+    std::optional<AVEVA::RocksDB::Plugin::Core::Mocks::TempDirectory> m_cacheDir;
     rocksdb::Env* m_env = nullptr;
     std::shared_ptr<rocksdb::Env> m_envGuard;
     std::string m_dbPath;
 
     std::string GetBlobNamePrefix() const override { return "plugin-sc-test"; }
+    [[nodiscard]] const std::filesystem::path& CacheDir() const { return m_cacheDir->Path(); }
+    [[nodiscard]] Plugin::StorageAccounts Accounts() const {
+        return Plugin::AccountPair<Models::ServicePrincipalStorageInfo>{*m_credentials, std::nullopt};
+    }
+
+    // Whether OpenDb may create the database or requires it to exist already.
+    enum class Creation : std::uint8_t { CreateIfMissing, MustExist };
 
     void SetUp() override {
         AzureIntegrationTestBase::SetUp();
         if (IsSkipped() || HasFatalFailure())
             return; // the base already skipped or failed
 
-        // The blob name is random per test, so the cache directory is unique per test and process.
-        m_cacheDir = std::filesystem::temp_directory_path() / ("aveva_plugin_sc_test_" + m_blobName);
+        m_cacheDir.emplace("plugin_sc_test");
         m_dbPath = m_containerPrefix + "/" + m_blobName;
 
-        std::filesystem::create_directories(m_cacheDir);
-
         rocksdb::ConfigOptions configOptions;
-        auto status = Plugin::Register(
-            configOptions, &m_env, &m_envGuard,
-            Plugin::RegisterOptions{
-                .IoContext = m_ioContext.Share(),
-                .Accounts = Plugin::AccountPair<Models::ServicePrincipalStorageInfo>{*m_credentials, std::nullopt},
-                .Log = m_logger});
+        auto status = Plugin::Register(configOptions, &m_env, &m_envGuard, m_ioContext.Get(),
+                                       Plugin::RegisterOptions{.Accounts = Accounts(), .Log = m_logger});
 
         ASSERT_TRUE(status.ok()) << "Plugin::Register failed: " << status.ToString();
     }
@@ -63,7 +65,12 @@ class PluginSecondaryCacheIntegrationTests : public AzureIntegrationTestBase {
             destroyOpts.env = m_env;
             rocksdb::DestroyDB(m_dbPath, destroyOpts);
         }
-        std::filesystem::remove_all(m_cacheDir);
+        // The registration refers to m_ioContext, which the fixture destroys.
+        if (m_credentials) {
+            Plugin::Unregister(Accounts());
+        }
+        m_envGuard.reset();
+        m_cacheDir.reset();
         AzureIntegrationTestBase::TearDown();
     }
 
@@ -71,9 +78,9 @@ class PluginSecondaryCacheIntegrationTests : public AzureIntegrationTestBase {
     //   • the Azure plugin env from Plugin::Register
     //   • a fresh FileBasedCompressedSecondaryCache created via CreateFromString
     //   • a 4 KiB primary block cache (forces eviction to the secondary cache)
-    std::unique_ptr<rocksdb::DB> OpenDb(bool createIfMissing = true) {
+    std::unique_ptr<rocksdb::DB> OpenDb(const Creation creation = Creation::CreateIfMissing) {
         auto secondaryCache = std::make_shared<AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache>(
-            m_cacheDir, std::make_shared<AVEVA::RocksDB::Plugin::Core::LocalFilesystem>(m_logger),
+            CacheDir(), std::make_shared<AVEVA::RocksDB::Plugin::Core::LocalFilesystem>(m_logger),
             AVEVA::RocksDB::Plugin::Core::ByteCount{64ULL * 1024 * 1024}, m_logger);
 
         // 4 KiB primary block cache — small enough to evict SST blocks to secondary.
@@ -87,7 +94,7 @@ class PluginSecondaryCacheIntegrationTests : public AzureIntegrationTestBase {
 
         rocksdb::Options opts;
         opts.env = m_env;
-        opts.create_if_missing = createIfMissing;
+        opts.create_if_missing = creation == Creation::CreateIfMissing;
         opts.table_factory.reset(rocksdb::NewBlockBasedTableFactory(tableOpts));
 
         std::unique_ptr<rocksdb::DB> db;
@@ -118,13 +125,13 @@ TEST_F(PluginSecondaryCacheIntegrationTests, OpenDb_PutFlushGet_RoundTrips) {
 
 // ---------------------------------------------------------------------------
 // The secondary cache factory registered by the plugin creates a
-// FileBasedCompressedSecondaryCache that writes entry files to m_cacheDir
+// FileBasedCompressedSecondaryCache that writes entry files to CacheDir()
 // when InsertSaved is called — the path used when RocksDB hands pre-serialised
 // block data to the secondary tier.
 // ---------------------------------------------------------------------------
 TEST_F(PluginSecondaryCacheIntegrationTests, SecondaryCache_InsertSaved_WritesFilesToCacheDirectory) {
     auto secondaryCache = std::make_shared<AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache>(
-        m_cacheDir, std::make_shared<AVEVA::RocksDB::Plugin::Core::LocalFilesystem>(m_logger),
+        CacheDir(), std::make_shared<AVEVA::RocksDB::Plugin::Core::LocalFilesystem>(m_logger),
         AVEVA::RocksDB::Plugin::Core::ByteCount{64ULL * 1024 * 1024}, m_logger);
 
     // Key must be ≤ 32 bytes so its hex representation fits within
@@ -138,12 +145,12 @@ TEST_F(PluginSecondaryCacheIntegrationTests, SecondaryCache_InsertSaved_WritesFi
     ASSERT_TRUE(status.ok()) << status.ToString();
 
     size_t fileCount = 0;
-    for (const auto& entry : std::filesystem::recursive_directory_iterator(m_cacheDir))
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(CacheDir()))
         if (entry.is_regular_file())
             ++fileCount;
 
     EXPECT_GT(fileCount, 0u) << "Expected entry files in the secondary cache directory after InsertSaved; "
-                             << "cache dir: " << m_cacheDir;
+                             << "cache dir: " << CacheDir();
 }
 
 // ---------------------------------------------------------------------------
@@ -155,7 +162,7 @@ TEST_F(PluginSecondaryCacheIntegrationTests, DataReadable_AfterDbReopenWithSameS
 
     // First open: write 20 entries and flush them to SST.
     {
-        auto db = OpenDb(/*createIfMissing=*/true);
+        auto db = OpenDb(Creation::CreateIfMissing);
         ASSERT_NE(db, nullptr);
 
         for (int i = 0; i < 20; ++i)
@@ -167,7 +174,7 @@ TEST_F(PluginSecondaryCacheIntegrationTests, DataReadable_AfterDbReopenWithSameS
     // Second open: primary cache is cold; reads that miss the primary cache are
     // served from the secondary cache before falling back to the SST on Azure.
     {
-        auto db = OpenDb(/*createIfMissing=*/false);
+        auto db = OpenDb(Creation::MustExist);
         ASSERT_NE(db, nullptr) << "Failed to reopen RocksDB after initial write";
 
         for (int i = 0; i < 20; ++i) {
@@ -189,25 +196,16 @@ TEST_F(PluginSecondaryCacheIntegrationTests, Register_Twice_UsesLatestIoContext)
         rocksdb::Env* firstEnv = nullptr;
         std::shared_ptr<rocksdb::Env> firstGuard;
         rocksdb::ConfigOptions configOptions;
-        ASSERT_TRUE(
-            Plugin::Register(
-                configOptions, &firstEnv, &firstGuard,
-                Plugin::RegisterOptions{
-                    .IoContext = firstContext.Share(),
-                    .Accounts = Plugin::AccountPair<Models::ServicePrincipalStorageInfo>{*m_credentials, std::nullopt},
-                    .Log = m_logger})
-                .ok());
+        ASSERT_TRUE(Plugin::Register(configOptions, &firstEnv, &firstGuard, firstContext.Get(),
+                                     Plugin::RegisterOptions{.Accounts = Accounts(), .Log = m_logger})
+                        .ok());
     }
 
     rocksdb::Env* env = nullptr;
     std::shared_ptr<rocksdb::Env> guard;
     rocksdb::ConfigOptions configOptions;
-    ASSERT_TRUE(Plugin::Register(configOptions, &env, &guard,
-                                 Plugin::RegisterOptions{.IoContext = m_ioContext.Share(),
-                                                         .Accounts =
-                                                             Plugin::AccountPair<Models::ServicePrincipalStorageInfo>{
-                                                                 *m_credentials, std::nullopt},
-                                                         .Log = m_logger})
+    ASSERT_TRUE(Plugin::Register(configOptions, &env, &guard, m_ioContext.Get(),
+                                 Plugin::RegisterOptions{.Accounts = Accounts(), .Log = m_logger})
                     .ok());
 
     // Any request reaches Azure through the registered io_context, so this would crash or hang on the old one.

@@ -12,6 +12,7 @@
 #include <AVEVA/AzureClient/Detail/RequestPipeline.hpp>
 #include <AVEVA/AzureClient/Models/BlobModels.hpp>
 #include <AVEVA/AzureClient/Response.hpp>
+#include <AVEVA/AzureClient/Types.hpp>
 #include <AVEVA/HttpClient/HttpClient.hpp>
 #include <AVEVA/HttpClient/HttpMethod.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
@@ -33,8 +34,6 @@
 #include <vector>
 
 namespace AVEVA::AzureClient {
-/// <summary>The size of a page; every page blob offset and length is a multiple of it.</summary>
-inline constexpr std::size_t PageBlobPageSize = 512;
 /// <summary>Largest range one Put Page From URL request can copy.</summary>
 inline constexpr std::uint64_t MaxPagesFromUrlBytes = std::uint64_t{4} * 1024U * 1024U;
 
@@ -60,16 +59,16 @@ constexpr std::string_view PageWriteUpdateValue = "update";
 /// <param name="length">The number of bytes in the range.</param>
 /// <returns>The header value, or the validation message when the range is not valid.</returns>
 [[nodiscard]] std::expected<std::string, std::string> BuildPageWriteRangeHeaderValue(std::uint64_t offset,
-                                                                                     std::uint64_t length);
+                                                                                     PageLength length);
 } // namespace Private
 
 /// <summary>
 /// Page blob operations; the common blob operations, lifetime and cancellation contracts come from BlobClient.
 /// </summary>
 /// <remarks>
-/// Alignment: every <c>offset</c>, <c>length</c>, <c>contentLength</c> and <c>newSize</c> is a byte value and must be
-/// a multiple of PageBlobPageSize (512). Misaligned values are rejected before any request is sent: the
-/// operation yields std::errc::invalid_argument.
+/// Alignment: every offset, length and size is a page-aligned type (PageOffset, PageLength, PageBlobSize), so a
+/// misaligned value cannot reach an operation. Only the size of an upload body is checked when the operation is called:
+/// a body that is not a whole number of pages yields std::errc::invalid_argument before any request is sent.
 ///
 /// Upload arguments are read (and the request built) when the operation is called, not when it is awaited, so a
 /// span only has to stay valid until the call returns.
@@ -115,12 +114,12 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     /// Creates the page blob. Unlike CreateIfNotExistsAsync it adds no condition of its own, so an existing blob is
     /// replaced unless <paramref name="options"/> carry a condition that prevents it.
     /// </summary>
-    /// <param name="contentLength">The size of the blob in bytes; a multiple of PageBlobPageSize.</param>
+    /// <param name="contentLength">The size of the blob in bytes.</param>
     /// <param name="options">The metadata and request conditions of the new blob.</param>
     /// <param name="requestOptions">Per-request options; the client's defaults apply when empty.</param>
     /// <returns>The ETag and last-modified time of the blob, or the error that failed the request.</returns>
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::CreatePageBlobResult>>
-    CreateAsync(std::uint64_t contentLength, CreatePageBlobOptions options = {},
+    CreateAsync(PageBlobSize contentLength, CreatePageBlobOptions options = {},
                 std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
         return SendPrepared<Models::CreatePageBlobResult>(
             this->Http(), this->SharedTarget(), this->HttpOwner(), BuildCreate(contentLength, options),
@@ -141,12 +140,12 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     /// Only a LeaseId and an If-None-Match of "*" are accepted: any other validator could either let the PUT overwrite
     /// an existing blob or make a 412 mean something other than "the blob exists".
     /// </remarks>
-    /// <param name="contentLength">The size of the blob in bytes; a multiple of PageBlobPageSize.</param>
+    /// <param name="contentLength">The size of the blob in bytes.</param>
     /// <param name="options">The metadata and request conditions of the new blob.</param>
     /// <param name="requestOptions">Per-request options; the client's defaults apply when empty.</param>
     /// <returns>The ETag and last-modified time of the blob, or the error that failed the request.</returns>
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::CreatePageBlobResult>>
-    CreateIfNotExistsAsync(std::uint64_t contentLength, CreatePageBlobOptions options = {},
+    CreateIfNotExistsAsync(PageBlobSize contentLength, CreatePageBlobOptions options = {},
                            std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
         Prepared prepared;
         if (auto message = ValidateCreateIfNotExistsConditions(options.Conditions)) {
@@ -164,17 +163,19 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     }
 
     /// <summary>
-    /// Writes <paramref name="content"/> to the blob starting at <paramref name="offset"/>.
+    /// Writes <paramref name="content"/> to the blob starting at <paramref name="offset"/>. The body owns (or shares
+    /// ownership of) its bytes, so nothing has to outlive this call: build it from a string to hand the bytes over, or
+    /// from a span and its owner to send them without a copy.
     /// </summary>
-    /// <param name="offset">The first byte to write; a multiple of PageBlobPageSize.</param>
+    /// <param name="offset">The first byte to write.</param>
     /// <param name="content">The bytes to write; its size must be a multiple of PageBlobPageSize.</param>
     /// <param name="options">The request conditions of the write.</param>
     /// <param name="requestOptions">Per-request options; the client's defaults apply when empty.</param>
     /// <returns>The ETag and last-modified time after the write, or the error that failed the request.</returns>
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::UploadPagesResult>>
-    UploadPagesAsync(std::uint64_t offset, std::string content, UploadPagesOptions options = {},
+    UploadPagesAsync(PageOffset offset, HttpBody content, UploadPagesOptions options = {},
                      std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        auto prepared = BuildUploadPages(offset, content.size(), options);
+        auto prepared = BuildUploadPages(offset, content.Size().Value(), options);
         if (prepared) {
             prepared->SetBody(std::move(content));
         }
@@ -182,70 +183,20 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     }
 
     /// <summary>
-    /// Zero-copy upload: the request body views <paramref name="content"/>, which the request keeps alive until the
-    /// HTTP operation (including retries) has finished, so the caller may drop its reference immediately.
-    /// </summary>
-    /// <param name="offset">The first byte to write; a multiple of PageBlobPageSize.</param>
-    /// <param name="content">The bytes to write; its size must be a multiple of PageBlobPageSize. A null pointer
-    /// is rejected with std::errc::invalid_argument.</param>
-    /// <param name="options">The request conditions of the write.</param>
-    /// <param name="requestOptions">Per-request options; the client's defaults apply when empty.</param>
-    /// <returns>The ETag and last-modified time after the write, or the error that failed the request.</returns>
-    [[nodiscard]] boost::asio::awaitable<BlobResult<Models::UploadPagesResult>>
-    UploadPagesAsync(std::uint64_t offset, std::shared_ptr<const std::vector<char>> content,
-                     UploadPagesOptions options = {},
-                     std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        if (!content) {
-            return SendUpload(std::unexpected(std::string("content must not be null")), std::move(requestOptions));
-        }
-        const auto bytes = std::as_bytes(std::span<const char>(*content));
-        auto prepared = BuildUploadPages(offset, bytes.size(), options);
-        if (prepared) {
-            prepared->SetBodyView(bytes, std::move(content));
-        }
-        return SendUpload(std::move(prepared), std::move(requestOptions));
-    }
-
-    /// <summary>
-    /// Copies <paramref name="content"/> into the request body (use the shared-buffer overload above to avoid the
-    /// copy); the span only has to stay valid until this call returns.
-    /// </summary>
-    /// <param name="offset">The first byte to write; a multiple of PageBlobPageSize.</param>
-    /// <param name="content">The bytes to write; its size must be a multiple of PageBlobPageSize.</param>
-    /// <param name="options">The request conditions of the write.</param>
-    /// <param name="requestOptions">Per-request options; the client's defaults apply when empty.</param>
-    /// <returns>The ETag and last-modified time after the write, or the error that failed the request.</returns>
-    [[nodiscard]] boost::asio::awaitable<BlobResult<Models::UploadPagesResult>>
-    UploadPagesAsync(std::uint64_t offset, std::span<const std::byte> content, UploadPagesOptions options = {},
-                     std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        auto prepared = BuildUploadPages(offset, content.size(), options);
-        if (prepared) {
-            prepared->SetBody(Private::BytesToString(content));
-        }
-        return SendUpload(std::move(prepared), std::move(requestOptions));
-    }
-
-    /// <summary>
     /// Changes the size of the blob.
     /// </summary>
-    /// <param name="newSize">The new size in bytes; a multiple of PageBlobPageSize.</param>
+    /// <param name="newSize">The new size in bytes.</param>
     /// <param name="options">The request conditions of the resize.</param>
     /// <param name="requestOptions">Per-request options; the client's defaults apply when empty.</param>
     /// <returns>The ETag and last-modified time after the resize, or the error that failed the request.</returns>
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::ResizePageBlobResult>>
-    ResizeAsync(std::uint64_t newSize, ResizePageBlobOptions options = {},
+    ResizeAsync(PageBlobSize newSize, ResizePageBlobOptions options = {},
                 std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        Prepared prepared;
-        if (auto message = Private::ValidatePageAligned(newSize, "newSize")) {
-            prepared = std::unexpected(std::move(*message));
-        } else {
-            HttpRequest request = Private::BuildBlobRequest(this->GetTarget(), HttpMethod::Put, "comp=properties");
-            Private::AddHeader(request, Private::XMsBlobContentLengthHeaderName, std::to_string(newSize));
-            Private::ApplyBlobRequestConditions(request, options.Conditions);
-            prepared = std::move(request);
-        }
+        HttpRequest request = Private::BuildBlobRequest(this->GetTarget(), HttpMethod::Put, "comp=properties");
+        Private::AddHeader(request, Private::XMsBlobContentLengthHeaderName, std::to_string(newSize.Value()));
+        Private::ApplyBlobRequestConditions(request, options.Conditions);
         return SendPrepared<Models::ResizePageBlobResult>(
-            this->Http(), this->SharedTarget(), this->HttpOwner(), std::move(prepared),
+            this->Http(), this->SharedTarget(), this->HttpOwner(), Prepared(std::move(request)),
             Private::ParseETagAndLastModified<Models::ResizePageBlobResult>, this->Resolve(std::move(requestOptions)),
             ReplaySafety::Unsafe, {});
     }
@@ -275,24 +226,23 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     /// <summary>
     /// Server-side copy (Put Page From URL): the service copies <paramref name="length"/> bytes at
     /// <paramref name="sourceOffset"/> of the blob at <paramref name="sourceUrl"/> into this blob at
-    /// <paramref name="offset"/>; the data never passes through the client. <paramref name="offset"/>,
-    /// <paramref name="sourceOffset"/> and <paramref name="length"/> must be multiples of PageBlobPageSize and
-    /// <paramref name="length"/> at most MaxPagesFromUrlBytes (4 MiB); anything else is rejected before a request is
-    /// sent with std::errc::invalid_argument. The destination must already exist with enough capacity. See
-    /// UploadPagesFromUrlOptions for how the source is authorized.
+    /// <paramref name="offset"/>; the data never passes through the client. <paramref name="length"/> must be
+    /// non-zero and at most MaxPagesFromUrlBytes (4 MiB) and <paramref name="sourceUrl"/> non-empty; anything else is
+    /// rejected before a request is sent with std::errc::invalid_argument. The destination must already exist with
+    /// enough capacity. See UploadPagesFromUrlOptions for how the source is authorized.
     /// </summary>
     /// <param name="offset">The first byte of this blob to write.</param>
-    /// <param name="sourceUrl">The URL of the source blob.</param>
+    /// <param name="sourceUrl">The URL of the source blob, which may carry a SAS token.</param>
     /// <param name="sourceOffset">The first byte of the source to copy.</param>
     /// <param name="length">The number of bytes to copy.</param>
     /// <param name="options">How the source is authorized and the request conditions.</param>
     /// <param name="requestOptions">Per-request options; the client's defaults apply when empty.</param>
     /// <returns>The ETag and last-modified time after the write, or the error that failed the request.</returns>
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::UploadPagesResult>>
-    UploadPagesFromUrlAsync(std::uint64_t offset, std::string sourceUrl, std::uint64_t sourceOffset,
-                            std::uint64_t length, UploadPagesFromUrlOptions options = {},
+    UploadPagesFromUrlAsync(PageOffset offset, SecretUrl sourceUrl, SourcePageOffset sourceOffset, PageLength length,
+                            UploadPagesFromUrlOptions options = {},
                             std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return SendUpload(BuildUploadFromUrl(offset, std::move(sourceUrl), sourceOffset, length, options),
+        return SendUpload(BuildUploadFromUrl(offset, sourceUrl, sourceOffset, length, options),
                           std::move(requestOptions));
     }
 
@@ -347,14 +297,11 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     /// <summary>Validates and builds the Put Blob request for a new page blob.</summary>
     /// <param name="contentLength">The size of the blob in bytes.</param>
     /// <param name="options">The metadata and request conditions.</param>
-    /// <returns>The request, or the validation message when <paramref name="contentLength"/> is misaligned.</returns>
-    [[nodiscard]] Prepared BuildCreate(std::uint64_t contentLength, const CreatePageBlobOptions& options) const {
-        if (auto message = Private::ValidatePageAligned(contentLength, "contentLength")) {
-            return std::unexpected(std::move(*message));
-        }
+    /// <returns>The request.</returns>
+    [[nodiscard]] Prepared BuildCreate(PageBlobSize contentLength, const CreatePageBlobOptions& options) const {
         HttpRequest request = Private::BuildBlobRequest(this->GetTarget(), HttpMethod::Put);
         Private::AddHeader(request, Private::XMsBlobTypeHeaderName, Private::PageBlobTypeValue);
-        Private::AddHeader(request, Private::XMsBlobContentLengthHeaderName, std::to_string(contentLength));
+        Private::AddHeader(request, Private::XMsBlobContentLengthHeaderName, std::to_string(contentLength.Value()));
         Private::ApplyMetadata(request, options.Metadata);
         Private::ApplyBlobRequestConditions(request, options.Conditions);
         return request;
@@ -384,16 +331,13 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     /// <param name="offset">The first byte to write.</param>
     /// <param name="contentSize">The number of bytes the caller will attach.</param>
     /// <param name="options">The request conditions.</param>
-    /// <returns>The request, or the validation message when a value is misaligned or out of range.</returns>
-    [[nodiscard]] Prepared BuildUploadPages(std::uint64_t offset, std::size_t contentSize,
+    /// <returns>The request, or the validation message when the content size is misaligned or out of range.</returns>
+    [[nodiscard]] Prepared BuildUploadPages(PageOffset offset, std::uint64_t contentSize,
                                             const UploadPagesOptions& options) const {
-        if (auto message = Private::ValidatePageAligned(offset, "offset")) {
-            return std::unexpected(std::move(*message));
-        }
         if (auto message = Private::ValidatePageAligned(contentSize, "content size")) {
             return std::unexpected(std::move(*message));
         }
-        const auto rangeHeader = Private::BuildPageWriteRangeHeaderValue(offset, contentSize);
+        const auto rangeHeader = Private::BuildPageWriteRangeHeaderValue(offset.Value(), PageLength{contentSize});
         if (!rangeHeader.has_value()) {
             return std::unexpected(rangeHeader.error());
         }
@@ -410,27 +354,21 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     /// <param name="sourceOffset">The first byte of the source to copy.</param>
     /// <param name="length">The number of bytes to copy.</param>
     /// <param name="options">How the source is authorized and the request conditions.</param>
-    /// <returns>The request, or the validation message when a value is misaligned, too large or empty.</returns>
-    [[nodiscard]] Prepared BuildUploadFromUrl(std::uint64_t offset, std::string sourceUrl, std::uint64_t sourceOffset,
-                                              std::uint64_t length, const UploadPagesFromUrlOptions& options) const {
-        for (auto message : {Private::ValidatePageAligned(offset, "offset"),
-                             Private::ValidatePageAligned(sourceOffset, "sourceOffset"),
-                             Private::ValidatePageAligned(length, "length")}) {
-            if (message) {
-                return std::unexpected(std::move(*message));
-            }
-        }
-        if (length > MaxPagesFromUrlBytes) {
+    /// <returns>The request, or the validation message when a value is too large or empty.</returns>
+    [[nodiscard]] Prepared BuildUploadFromUrl(PageOffset offset, const SecretUrl& sourceUrl,
+                                              SourcePageOffset sourceOffset, PageLength length,
+                                              const UploadPagesFromUrlOptions& options) const {
+        if (length.Value() > MaxPagesFromUrlBytes) {
             return std::unexpected(std::string("length must not exceed 4 MiB."));
         }
-        if (sourceUrl.empty()) {
+        if (sourceUrl.Value().empty()) {
             return std::unexpected(std::string("sourceUrl must not be empty."));
         }
-        const auto rangeHeader = Private::BuildPageWriteRangeHeaderValue(offset, length);
+        const auto rangeHeader = Private::BuildPageWriteRangeHeaderValue(offset.Value(), length);
         if (!rangeHeader.has_value()) {
             return std::unexpected(rangeHeader.error());
         }
-        const auto sourceRangeHeader = Private::BuildPageWriteRangeHeaderValue(sourceOffset, length);
+        const auto sourceRangeHeader = Private::BuildPageWriteRangeHeaderValue(sourceOffset.Value(), length);
         if (!sourceRangeHeader.has_value()) {
             return std::unexpected(sourceRangeHeader.error());
         }
@@ -438,7 +376,7 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
         HttpRequest request = Private::BuildBlobRequest(this->GetTarget(), HttpMethod::Put, "comp=page");
         Private::AddHeader(request, Private::XMsPageWriteHeaderName, Private::PageWriteUpdateValue);
         Private::AddHeader(request, Private::XMsRangeHeaderName, *rangeHeader);
-        Private::AddHeader(request, Private::XMsCopySourceHeaderName, sourceUrl);
+        Private::AddHeader(request, Private::XMsCopySourceHeaderName, sourceUrl.Value());
         Private::AddHeader(request, Private::XMsSourceRangeHeaderName, *sourceRangeHeader);
         Private::AddHeaderIfNotEmpty(request, Private::XMsSourceIfMatchHeaderName, options.SourceIfMatch);
         if (options.SourceAuth == SourceAuthorization::ClientCredential) {

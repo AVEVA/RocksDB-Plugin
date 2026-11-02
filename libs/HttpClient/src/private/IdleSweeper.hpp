@@ -32,6 +32,14 @@ using TlsConnectionPool = ConnectionPool<TlsStream>;
 /// io_context timer so a pending timer cannot keep the caller's io_context::run() from returning.
 /// </summary>
 class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
+    /// <summary>
+    /// Restricts construction to <see cref="Create"/> while still letting it use <c>std::make_shared</c>.
+    /// </summary>
+    class Passkey {
+        friend IdleSweeper;
+        Passkey() = default;
+    };
+
   public:
     static constexpr std::chrono::milliseconds DefaultMinInterval{1000};
 
@@ -44,36 +52,31 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
     /// is non-empty (clamped to at least <paramref name="minInterval"/>).</param>
     /// <param name="probeThreshold">How long a pooled connection must have been idle before it is probed for
     /// liveness when reused.</param>
+    /// <param name="diagnostics">Where a failed sweep or disposal is reported; null reports nothing.</param>
     /// <param name="minInterval">Floor for the sweep interval. Production keeps the one-second default so a tiny idle
     /// timeout cannot spin the shared thread; tests lower it so they run in milliseconds.</param>
     /// <returns>The sweeper; its pools are available through <see cref="PlainPool"/> and
     /// <see cref="TlsPool"/>.</returns>
-    static std::shared_ptr<IdleSweeper>
-    Create(std::size_t maxIdlePerKey, std::chrono::milliseconds idleTimeout,
-           std::chrono::milliseconds probeThreshold = PlainConnectionPool::DefaultProbeThreshold,
-           std::chrono::milliseconds minInterval = DefaultMinInterval) {
-        std::shared_ptr<IdleSweeper> sweeper(new IdleSweeper(idleTimeout, minInterval));
-        sweeper->m_plainPool =
-            std::make_shared<PlainConnectionPool>(maxIdlePerKey, idleTimeout, PlainConnectionPool::DefaultMaxTotalIdle,
-                                                  SweeperNotifier(sweeper, sweeper->m_scheduledFlag), probeThreshold);
-        sweeper->m_tlsPool =
-            std::make_shared<TlsConnectionPool>(maxIdlePerKey, idleTimeout, TlsConnectionPool::DefaultMaxTotalIdle,
-                                                SweeperNotifier(sweeper, sweeper->m_scheduledFlag), probeThreshold);
+    static std::shared_ptr<IdleSweeper> Create(ConnectionCount maxIdlePerKey, Timeout idleTimeout,
+                                               std::chrono::milliseconds probeThreshold,
+                                               std::shared_ptr<const DiagnosticsSink> diagnostics,
+                                               std::chrono::milliseconds minInterval = DefaultMinInterval) {
+        auto sweeper = std::make_shared<IdleSweeper>(Passkey{}, idleTimeout, minInterval, diagnostics);
+        sweeper->m_plainPool = std::make_shared<PlainConnectionPool>(
+            maxIdlePerKey, idleTimeout, PlainConnectionPool::DefaultMaxTotalIdle,
+            SweeperNotifier(sweeper, sweeper->m_scheduledFlag), probeThreshold, diagnostics);
+        sweeper->m_tlsPool = std::make_shared<TlsConnectionPool>(
+            maxIdlePerKey, idleTimeout, TlsConnectionPool::DefaultMaxTotalIdle,
+            SweeperNotifier(sweeper, sweeper->m_scheduledFlag), probeThreshold, diagnostics);
         return sweeper;
     }
 
     /// <summary>
-    /// Whole-second timeouts (the public option's unit), clamped before conversion so seconds::max() cannot
-    /// overflow.
+    /// Only <see cref="Create"/> can call this; it finishes the setup by building the pools.
     /// </summary>
-    static std::shared_ptr<IdleSweeper>
-    Create(std::size_t maxIdlePerKey, std::chrono::seconds idleTimeout,
-           std::chrono::milliseconds probeThreshold = PlainConnectionPool::DefaultProbeThreshold) {
-        return Create(maxIdlePerKey,
-                      std::chrono::duration_cast<std::chrono::milliseconds>(std::clamp(
-                          idleTimeout, std::chrono::seconds::zero(), std::chrono::seconds{EffectivelyInfinite})),
-                      probeThreshold, DefaultMinInterval);
-    }
+    IdleSweeper(Passkey /*onlyCreate*/, Timeout idleTimeout, std::chrono::milliseconds minInterval,
+                std::shared_ptr<const DiagnosticsSink> diagnostics)
+        : m_interval(std::max(idleTimeout.Value(), minInterval)), m_diagnostics(std::move(diagnostics)) {}
 
     /// <summary>
     /// Removes any pending registration so a destroyed sweeper does not linger in the scheduler queue until its
@@ -87,12 +90,12 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
     /// <summary>
     /// The pool of plain HTTP connections this sweeper sweeps.
     /// </summary>
-    const std::shared_ptr<PlainConnectionPool>& PlainPool() const noexcept { return m_plainPool; }
+    std::shared_ptr<PlainConnectionPool> PlainPool() const noexcept { return m_plainPool; }
 
     /// <summary>
     /// The pool of HTTPS connections this sweeper sweeps.
     /// </summary>
-    const std::shared_ptr<TlsConnectionPool>& TlsPool() const noexcept { return m_tlsPool; }
+    std::shared_ptr<TlsConnectionPool> TlsPool() const noexcept { return m_tlsPool; }
 
     /// <summary>
     /// Called on every release into a pool; schedules a sweep unless one is already pending. The plain load
@@ -127,7 +130,7 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
     /// thread. The owner calls this before its io_context may go away, so the scheduler thread can never be the
     /// one that posts a disposal to an executor that no longer exists.
     /// </summary>
-    void Stop() {
+    void Stop() noexcept {
         {
             std::lock_guard<std::mutex> sweepLock(m_sweepMutex);
             m_run = SweeperRun::Stopped;
@@ -143,11 +146,6 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
     /// </summary>
     enum class SchedulerPresence : std::uint8_t { Gone, Alive };
     static SchedulerPresence SchedulerState() { return SweepScheduler::Presence(); }
-
-    /// <summary>
-    /// Sets where a failed sweep is reported. Call before any connection is pooled; null reports nothing.
-    /// </summary>
-    void SetDiagnostics(std::shared_ptr<const DiagnosticsSink> diagnostics) { m_diagnostics = std::move(diagnostics); }
 
     /// <summary>
     /// How many times the scheduler thread has gone to sleep on a deadline, process-wide. Lets a test wait for the
@@ -188,10 +186,6 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
                                 {}, "An idle-connection sweep threw; it will be retried on the next release");
     }
 
-    IdleSweeper(std::chrono::milliseconds idleTimeout, std::chrono::milliseconds minInterval)
-        : m_interval(std::clamp(idleTimeout, minInterval,
-                                std::chrono::duration_cast<std::chrono::milliseconds>(EffectivelyInfinite))) {}
-
     /// <summary>
     /// One thread shared by every live sweeper, running their sweeps in deadline order. A per-sweeper thread
     /// would cost a stack for each of many short-lived clients. The scheduler is reference counted by the
@@ -199,7 +193,17 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
     /// sweeper is destroyed, so nothing is left running (or joined at static destruction) afterwards.
     /// </summary>
     class SweepScheduler {
+        /// <summary>
+        /// Restricts construction to <see cref="Acquire"/> while still letting it use <c>std::make_shared</c>.
+        /// </summary>
+        class Passkey {
+            friend SweepScheduler;
+            Passkey() = default;
+        };
+
       public:
+        explicit SweepScheduler(Passkey /*onlyAcquire*/) : m_state(std::make_shared<State>()) {}
+
         /// <summary>
         /// The scheduler shared by all live sweepers, created if there is none.
         /// </summary>
@@ -210,7 +214,7 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
             if (auto existing = registered.lock()) {
                 return existing;
             }
-            std::shared_ptr<SweepScheduler> created(new SweepScheduler);
+            auto created = std::make_shared<SweepScheduler>(Passkey{});
             registered = created;
             return created;
         }
@@ -285,7 +289,7 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
         /// Drops the sweeper's pending registration, if any. It is found by deadline and owner, so this costs
         /// O(log n) rather than a scan of the queue.
         /// </summary>
-        void Cancel(IdleSweeper& sweeper) {
+        void Cancel(IdleSweeper& sweeper) noexcept {
             std::lock_guard<std::mutex> lock(m_state->mutex);
             if (!sweeper.m_queuedDue) {
                 return;
@@ -314,8 +318,6 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
 
       private:
         using Clock = std::chrono::steady_clock;
-
-        SweepScheduler() : m_state(std::make_shared<State>()) {}
 
         struct Entry {
             const IdleSweeper* owner; // Identity for Cancel; never dereferenced.
@@ -384,7 +386,7 @@ class IdleSweeper : public std::enable_shared_from_this<IdleSweeper> {
     std::shared_ptr<PlainConnectionPool> m_plainPool;
     std::shared_ptr<TlsConnectionPool> m_tlsPool;
     std::chrono::milliseconds m_interval;
-    std::shared_ptr<const DiagnosticsSink> m_diagnostics;
+    const std::shared_ptr<const DiagnosticsSink> m_diagnostics;
     // Shared with the notifiers so a release can see a pending sweep without locking the weak_ptr.
     std::shared_ptr<std::atomic<SweepState>> m_scheduledFlag =
         std::make_shared<std::atomic<SweepState>>(SweepState::Idle);

@@ -16,6 +16,18 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 enum class WriteFenceState : std::uint8_t { Open, Fenced };
 
 /// <summary>
+/// Identifies the lease whose deadline a WriteFence entry tracks: the address of the object holding the lease, which
+/// is unique while that object lives (and it removes its entry before it dies).
+/// </summary>
+class LeaseOwnerId {
+    std::uintptr_t m_address;
+
+  public:
+    explicit LeaseOwnerId(const void* owner) noexcept : m_address(reinterpret_cast<std::uintptr_t>(owner)) {}
+    [[nodiscard]] friend bool operator==(LeaseOwnerId, LeaseOwnerId) noexcept = default;
+};
+
+/// <summary>
 /// The write fence shared by every file, lock and directory of a filesystem: an irreversible switch plus the earliest
 /// lease renewal deadline, both readable lock-free by every mutation.
 /// </summary>
@@ -27,7 +39,7 @@ class WriteFence {
         (std::numeric_limits<std::chrono::steady_clock::rep>::max)();
     std::atomic<std::chrono::steady_clock::rep> m_writeDeadline{kNoDeadline};
     std::mutex m_leaseMutex;
-    std::vector<std::pair<const void*, std::chrono::steady_clock::rep>> m_leaseDeadlines;
+    std::vector<std::pair<LeaseOwnerId, std::chrono::steady_clock::rep>> m_leaseDeadlines;
 
   public:
     /// <summary>
@@ -47,7 +59,7 @@ class WriteFence {
     /// Publishes the renewal deadline of one lease (`owner` identifies it; empty removes it). A lease must republish
     /// whenever it is acquired, renewed or released, and remove itself before it is destroyed.
     /// </summary>
-    void SetLeaseDeadline(const void* owner, std::optional<std::chrono::steady_clock::time_point> deadline);
+    void SetLeaseDeadline(LeaseOwnerId owner, std::optional<std::chrono::steady_clock::time_point> deadline);
     /// <summary>Time left before mutations must stop; empty when no lease deadline applies.</summary>
     [[nodiscard]] std::optional<std::chrono::steady_clock::duration> TimeRemaining() const;
 };

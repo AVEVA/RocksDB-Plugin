@@ -46,15 +46,15 @@ namespace AVEVA::AzureClient::Tests {
 // Polls an asynchronous condition. The timeout is generous because a healthy run needs a fraction of it; it only
 // bounds how long a failing run takes to report.
 template <typename Predicate>
-[[nodiscard]] bool WaitUntil(Predicate&& done, std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+[[nodiscard]] WaitOutcome WaitUntil(Predicate&& done, std::chrono::milliseconds timeout = DeadlockWatchdog) {
     const auto limit = std::chrono::steady_clock::now() + timeout;
     while (!done()) {
         if (std::chrono::steady_clock::now() >= limit) {
-            return false;
+            return WaitOutcome::TimedOut;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    return true;
+    return WaitOutcome::Done;
 }
 
 // ---- Client option fixtures ----
@@ -86,7 +86,7 @@ inline constexpr std::string_view DefaultETag = "\"0x8D1234\"";
     options.ApiVersion = std::string(DefaultApiVersion);
     // Scripted single-response tests must not consume extra responses through automatic
     // retries; retry behavior is covered explicitly by RetryTests.
-    options.Retry.MaxRetries = 0;
+    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{0U};
     return options;
 }
 
@@ -96,7 +96,7 @@ inline constexpr std::string_view DefaultETag = "\"0x8D1234\"";
     options.ContainerName = std::move(containerName);
     options.SasToken = std::string(DefaultSasToken);
     options.ApiVersion = std::string(DefaultApiVersion);
-    options.Retry.MaxRetries = 0;
+    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{0U};
     return options;
 }
 
@@ -105,28 +105,28 @@ inline constexpr std::string_view DefaultETag = "\"0x8D1234\"";
     options.ServiceEndpoint = ResolveServiceEndpoint();
     options.SasToken = std::string(DefaultSasToken);
     options.ApiVersion = std::string(DefaultApiVersion);
-    options.Retry.MaxRetries = 0;
+    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{0U};
     return options;
 }
 
 [[nodiscard]] inline std::vector<HttpHeader>
 MakeCanonicalSuccessHeaders(std::initializer_list<std::pair<std::string_view, std::string_view>> extraHeaders = {}) {
     std::vector<HttpHeader> headers{
-        HttpHeader{"ETag", std::string(DefaultETag)},
-        HttpHeader{"Last-Modified", std::string(DefaultLastModified)},
-        HttpHeader{"x-ms-request-id", "request-123"},
+        HttpHeader(HeaderName{"ETag"}, HeaderValue{std::string(DefaultETag)}),
+        HttpHeader(HeaderName{"Last-Modified"}, HeaderValue{std::string(DefaultLastModified)}),
+        HttpHeader(HeaderName{"x-ms-request-id"}, HeaderValue{"request-123"}),
     };
     for (const auto& [name, value] : extraHeaders) {
         bool replaced = false;
         for (auto& header : headers) {
             if (header.GetName() == name) {
-                header = HttpHeader{std::string(name), std::string(value)};
+                header = HttpHeader(HeaderName{std::string(name)}, HeaderValue{std::string(value)});
                 replaced = true;
                 break;
             }
         }
         if (!replaced) {
-            headers.emplace_back(std::string(name), std::string(value));
+            headers.emplace_back(HeaderName{std::string(name)}, HeaderValue{std::string(value)});
         }
     }
     return headers;
@@ -136,10 +136,10 @@ MakeCanonicalSuccessHeaders(std::initializer_list<std::pair<std::string_view, st
                                                          std::string_view message, std::string_view requestId) {
     std::vector<HttpHeader> headers;
     if (!errorCode.empty()) {
-        headers.emplace_back("x-ms-error-code", std::string(errorCode));
+        headers.emplace_back(AVEVA::HeaderName{"x-ms-error-code"}, AVEVA::HeaderValue{std::string(errorCode)});
     }
     if (!requestId.empty()) {
-        headers.emplace_back("x-ms-request-id", std::string(requestId));
+        headers.emplace_back(AVEVA::HeaderName{"x-ms-request-id"}, AVEVA::HeaderValue{std::string(requestId)});
     }
 
     const std::string body =
@@ -242,9 +242,9 @@ template <class T>
 // completed: use StartAwaitable for those.
 template <class T>
 T RunAwaitable(FakeHttpClient& httpClient, boost::asio::awaitable<T> awaitable,
-               std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+               std::chrono::milliseconds timeout = DeadlockWatchdog) {
     auto operation = StartAwaitableOn(httpClient.get_executor(), std::move(awaitable));
-    if (!httpClient.RunUntil([&] { return operation.Done(); }, timeout)) {
+    if (httpClient.RunUntil([&] { return operation.Done(); }, timeout) == WaitOutcome::TimedOut) {
         throw std::runtime_error("the awaitable did not complete in time");
     }
     if constexpr (std::is_void_v<T>) {
@@ -256,7 +256,7 @@ T RunAwaitable(FakeHttpClient& httpClient, boost::asio::awaitable<T> awaitable,
 
 template <class T>
 T RunAwaitable(boost::asio::io_context& context, boost::asio::awaitable<T> awaitable,
-               std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+               std::chrono::milliseconds timeout = DeadlockWatchdog) {
     auto operation = StartAwaitableOn(context.get_executor(), std::move(awaitable));
     const auto limit = std::chrono::steady_clock::now() + timeout;
     while (!operation.Done()) {
@@ -264,7 +264,8 @@ T RunAwaitable(boost::asio::io_context& context, boost::asio::awaitable<T> await
             throw std::runtime_error("the awaitable did not complete in time");
         }
         context.restart();
-        context.run_one_for(std::chrono::milliseconds(50));
+        constexpr std::chrono::milliseconds pollSlice{50};
+        context.run_one_for(pollSlice);
     }
     if constexpr (std::is_void_v<T>) {
         operation.Result();
@@ -298,7 +299,7 @@ void Spawn(boost::asio::io_context& context, boost::asio::awaitable<T> awaitable
 
 inline void ExpectOptionalBodyMatches(const HttpRequest& request, std::optional<std::string_view> expectedBody) {
     if (expectedBody.has_value()) {
-        EXPECT_EQ(request.GetBody(), *expectedBody);
+        EXPECT_EQ(FakeHttpClient::BodyAsString(request), *expectedBody);
     }
 }
 
@@ -344,8 +345,8 @@ inline void ExpectRequestContract(const HttpRequest& request, HttpMethod expecte
 
 // Scripts `response` for the request whose Range header is `range`.
 inline void EnqueueForRange(FakeHttpClient& httpClient, std::string range, HttpResponse response,
-                            bool deferred = true) {
-    httpClient.EnqueueResponse(std::move(response), {}, deferred,
+                            Delivery delivery = Delivery::Deferred) {
+    httpClient.EnqueueResponse(std::move(response), {}, delivery,
                                [range = std::move(range)](const FakeHttpClient::RequestRecord& record) {
                                    return FakeHttpClient::FindHeaderValue(record.Request, "Range") == range;
                                });

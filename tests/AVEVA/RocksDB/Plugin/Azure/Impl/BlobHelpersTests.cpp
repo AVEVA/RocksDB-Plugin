@@ -32,6 +32,7 @@ using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
 using AVEVA::RocksDB::Plugin::Azure::RequestFailedException;
 using BlobContainerClient = AVEVA::AzureClient::Tests::BlobContainerClient;
 namespace BlobHelpers = AVEVA::RocksDB::Plugin::Azure::Impl::BlobHelpers;
+namespace Core = AVEVA::RocksDB::Plugin::Core;
 namespace ClientFactory = AVEVA::RocksDB::Plugin::Azure::Impl::ClientFactory;
 
 namespace {
@@ -127,8 +128,11 @@ class ScopedEnv {
 std::vector<const std::type_info*> SourceTypes(const std::optional<std::string>& managedIdentityId) {
     boost::asio::io_context context;
     const auto runtime = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime>(context);
-    const AVEVA::RocksDB::Plugin::Azure::Models::ChainedCredentialInfo info(
-        "db", "https://acct.blob.core.windows.net", "sp", "secret", "tenant", managedIdentityId);
+    namespace Models = AVEVA::RocksDB::Plugin::Azure::Models;
+    const Models::ChainedCredentialInfo info(
+        Models::DbName{"db"}, Models::AccountUrl{"https://acct.blob.core.windows.net"}, Models::ClientId{"sp"},
+        Models::ClientSecret{"secret"}, Models::TenantId{"tenant"},
+        managedIdentityId ? std::optional(Models::ManagedIdentityId{*managedIdentityId}) : std::nullopt);
     std::vector<const std::type_info*> types;
     for (const auto& source : ClientFactory::CreateCredentialSources(runtime, info)) {
         types.push_back(&source->Type());
@@ -176,7 +180,10 @@ TEST(BlobHelpersCredentialLifetimeTests, ServicePrincipalCredentialKeepsHttpClie
     boost::asio::io_context context;
     auto runtime = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime>(context);
     const std::weak_ptr<AVEVA::HttpClient> weak = runtime->SharedHttpClient();
-    auto credential = ClientFactory::CreateClientSecretCredential(runtime, "tenant", "client", "secret");
+    auto credential =
+        ClientFactory::CreateClientSecretCredential(runtime, AVEVA::RocksDB::Plugin::Azure::Models::TenantId{"tenant"},
+                                                    AVEVA::RocksDB::Plugin::Azure::Models::ClientId{"client"},
+                                                    AVEVA::RocksDB::Plugin::Azure::Models::ClientSecret{"secret"});
 
     runtime.reset();
     EXPECT_FALSE(weak.expired());
@@ -222,13 +229,15 @@ TEST(PageRoundingTests, NearInt64Max_RoundDownSucceedsAndRoundUpThrowsInsteadOfO
 }
 
 TEST(RequireFullDownloadTests, RequireFullDownload_MatchingCount_DoesNotThrow) {
-    EXPECT_NO_THROW(BlobHelpers::RequireFullDownload("f", 512, 512, 512));
+    EXPECT_NO_THROW(
+        BlobHelpers::RequireFullDownload("f", Core::ByteOffset{512}, Core::ByteCount{512}, Core::ByteCount{512}));
 }
 
 TEST(RequireFullDownloadTests, RequireFullDownload_ShortOrLongCount_ThrowsWithFileAndRangeContext) {
-    for (const int64_t actual : {int64_t{0}, int64_t{100}, int64_t{600}}) {
+    for (const uint64_t actual : {uint64_t{0}, uint64_t{100}, uint64_t{600}}) {
         try {
-            BlobHelpers::RequireFullDownload("file.sst", 1024, 512, actual);
+            BlobHelpers::RequireFullDownload("file.sst", Core::ByteOffset{1024}, Core::ByteCount{512},
+                                             Core::ByteCount{actual});
             FAIL() << "expected RequestFailedException";
         } catch (const RequestFailedException& e) {
             const std::string what = e.what();

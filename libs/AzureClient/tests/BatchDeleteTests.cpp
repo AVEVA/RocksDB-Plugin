@@ -53,8 +53,18 @@ using AVEVA::AzureClient::Tests::StartAwaitable;
 
 using BatchOutcome = std::expected<Response<DeleteBlobsResult>, BlobStorageError>;
 
+// The service's limit on sub-requests per batch, so these tests can count the batches a delete is split into.
+constexpr std::size_t BatchSize = 256U;
+// Enough blobs for a handful of batches without being a whole number of them.
+constexpr std::size_t FewBlobs = 10U;
+// More batches than any concurrency limit used below.
+constexpr std::size_t ManyBatches = 5U;
+// RFC 2046 limits a multipart boundary to 70 characters.
+constexpr std::size_t OverlongBoundaryLength = 71U;
+constexpr int CancelRaceIterations = 20;
+
 struct PartOutcome {
-    unsigned int Status = 202;
+    AVEVA::HttpStatusCode Status = AVEVA::HttpStatus::Accepted;
     std::string ErrorCode;
 };
 
@@ -68,8 +78,8 @@ BuildBatchResponse(const FakeHttpClient::RequestRecord& record,
     for (std::sregex_iterator it{record.Body.begin(), record.Body.end(), part}, end; it != end; ++it) {
         const PartOutcome outcome = decide((*it)[2].str());
         body += "--batchresponse_test\r\nContent-Type: application/http\r\nContent-ID: " + (*it)[1].str() + "\r\n\r\n";
-        body +=
-            "HTTP/1.1 " + std::to_string(outcome.Status) + " Status\r\nx-ms-request-id: sub-" + (*it)[1].str() + "\r\n";
+        body += "HTTP/1.1 " + std::to_string(outcome.Status.Value()) + " Status\r\nx-ms-request-id: sub-" +
+                (*it)[1].str() + "\r\n";
         if (!outcome.ErrorCode.empty()) {
             body += "x-ms-error-code: " + outcome.ErrorCode + "\r\nContent-Type: application/xml\r\n\r\n<Error><Code>" +
                     outcome.ErrorCode + "</Code><Message>sub failure</Message></Error>";
@@ -77,10 +87,12 @@ BuildBatchResponse(const FakeHttpClient::RequestRecord& record,
         body += "\r\n\r\n";
     }
     body += "--batchresponse_test--\r\n";
-    return {.Response = HttpResponse{
-                AVEVA::HttpStatusCode{202},
-                {{"Content-Type", "multipart/mixed; boundary=batchresponse_test"}, {"x-ms-request-id", "outer-1"}},
-                body}};
+    return {.Response =
+                HttpResponse{::AVEVA::HttpStatus::Accepted,
+                             {AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Type"},
+                                                AVEVA::HeaderValue{"multipart/mixed; boundary=batchresponse_test"}),
+                              AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-request-id"}, AVEVA::HeaderValue{"outer-1"})},
+                             body}};
 }
 
 void RespondToBatches(FakeHttpClient& http, std::function<PartOutcome(const std::string&)> decide = {}) {
@@ -108,7 +120,7 @@ void DeferBatchResponses(FakeHttpClient& http) {
     http.SetResponder([](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
         FakeHttpClient::ScriptedResult result =
             BuildBatchResponse(record, [](const std::string&) { return PartOutcome{}; });
-        result.Deferred = true;
+        result.Delivery = AVEVA::AzureClient::Tests::Delivery::Deferred;
         return result;
     });
 }
@@ -201,7 +213,7 @@ TEST(BatchDeleteTests, SplitsMoreThan256NamesIntoSeveralRequestsAndKeepsOrder) {
     for (std::size_t i = 0; i < 3U; ++i) {
         partCounts.push_back(CountOccurrences(http.RequestAt(i).Body, "DELETE /"));
     }
-    EXPECT_EQ(std::ranges::count(partCounts, 256U), 2);
+    EXPECT_EQ(std::ranges::count(partCounts, BatchSize), 2);
     EXPECT_EQ(std::ranges::count(partCounts, 88U), 1);
 
     const DeleteBlobsResult& result = outcome->Value();
@@ -217,21 +229,21 @@ TEST(BatchDeleteTests, ExactlyOneFullBatchIsASingleRequest) {
     RespondToBatches(http);
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
-    const BatchOutcome outcome = DeleteAll(http, client, MakeNames(256));
+    const BatchOutcome outcome = DeleteAll(http, client, MakeNames(BatchSize));
 
     ASSERT_TRUE(outcome.has_value());
     EXPECT_EQ(http.RequestCount(), 1U);
-    EXPECT_EQ(outcome->Value().Items.size(), 256U);
+    EXPECT_EQ(outcome->Value().Items.size(), BatchSize);
 }
 
 TEST(BatchDeleteTests, ReportsEachBlobOutcomeAndTreatsNotFoundAsAlreadyDeleted) {
     FakeHttpClient http;
     RespondToBatches(http, [](const std::string& url) {
         if (url.contains("missing")) {
-            return PartOutcome{404, "BlobNotFound"};
+            return PartOutcome{AVEVA::HttpStatus::NotFound, "BlobNotFound"};
         }
         if (url.contains("leased")) {
-            return PartOutcome{412, "LeaseIdMissing"};
+            return PartOutcome{AVEVA::HttpStatus::PreconditionFailed, "LeaseIdMissing"};
         }
         return PartOutcome{};
     });
@@ -247,7 +259,7 @@ TEST(BatchDeleteTests, ReportsEachBlobOutcomeAndTreatsNotFoundAsAlreadyDeleted) 
     EXPECT_EQ(result.Items[1].Succeeded(), Completion::Complete);
     EXPECT_EQ(result.Items[1].Prior, PriorState::AlreadyAbsent);
     ASSERT_EQ(result.Items[2].Succeeded(), Completion::Incomplete);
-    EXPECT_EQ(result.Items[2].Error->StatusCode, AVEVA::HttpStatusCode{412});
+    EXPECT_EQ(result.Items[2].Error->StatusCode, ::AVEVA::HttpStatus::PreconditionFailed);
     EXPECT_EQ(result.Items[2].Error->ErrorCode, "LeaseIdMissing");
     EXPECT_EQ(result.Items[2].Error->Code, BlobStorageErrorCode::LeaseIdMissing);
     EXPECT_EQ(result.Items[2].Error->RequestId, "sub-2");
@@ -258,13 +270,16 @@ TEST(BatchDeleteTests, ReportsEachBlobOutcomeAndTreatsNotFoundAsAlreadyDeleted) 
 TEST(BatchDeleteTests, WholeRequestFailureCompletesAsError) {
     FakeHttpClient http;
     http.DefaultResponse() = HttpResponse{
-        AVEVA::HttpStatusCode{403}, {{"x-ms-error-code", "AuthenticationFailed"}, {"x-ms-request-id", "req-9"}}, ""};
+        ::AVEVA::HttpStatus::Forbidden,
+        {AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-error-code"}, AVEVA::HeaderValue{"AuthenticationFailed"}),
+         AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-request-id"}, AVEVA::HeaderValue{"req-9"})},
+        ""};
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
     const BatchOutcome outcome = DeleteAll(http, client, {"a", "b"});
 
     ASSERT_FALSE(outcome.has_value());
-    EXPECT_EQ(outcome.error().StatusCode, AVEVA::HttpStatusCode{403});
+    EXPECT_EQ(outcome.error().StatusCode, ::AVEVA::HttpStatus::Forbidden);
     EXPECT_EQ(outcome.error().Code, BlobStorageErrorCode::AuthenticationFailed);
     EXPECT_EQ(outcome.error().RequestId, "req-9");
 }
@@ -283,11 +298,13 @@ TEST(BatchDeleteTests, TransportFailureCompletesAsError) {
 TEST(BatchDeleteTests, FailedRequestStopsLaterChunksAndReportsTheFirstFailure) {
     FakeHttpClient http;
     http.DefaultResponse() =
-        HttpResponse{AVEVA::HttpStatus::InternalServerError, {{"x-ms-error-code", "InternalError"}}, ""};
+        HttpResponse{AVEVA::HttpStatus::InternalServerError,
+                     {AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-error-code"}, AVEVA::HeaderValue{"InternalError"})},
+                     ""};
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
-    const BatchOutcome outcome =
-        DeleteAll(http, client, MakeNames(600), DeleteBlobsOptions{.MaxConcurrentRequests = 1});
+    const BatchOutcome outcome = DeleteAll(
+        http, client, MakeNames(600), DeleteBlobsOptions{.MaxConcurrentRequests = AVEVA::AzureClient::Concurrency{1U}});
 
     ASSERT_FALSE(outcome.has_value());
     EXPECT_EQ(outcome.error().StatusCode, AVEVA::HttpStatus::InternalServerError);
@@ -300,16 +317,18 @@ TEST(BatchDeleteTests, LimitsRequestsInFlight) {
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
     auto op = StartAwaitable(
-        http, client.DeleteBlobsAsync(MakeNames(256U * 3U), DeleteBlobsOptions{.MaxConcurrentRequests = 2}));
+        http,
+        client.DeleteBlobsAsync(MakeNames(BatchSize * 3U),
+                                DeleteBlobsOptions{.MaxConcurrentRequests = AVEVA::AzureClient::Concurrency{2U}}));
     ASSERT_EQ(http.PendingCount(), 2U);
 
-    ASSERT_TRUE(http.CompleteNext());
+    ASSERT_EQ(http.CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     http.Poll();
     EXPECT_EQ(http.RequestCount(), 3U);
     EXPECT_FALSE(op.Done());
 
     http.CompleteAll();
-    ASSERT_TRUE(http.RunUntil([&] { return op.Done(); }));
+    ASSERT_EQ(http.RunUntil([&] { return op.Done(); }), AVEVA::AzureClient::Tests::WaitOutcome::Done);
     ASSERT_TRUE(op.Result().has_value());
     EXPECT_EQ(op.Result().value().Value().Items.size(), 768U);
 }
@@ -320,16 +339,18 @@ TEST(BatchDeleteTests, CancelAbortsEveryChunkInFlightAndStartsNoMore) {
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
     auto op = StartAwaitable(
-        http, client.DeleteBlobsAsync(MakeNames(256U * 5U), DeleteBlobsOptions{.MaxConcurrentRequests = 2}));
+        http,
+        client.DeleteBlobsAsync(MakeNames(BatchSize * ManyBatches),
+                                DeleteBlobsOptions{.MaxConcurrentRequests = AVEVA::AzureClient::Concurrency{2U}}));
     ASSERT_EQ(http.PendingCount(), 2U);
 
-    ASSERT_TRUE(http.CompleteNext());
+    ASSERT_EQ(http.CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     http.Poll();
     ASSERT_EQ(http.RequestCount(), 3U);
     ASSERT_EQ(http.PendingCount(), 2U);
 
     op.Cancel();
-    ASSERT_TRUE(http.RunUntil([&] { return op.Done(); }));
+    ASSERT_EQ(http.RunUntil([&] { return op.Done(); }), AVEVA::AzureClient::Tests::WaitOutcome::Done);
 
     const auto& outcome = op.Result();
     ASSERT_FALSE(outcome.has_value());
@@ -344,7 +365,9 @@ TEST(BatchDeleteTests, PartialCancellationDoesNotAbortTheBatchButTerminalDoes) {
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
     auto op = StartAwaitable(
-        http, client.DeleteBlobsAsync(MakeNames(256U * 3U), DeleteBlobsOptions{.MaxConcurrentRequests = 1}));
+        http,
+        client.DeleteBlobsAsync(MakeNames(BatchSize * 3U),
+                                DeleteBlobsOptions{.MaxConcurrentRequests = AVEVA::AzureClient::Concurrency{1U}}));
     ASSERT_EQ(http.PendingCount(), 1U);
 
     op.Cancel(boost::asio::cancellation_type::partial);
@@ -352,11 +375,11 @@ TEST(BatchDeleteTests, PartialCancellationDoesNotAbortTheBatchButTerminalDoes) {
     ASSERT_FALSE(op.Done());
     ASSERT_EQ(http.PendingCount(), 1U);
 
-    ASSERT_TRUE(http.CompleteNext());
+    ASSERT_EQ(http.CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     http.Poll();
     ASSERT_EQ(http.RequestCount(), 2U);
     op.Cancel();
-    ASSERT_TRUE(http.RunUntil([&] { return op.Done(); }));
+    ASSERT_EQ(http.RunUntil([&] { return op.Done(); }), AVEVA::AzureClient::Tests::WaitOutcome::Done);
 
     const auto& outcome = op.Result();
     ASSERT_FALSE(outcome.has_value());
@@ -369,28 +392,30 @@ TEST(BatchDeleteTests, PartialCancellationLetsTheBatchSucceed) {
     DeferBatchResponses(http);
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
-    auto op = StartAwaitable(http, client.DeleteBlobsAsync(MakeNames(10U)));
+    auto op = StartAwaitable(http, client.DeleteBlobsAsync(MakeNames(FewBlobs)));
     ASSERT_EQ(http.PendingCount(), 1U);
 
     op.Cancel(boost::asio::cancellation_type::partial);
     http.Poll();
-    ASSERT_TRUE(http.CompleteNext());
-    ASSERT_TRUE(http.RunUntil([&] { return op.Done(); }));
+    ASSERT_EQ(http.CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
+    ASSERT_EQ(http.RunUntil([&] { return op.Done(); }), AVEVA::AzureClient::Tests::WaitOutcome::Done);
 
     ASSERT_TRUE(op.Result().has_value());
-    EXPECT_EQ(op.Result().value().Value().Items.size(), 10U);
+    EXPECT_EQ(op.Result().value().Value().Items.size(), FewBlobs);
 }
 
 TEST(BatchDeleteTests, CancelRightAfterInitiationOfManyChunksAlwaysCompletesCanceled) {
-    for (int iteration = 0; iteration < 20; ++iteration) {
+    for (int iteration = 0; iteration < CancelRaceIterations; ++iteration) {
         FakeHttpClient http;
         DeferBatchResponses(http);
         BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
         auto op = StartAwaitable(
-            http, client.DeleteBlobsAsync(MakeNames(256U * 5U), DeleteBlobsOptions{.MaxConcurrentRequests = 4}));
+            http,
+            client.DeleteBlobsAsync(MakeNames(BatchSize * ManyBatches),
+                                    DeleteBlobsOptions{.MaxConcurrentRequests = AVEVA::AzureClient::Concurrency{4U}}));
         op.Cancel();
-        ASSERT_TRUE(http.RunUntil([&] { return op.Done(); }));
+        ASSERT_EQ(http.RunUntil([&] { return op.Done(); }), AVEVA::AzureClient::Tests::WaitOutcome::Done);
         const auto& outcome = op.Result();
         ASSERT_FALSE(outcome.has_value());
         EXPECT_EQ(outcome.error().Code, std::make_error_code(std::errc::operation_canceled));
@@ -428,8 +453,10 @@ TEST(BatchDeleteTests, MalformedBatchResponseIsAnInvalidResponse) {
     FakeHttpClient http;
     http.SetResponder([](const FakeHttpClient::RequestRecord&) -> std::optional<FakeHttpClient::ScriptedResult> {
         return FakeHttpClient::ScriptedResult{
-            .Response = HttpResponse{
-                AVEVA::HttpStatusCode{202}, {{"Content-Type", "multipart/mixed; boundary=b"}}, "not multipart"}};
+            .Response = HttpResponse{::AVEVA::HttpStatus::Accepted,
+                                     {AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Type"},
+                                                        AVEVA::HeaderValue{"multipart/mixed; boundary=b"})},
+                                     "not multipart"}};
     });
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
@@ -442,11 +469,12 @@ TEST(BatchDeleteTests, MalformedBatchResponseIsAnInvalidResponse) {
 TEST(BatchDeleteTests, ResponseMissingASubrequestIsAnInvalidResponse) {
     FakeHttpClient http;
     http.SetResponder([](const FakeHttpClient::RequestRecord&) -> std::optional<FakeHttpClient::ScriptedResult> {
-        return FakeHttpClient::ScriptedResult{.Response =
-                                                  HttpResponse{AVEVA::HttpStatusCode{202},
-                                                               {{"Content-Type", "multipart/mixed; boundary=b"}},
-                                                               "--b\r\nContent-Type: application/http\r\nContent-ID: "
-                                                               "0\r\n\r\nHTTP/1.1 202 Accepted\r\n\r\n\r\n--b--\r\n"}};
+        return FakeHttpClient::ScriptedResult{
+            .Response = HttpResponse{::AVEVA::HttpStatus::Accepted,
+                                     {AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Type"},
+                                                        AVEVA::HeaderValue{"multipart/mixed; boundary=b"})},
+                                     "--b\r\nContent-Type: application/http\r\nContent-ID: "
+                                     "0\r\n\r\nHTTP/1.1 202 Accepted\r\n\r\n\r\n--b--\r\n"}};
     });
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
@@ -463,8 +491,10 @@ TEST(BatchDeleteTests, RetriedBatchRebuildsSubrequestsWithAFreshToken) {
     http.SetResponder([](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
         if (record.Body.find("token-one") != std::string::npos) {
             return FakeHttpClient::ScriptedResult{
-                .Response =
-                    HttpResponse{AVEVA::HttpStatus::ServiceUnavailable, {{"x-ms-error-code", "ServerBusy"}}, ""}};
+                .Response = HttpResponse{
+                    AVEVA::HttpStatus::ServiceUnavailable,
+                    {AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-error-code"}, AVEVA::HeaderValue{"ServerBusy"})},
+                    ""}};
         }
         return BuildBatchResponse(record, [](const std::string&) { return PartOutcome{}; });
     });
@@ -473,7 +503,7 @@ TEST(BatchDeleteTests, RetriedBatchRebuildsSubrequestsWithAFreshToken) {
     credential->EnqueueImmediate({}, MakeToken("token-two", std::chrono::hours(1)));
     auto options = MakeBlobContainerClientOptions();
     options.SasToken.clear();
-    options.Retry.MaxRetries = 1;
+    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{1U};
     options.Retry.InitialDelay = std::chrono::milliseconds{0};
     AVEVA::AzureClient::BasicBlobContainerClient<FakeHttpClient, ScriptedTokenCredential> client{http, options,
                                                                                                  credential};
@@ -494,7 +524,7 @@ TEST(BatchDeleteTests, AppendBatchDeletePartRejectsUrlsWithoutSchemeOrPath) {
     for (const char* url : {"no-scheme/container/blob", "https://account.blob.core.windows.net"}) {
         AVEVA::HttpRequest subrequest;
         subrequest.SetMethod(HttpMethod::Delete);
-        subrequest.SetUrl(url);
+        subrequest.SetUrl(AVEVA::HttpUrl{url});
         std::string body;
         EXPECT_THROW(AVEVA::AzureClient::Private::AppendBatchDeletePart(body, "b", 0, subrequest),
                      std::invalid_argument)
@@ -504,7 +534,7 @@ TEST(BatchDeleteTests, AppendBatchDeletePartRejectsUrlsWithoutSchemeOrPath) {
 
     AVEVA::HttpRequest valid;
     valid.SetMethod(HttpMethod::Delete);
-    valid.SetUrl("https://account.blob.core.windows.net/container/blob?sig=x");
+    valid.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/container/blob?sig=x"});
     std::string body;
     AVEVA::AzureClient::Private::AppendBatchDeletePart(body, "b", 0, valid);
     EXPECT_NE(body.find("DELETE /container/blob?sig=x HTTP/1.1"), std::string::npos);
@@ -518,7 +548,9 @@ std::string OnePart(const std::string& status, const std::string& closing = "--b
 
 void ExpectBatchRejected(const std::string& body, const std::string& contentType = "multipart/mixed; boundary=b") {
     const std::vector<std::string> names{"a"};
-    const HttpResponse response{AVEVA::HttpStatusCode{202}, {{"Content-Type", contentType}}, body};
+    const HttpResponse response{::AVEVA::HttpStatus::Accepted,
+                                {AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Type"}, AVEVA::HeaderValue{contentType})},
+                                body};
     EXPECT_THROW(static_cast<void>(AVEVA::AzureClient::Private::ParseBatchDeleteResponse(response, names)),
                  std::invalid_argument)
         << body << " / " << contentType;
@@ -540,16 +572,19 @@ TEST(AS_R02_BatchBoundaryTests, ParsesMediaTypeParametersStrictly) {
     const std::vector<std::string> names{"a"};
     const auto parse = [&](const std::string& contentType) {
         return AVEVA::AzureClient::Private::ParseBatchDeleteResponse(
-            HttpResponse{AVEVA::HttpStatusCode{202}, {{"Content-Type", contentType}}, body}, names);
+            HttpResponse{::AVEVA::HttpStatus::Accepted,
+                         {AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Type"}, AVEVA::HeaderValue{contentType})},
+                         body},
+            names);
     };
-    EXPECT_EQ(parse("multipart/mixed; boundary=\"b\"; charset=utf-8").size(), 1U);
-    EXPECT_EQ(parse("multipart/mixed; charset=utf-8; BOUNDARY=b").size(), 1U);
+    EXPECT_EQ(parse("multipart/mixed; boundary=\"b\"; charset=utf-8").value().size(), 1U);
+    EXPECT_EQ(parse("multipart/mixed; charset=utf-8; BOUNDARY=b").value().size(), 1U);
     ExpectBatchRejected(body, "multipart/mixed; xboundary=b");
     ExpectBatchRejected(body, "multipart/mixed; charset=\"boundary=b\"");
     ExpectBatchRejected(body, "multipart/mixed; boundary=");
     ExpectBatchRejected(body, "multipart/mixed; boundary=\"b\"\"");
     ExpectBatchRejected(body, "multipart/mixed; boundary=a@b");
-    ExpectBatchRejected(body, "multipart/mixed; boundary=" + std::string(71, 'b'));
+    ExpectBatchRejected(body, "multipart/mixed; boundary=" + std::string(OverlongBoundaryLength, 'b'));
 }
 
 TEST(AS_R03_BatchClosingDelimiterTests, RequiresALineEndAfterTheClosingDelimiter) {
@@ -557,10 +592,11 @@ TEST(AS_R03_BatchClosingDelimiterTests, RequiresALineEndAfterTheClosingDelimiter
     ExpectBatchRejected(OnePart("HTTP/1.1 202 Accepted", "--b--  x\r\n"));
     const std::vector<std::string> names{"a"};
     for (const char* closing : {"--b--", "--b--\r\n", "--b--  \t\r\n"}) {
-        const HttpResponse response{AVEVA::HttpStatusCode{202},
-                                    {{"Content-Type", "multipart/mixed; boundary=b"}},
-                                    OnePart("HTTP/1.1 202 Accepted", closing)};
-        EXPECT_EQ(AVEVA::AzureClient::Private::ParseBatchDeleteResponse(response, names).size(), 1U) << closing;
+        const HttpResponse response{
+            ::AVEVA::HttpStatus::Accepted,
+            {AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Type"}, AVEVA::HeaderValue{"multipart/mixed; boundary=b"})},
+            OnePart("HTTP/1.1 202 Accepted", closing)};
+        EXPECT_EQ(AVEVA::AzureClient::Private::ParseBatchDeleteResponse(response, names).value().size(), 1U) << closing;
     }
 }
 
@@ -569,8 +605,8 @@ TEST(AS_R05_BatchSubrequestHeaderTests, RejectsLineBreaksInSubrequestHeaders) {
              {"x-ms-a", "v\r\nInjected: 1"}, {"x-ms-a", "v\nx"}, {"x-ms-a\r\nb", "v"}, {"", "v"}, {"a:b", "v"}}) {
         AVEVA::HttpRequest subrequest;
         subrequest.SetMethod(HttpMethod::Delete);
-        subrequest.SetUrl("https://account.blob.core.windows.net/container/blob");
-        subrequest.AddHeader(AVEVA::HttpHeader{name, value});
+        subrequest.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/container/blob"});
+        subrequest.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{name}, AVEVA::HeaderValue{value}));
         std::string body;
         EXPECT_THROW(AVEVA::AzureClient::Private::AppendBatchDeletePart(body, "b", 0, subrequest),
                      std::invalid_argument);
@@ -582,10 +618,40 @@ TEST(AS_R12_BatchBoundaryLineTests, ABoundaryLikeLineInsideAPartBodyIsNotASplitP
     const std::vector<std::string> names{"a"};
     const std::string body = "--b\r\nContent-Type: application/http\r\nContent-ID: 0\r\n\r\nHTTP/1.1 404 Not Found\r\n"
                              "x-ms-error-code: BlobNotFound\r\n\r\nnote --b inline and --bb\r\n--b--\r\n";
-    const HttpResponse response{AVEVA::HttpStatusCode{202}, {{"Content-Type", "multipart/mixed; boundary=b"}}, body};
-    const auto items = AVEVA::AzureClient::Private::ParseBatchDeleteResponse(response, names);
+    const HttpResponse response{
+        ::AVEVA::HttpStatus::Accepted,
+        {AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Type"}, AVEVA::HeaderValue{"multipart/mixed; boundary=b"})},
+        body};
+    const auto items = AVEVA::AzureClient::Private::ParseBatchDeleteResponse(response, names).value();
     ASSERT_EQ(items.size(), 1U);
     EXPECT_EQ(items[0].Prior, PriorState::AlreadyAbsent);
+}
+
+TEST(BatchDeleteTests, ABatchRejectedAsAWholeReportsTheServiceErrorOfItsSingleUnnumberedPart) {
+    // The documented shape of a batch the service rejects as a whole: the batch itself is answered with 202, and its
+    // only part carries no Content-ID and the real error.
+    const std::vector<std::string> names{"a", "b"};
+    const std::string body = "--b\r\nContent-Type: application/http\r\n\r\nHTTP/1.1 400 One of the request inputs is "
+                             "not valid.\r\nx-ms-error-code: InvalidInput\r\nx-ms-request-id: r-batch\r\n"
+                             "Content-Type: application/xml\r\n\r\n<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n"
+                             "<Error><Code>InvalidInput</Code><Message>One of the request inputs is not valid."
+                             "</Message></Error>\r\n--b--\r\n";
+    const HttpResponse response{
+        ::AVEVA::HttpStatus::Accepted,
+        {AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Type"}, AVEVA::HeaderValue{"multipart/mixed; boundary=b"})},
+        body};
+
+    const auto outcome = AVEVA::AzureClient::Private::ParseBatchDeleteResponse(response, names);
+
+    ASSERT_FALSE(outcome.has_value());
+    EXPECT_EQ(outcome.error().Code, make_error_code(AVEVA::AzureClient::BlobStorageErrorCode::ServiceError));
+    EXPECT_EQ(outcome.error().ErrorCode, "InvalidInput");
+    EXPECT_EQ(outcome.error().StatusCode, ::AVEVA::HttpStatus::BadRequest);
+    EXPECT_EQ(outcome.error().RequestId, "r-batch");
+}
+
+TEST(BatchDeleteTests, AnUnnumberedPartWithASuccessStatusIsStillMalformed) {
+    ExpectBatchRejected("--b\r\nContent-Type: application/http\r\n\r\nHTTP/1.1 202 Accepted\r\n\r\n\r\n--b--\r\n");
 }
 
 TEST(BatchDeleteTests, SuccessfulPartsNeedNoHeaderParsingAndFailedPartsKeepTheirErrorDetails) {
@@ -597,9 +663,12 @@ TEST(BatchDeleteTests, SuccessfulPartsNeedNoHeaderParsingAndFailedPartsKeepTheir
         "BlobNotFound\r\n\r\n\r\n"
         "--b\r\nContent-Type: application/http\r\nContent-ID: 2\r\n\r\nHTTP/1.1 403 Forbidden\r\nx-ms-error-code: "
         "AuthorizationFailure\r\nx-ms-request-id: r2\r\n\r\n\r\n--b--\r\n";
-    const HttpResponse response{AVEVA::HttpStatusCode{202}, {{"Content-Type", "multipart/mixed; boundary=b"}}, body};
+    const HttpResponse response{
+        ::AVEVA::HttpStatus::Accepted,
+        {AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Type"}, AVEVA::HeaderValue{"multipart/mixed; boundary=b"})},
+        body};
 
-    const auto items = AVEVA::AzureClient::Private::ParseBatchDeleteResponse(response, names);
+    const auto items = AVEVA::AzureClient::Private::ParseBatchDeleteResponse(response, names).value();
 
     ASSERT_EQ(items.size(), 3U);
     EXPECT_FALSE(items[0].Error.has_value());
@@ -607,7 +676,7 @@ TEST(BatchDeleteTests, SuccessfulPartsNeedNoHeaderParsingAndFailedPartsKeepTheir
     EXPECT_EQ(items[1].Prior, PriorState::AlreadyAbsent);
     EXPECT_FALSE(items[1].Error.has_value());
     ASSERT_TRUE(items[2].Error.has_value());
-    EXPECT_EQ(items[2].Error->StatusCode, AVEVA::HttpStatusCode{403});
+    EXPECT_EQ(items[2].Error->StatusCode, ::AVEVA::HttpStatus::Forbidden);
     EXPECT_EQ(items[2].Error->RequestId, "r2");
 }
 
@@ -617,18 +686,23 @@ TEST(BatchDeleteTests, SequentialBatchesShareOneAggregateDeadline) {
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
     AVEVA::AzureClient::AzureRequestOptions requestOptions;
-    requestOptions.SetTotalDeadline(std::chrono::milliseconds{200});
-    auto op =
-        StartAwaitable(http, client.DeleteBlobsAsync(MakeNames(256U * 3U),
-                                                     DeleteBlobsOptions{.MaxConcurrentRequests = 1}, requestOptions));
+    // Wide margins keep the test stable on a loaded machine: each wait is far inside the budget on its own, and the
+    // two together still overrun it by a clear 200 ms.
+    constexpr std::chrono::milliseconds budget{2000};
+    constexpr std::chrono::milliseconds perBatchWait{1100};
+    requestOptions.SetTotalDeadline(budget);
+    auto op = StartAwaitable(
+        http, client.DeleteBlobsAsync(MakeNames(BatchSize * 3U),
+                                      DeleteBlobsOptions{.MaxConcurrentRequests = AVEVA::AzureClient::Concurrency{1U}},
+                                      requestOptions));
 
-    // Each batch fits the 200 ms budget on its own, but together they overrun it.
     ASSERT_EQ(http.PendingCount(), 1U);
-    std::this_thread::sleep_for(std::chrono::milliseconds{110});
-    ASSERT_TRUE(http.CompleteNext());
-    std::this_thread::sleep_for(std::chrono::milliseconds{110});
+    std::this_thread::sleep_for(perBatchWait);
+    ASSERT_EQ(http.CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
+    std::this_thread::sleep_for(perBatchWait);
     static_cast<void>(http.CompleteNext());
-    ASSERT_TRUE(http.RunUntil([&] { return op.Done() || http.RequestCount() > 2U; }));
+    ASSERT_EQ(http.RunUntil([&] { return op.Done() || http.RequestCount() > 2U; }),
+              AVEVA::AzureClient::Tests::WaitOutcome::Done);
 
     EXPECT_EQ(http.RequestCount(), 2U);
     ASSERT_TRUE(op.Done());
@@ -643,13 +717,15 @@ TEST(BatchDeleteTests, ChildInitiationFailureAfterACompletedChunkCompletesOnceWi
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
     auto op = StartAwaitable(
-        http, client.DeleteBlobsAsync(MakeNames(256U * 3U), DeleteBlobsOptions{.MaxConcurrentRequests = 1}));
+        http,
+        client.DeleteBlobsAsync(MakeNames(BatchSize * 3U),
+                                DeleteBlobsOptions{.MaxConcurrentRequests = AVEVA::AzureClient::Concurrency{1U}}));
     ASSERT_EQ(http.PendingCount(), 1U);
 
     http.FailNextInitiation(std::make_exception_ptr(std::bad_alloc{}));
     // The completion of the first chunk starts the next one; its failure must not escape into the event loop.
     EXPECT_NO_THROW(static_cast<void>(http.CompleteNext()));
-    ASSERT_TRUE(http.RunUntil([&] { return op.Done(); }));
+    ASSERT_EQ(http.RunUntil([&] { return op.Done(); }), AVEVA::AzureClient::Tests::WaitOutcome::Done);
 
     ASSERT_FALSE(op.Result().has_value());
     EXPECT_EQ(http.RequestCount(), 1U);
@@ -662,14 +738,16 @@ TEST(BatchDeleteTests, ChildInitiationFailureCancelsAndDrainsTheChunksAlreadyAdm
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
     auto op = StartAwaitable(
-        http, client.DeleteBlobsAsync(MakeNames(256U * 4U), DeleteBlobsOptions{.MaxConcurrentRequests = 2}));
+        http,
+        client.DeleteBlobsAsync(MakeNames(BatchSize * 4U),
+                                DeleteBlobsOptions{.MaxConcurrentRequests = AVEVA::AzureClient::Concurrency{2U}}));
     ASSERT_EQ(http.PendingCount(), 2U);
 
     http.FailNextInitiation(std::make_exception_ptr(std::bad_alloc{}));
     EXPECT_NO_THROW(static_cast<void>(http.CompleteNext()));
     http.Poll();
     // The first failure cancels the chunk still in flight, and the aggregate returns once it has drained.
-    ASSERT_TRUE(http.RunUntil([&] { return op.Done(); }));
+    ASSERT_EQ(http.RunUntil([&] { return op.Done(); }), AVEVA::AzureClient::Tests::WaitOutcome::Done);
     EXPECT_EQ(http.PendingCount(), 0U);
 
     ASSERT_FALSE(op.Result().has_value());

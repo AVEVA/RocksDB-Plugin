@@ -3,11 +3,14 @@
 
 #pragma once
 
+#include "ConnectionPool.hpp"
+#include "DiagnosticsSink.hpp"
+
 #include <boost/asio/ssl/context.hpp>
 
 #include <openssl/ssl.h>
 
-#include <string>
+#include <memory>
 
 namespace AVEVA {
 class HttpClientOptions;
@@ -15,23 +18,25 @@ class HttpClientOptions;
 
 namespace AVEVA::Private {
 /// <summary>
-/// Applies the requested TLS version and peer-verification settings to a fresh SSL context, and makes it
-/// remember the sessions servers issue so later connections to the same origin can resume them.
+/// Builds the client's SSL context: the requested TLS version and peer-verification settings, and a cache of the
+/// sessions servers issue so later connections to the same origin can resume them. Building the context here, rather
+/// than configuring one handed in, guarantees it has never been used for a connection.
 /// </summary>
-/// <param name="tlsContext">The context to configure; must not have been used for a connection yet.</param>
 /// <param name="options">The TLS version, verification mode, and trust roots to apply.</param>
+/// <param name="diagnostics">Where a session that could not be remembered is reported; null reports nothing.</param>
+/// <returns>The configured context.</returns>
 /// <exception cref="std::runtime_error">The requested TLS version could not be configured.</exception>
 /// <exception cref="boost::system::system_error">A configured CA file, directory or PEM could not be used
 /// (a std::runtime_error as well); reported here so a bad trust setting fails client construction, not the first
 /// request.</exception>
-void ConfigureTlsContext(boost::asio::ssl::context& tlsContext, const HttpClientOptions& options);
+std::shared_ptr<boost::asio::ssl::context> MakeTlsContext(const HttpClientOptions& options,
+                                                          std::shared_ptr<const DiagnosticsSink> diagnostics);
 
 /// <summary>
 /// Called before a client handshake: tags the connection with its origin (so the session the server issues
 /// is filed under it) and offers a remembered session for that origin, which skips the full handshake.
 /// </summary>
 /// <param name="ssl">The connection about to handshake.</param>
-/// <param name="host">The origin's host.</param>
-/// <param name="service">The origin's port or service name.</param>
-void PrepareTlsSessionResumption(SSL* ssl, const std::string& host, const std::string& service);
+/// <param name="origin">The origin the connection is for.</param>
+void PrepareTlsSessionResumption(SSL* ssl, const TlsConnectionKey& origin);
 } // namespace AVEVA::Private

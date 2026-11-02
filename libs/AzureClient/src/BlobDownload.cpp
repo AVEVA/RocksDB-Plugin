@@ -30,7 +30,8 @@ namespace AVEVA::AzureClient::Private::DownloadDetail {
     return MakeClientError(make_error_code(BlobStorageErrorCode::InvalidResponse), std::move(message));
 }
 
-[[nodiscard]] std::optional<BlobStorageError> ToFailure(std::error_code error, const HttpResponse& response) {
+[[nodiscard]] std::optional<BlobStorageError> ToFailure(const std::optional<HttpFailure>& error,
+                                                        const HttpResponse& response) {
     RequestFailure failure = DetermineBlobStorageFailure(error, response);
     if (!failure.Error) {
         return std::nullopt;

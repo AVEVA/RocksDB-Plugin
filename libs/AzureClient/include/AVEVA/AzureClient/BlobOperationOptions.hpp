@@ -6,6 +6,7 @@
 #include <AVEVA/AzureClient/Models/BlobContainerModels.hpp>
 #include <AVEVA/AzureClient/Models/BlobModels.hpp>
 #include <AVEVA/AzureClient/Outcomes.hpp>
+#include <AVEVA/AzureClient/Types.hpp>
 
 #include <boost/asio/thread_pool.hpp>
 
@@ -21,14 +22,10 @@ namespace AVEVA::AzureClient {
 /// </summary>
 struct CreateBlobContainerOptions {
     /// <summary>
-    /// Metadata to set on the new container.
+    /// Metadata to set on the new container. Create Container takes no access conditions, which is what lets
+    /// CreateIfNotExistsAsync read a conflict as "the container exists".
     /// </summary>
     Models::MetadataMap Metadata;
-
-    /// <summary>
-    /// Access conditions the request must satisfy.
-    /// </summary>
-    Models::BlobRequestConditions Conditions;
 };
 
 /// <summary>
@@ -137,9 +134,9 @@ struct DeleteBlobOptions {
 struct DeleteBlobsOptions {
     /// <summary>
     /// Blob Batch requests (up to 256 deletes each) allowed in flight at once when more than 256 names
-    /// are given. Values below 1 are treated as 1.
+    /// are given.
     /// </summary>
-    std::size_t MaxConcurrentRequests = 4;
+    AzureClient::Concurrency MaxConcurrentRequests{4};
 };
 
 /// <summary>
@@ -178,13 +175,6 @@ struct DownloadBlobOptions {
     /// is already buffered by the transport; no later chunk is requested. Unset applies no limit.
     /// </summary>
     std::optional<std::uint64_t> MaxSize;
-
-    /// <summary>
-    /// Where file downloads run their blocking filesystem calls. Unset uses the transport's
-    /// <c>GetDownloadWriter()</c> when it has one (::AVEVA::HttpClient does not, so callers supply a scheduler);
-    /// otherwise the download fails with <c>operation_not_supported</c>.
-    /// </summary>
-    std::optional<DownloadWriteScheduler> WriteScheduler;
 };
 
 /// <summary>
@@ -193,11 +183,11 @@ struct DownloadBlobOptions {
 inline constexpr std::size_t DefaultChunkSize = Private::BlobTransferLimits::DefaultDownloadChunkSize; // 4 MiB
 
 /// <summary>
-/// Chunked download options. The first request is a ranged GET of <c>ChunkSize</c> bytes that also learns
-/// the blob's size and ETag; the remaining bytes are fetched in <c>ChunkSize</c> ranges with up to
-/// <c>Concurrency</c> requests in flight and written to the destination strictly in order (no seeking), so
-/// peak buffered memory is about <c>Concurrency * ChunkSize</c>. Every chunk after the first sends
-/// If-Match: &lt;first ETag&gt; (unless <c>Conditions.IfMatch</c> is set), so a concurrent overwrite fails with
+/// Options for downloading a blob to a file. Chunked download options. The first request is a ranged GET of
+/// <c>ChunkSize</c> bytes that also learns the blob's size and ETag; the remaining bytes are fetched in
+/// <c>ChunkSize</c> ranges with up to <c>Concurrency</c> requests in flight and written to the destination strictly in
+/// order (no seeking), so peak buffered memory is about <c>Concurrency * ChunkSize</c>. Every chunk after the first
+/// sends If-Match: &lt;first ETag&gt; (unless <c>Conditions.IfMatch</c> is set), so a concurrent overwrite fails with
 /// <c>ConditionNotMet</c> instead of producing a torn result. Each request's response-body limit is raised
 /// to at least <c>ChunkSize</c> plus a small margin.
 /// </summary>
@@ -213,14 +203,14 @@ struct DownloadToOptions {
     Models::BlobRequestConditions Conditions;
 
     /// <summary>
-    /// The size of each ranged request, in bytes; 0 selects the default (4 MiB); no upper bound.
+    /// The size of each ranged request, in bytes; no upper bound.
     /// </summary>
-    std::size_t ChunkSize = DefaultChunkSize;
+    AzureClient::ChunkSize ChunkSize{DefaultChunkSize};
 
     /// <summary>
-    /// Count of concurrent chunk requests; 0 is treated as 1; no upper bound.
+    /// Count of concurrent chunk requests; no upper bound.
     /// </summary>
-    std::size_t Concurrency = 1;
+    AzureClient::Concurrency Concurrency{1};
 
     /// <summary>
     /// Largest output accepted; a bigger blob (or range) fails with <c>std::errc::file_too_large</c> before the
@@ -267,9 +257,9 @@ struct AcquireLeaseOptions {
     std::string ProposedLeaseId;
 
     /// <summary>
-    /// <c>std::nullopt</c> acquires an infinite lease; otherwise 15 to 60 seconds (validated client-side).
+    /// <c>std::nullopt</c> acquires an infinite lease.
     /// </summary>
-    std::optional<std::chrono::seconds> Duration;
+    std::optional<LeaseDuration> Duration;
 };
 
 /// <summary>

@@ -3,6 +3,10 @@
 
 #pragma once
 
+#include "DiagnosticsSink.hpp"
+
+#include "AVEVA/HttpClient/Units.hpp"
+
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/awaitable.hpp>
@@ -67,8 +71,11 @@ class OriginGate : public std::enable_shared_from_this<OriginGate> {
 
     /// <param name="executor">The executor waiting requests are resumed on.</param>
     /// <param name="limit">How many requests may hold a slot for one origin at a time; at least one.</param>
-    OriginGate(boost::asio::any_io_executor executor, std::size_t limit)
-        : m_executor(std::move(executor)), m_limit(std::max<std::size_t>(limit, 1)) {}
+    /// <param name="diagnostics">Where a waiter that could not be woken is reported; null reports nothing.</param>
+    OriginGate(boost::asio::any_io_executor executor, ConnectionCount limit,
+               std::shared_ptr<const DiagnosticsSink> diagnostics)
+        : m_executor(std::move(executor)), m_limit(std::max<std::size_t>(limit.Value(), 1)),
+          m_diagnostics(std::move(diagnostics)) {}
 
     /// <summary>
     /// Waits for a slot on an origin. Waiting is cancellable; the time spent counts against whatever deadline the
@@ -115,7 +122,7 @@ class OriginGate : public std::enable_shared_from_this<OriginGate> {
             const std::scoped_lock lock(m_mutex);
             handover = waiter->handover;
             if (handover == Handover::Waiting) {
-                Forget(origin, waiter);
+                Forget(lock, origin, waiter);
             }
         }
         if (handover == Handover::HandedOver) {
@@ -131,20 +138,21 @@ class OriginGate : public std::enable_shared_from_this<OriginGate> {
     }
 
     /// <summary>
-    /// Fails every request still waiting and every later <see cref="Acquire"/>. Slots already held stay valid.
+    /// Fails every request still waiting and every later <see cref="Acquire"/>. Slots already held stay valid; giving
+    /// one back after this finds no origin state and does nothing. The whole table is swapped out rather than copied
+    /// so closing never allocates and so cannot fail.
     /// </summary>
-    void Close() {
-        std::deque<std::shared_ptr<Waiter>> abandoned;
+    void Close() noexcept {
+        OriginTable abandoned;
         {
             const std::scoped_lock lock(m_mutex);
             m_lifecycle = Lifecycle::Closed;
-            for (auto& [origin, state] : m_origins) {
-                abandoned.insert(abandoned.end(), state.queue.begin(), state.queue.end());
-                state.queue.clear();
-            }
+            abandoned.swap(m_origins);
         }
-        for (const auto& waiter : abandoned) {
-            Wake(*waiter, std::make_error_code(std::errc::operation_canceled));
+        for (const auto& [origin, state] : abandoned) {
+            for (const auto& waiter : state.queue) {
+                Wake(*waiter, std::make_error_code(std::errc::operation_canceled));
+            }
         }
     }
 
@@ -163,9 +171,10 @@ class OriginGate : public std::enable_shared_from_this<OriginGate> {
         std::size_t active = 0;
         std::deque<std::shared_ptr<Waiter>> queue;
     };
+    using OriginTable = std::unordered_map<std::string, OriginState>;
 
-    // Callers hold m_mutex.
-    void Forget(const std::string& origin, const std::shared_ptr<Waiter>& waiter) {
+    void Forget(const std::scoped_lock<std::mutex>& /*heldMutex*/, const std::string& origin,
+                const std::shared_ptr<Waiter>& waiter) {
         const auto it = m_origins.find(origin);
         if (it == m_origins.end()) {
             return;
@@ -199,23 +208,32 @@ class OriginGate : public std::enable_shared_from_this<OriginGate> {
         Wake(*next, {});
     }
 
-    static void Wake(Waiter& waiter, boost::system::error_code outcome) noexcept {
+    /// <summary>
+    /// Hands a waiter its outcome. If posting the wake-up fails (out of memory), closing the channel still wakes it,
+    /// with an error; only if that fails too is it left to its own deadline. Either failure is reported.
+    /// </summary>
+    void Wake(Waiter& waiter, boost::system::error_code outcome) const noexcept {
         try {
             waiter.signal.try_send(outcome);
-        } catch (...) {
-            // Out of memory while posting the wake-up: closing the channel still wakes the waiter, with an error.
-            try {
-                waiter.signal.close();
-            } catch (...) {
-            }
+            return;
+        } catch (const std::exception& failure) {
+            DiagnosticsSink::Report(m_diagnostics, HttpDiagnosticKind::SwallowedException, HttpRequestPhase::Queued, {},
+                                    {}, {}, failure.what());
+        }
+        try {
+            waiter.signal.close();
+        } catch (const std::exception& failure) {
+            DiagnosticsSink::Report(m_diagnostics, HttpDiagnosticKind::SwallowedException, HttpRequestPhase::Queued, {},
+                                    {}, {}, failure.what());
         }
     }
 
     boost::asio::any_io_executor m_executor;
     std::size_t m_limit;
+    std::shared_ptr<const DiagnosticsSink> m_diagnostics;
     std::mutex m_mutex;
     enum class Lifecycle : std::uint8_t { Open, Closed };
     Lifecycle m_lifecycle = Lifecycle::Open;
-    std::unordered_map<std::string, OriginState> m_origins;
+    OriginTable m_origins;
 };
 } // namespace AVEVA::Private

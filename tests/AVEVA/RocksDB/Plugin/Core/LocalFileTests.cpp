@@ -21,7 +21,7 @@ TEST(LocalFileTests, Read_FileThatCouldNotBeOpened_Throws) {
     LocalFile file(std::filesystem::path("this-file-does-not-exist.bin"));
     char buffer[4];
 
-    EXPECT_THROW((void)file.Read(buffer, ByteOffset{}, ByteCount{4}), std::runtime_error);
+    EXPECT_THROW((void)file.Read(buffer, ByteOffset{}), std::runtime_error);
 }
 
 TEST(LocalFileTests, Read_ReturnsTheBytesAtTheOffset) {
@@ -34,11 +34,11 @@ TEST(LocalFileTests, Read_ReturnsTheBytesAtTheOffset) {
         LocalFile file(path);
         char buffer[3] = {};
 
-        EXPECT_EQ(ByteCount{3}, file.Read(buffer, ByteOffset{2}, ByteCount{3}));
+        EXPECT_EQ(ByteCount{3}, file.Read(buffer, ByteOffset{2}));
         EXPECT_EQ(std::string(buffer, 3), "cde");
         // A short read at the end of the file still leaves the handle usable.
-        EXPECT_EQ(ByteCount{1}, file.Read(buffer, ByteOffset{5}, ByteCount{3}));
-        EXPECT_EQ(ByteCount{3}, file.Read(buffer, ByteOffset{}, ByteCount{3}));
+        EXPECT_EQ(ByteCount{1}, file.Read(buffer, ByteOffset{5}));
+        EXPECT_EQ(ByteCount{3}, file.Read(buffer, ByteOffset{}));
     }
     std::filesystem::remove(path);
 }
@@ -63,8 +63,7 @@ TEST(LocalFileTests, Read_ConcurrentReadsOfDisjointRanges_ReturnTheirOwnBytes) {
             threads.emplace_back([&, t] {
                 std::string buffer(kChunk, '\0');
                 for (int i = 0; i < 200; ++i) {
-                    if (file.Read(buffer.data(), ByteOffset{static_cast<uint64_t>(t) * kChunk}, ByteCount{kChunk}) !=
-                            ByteCount{kChunk} ||
+                    if (file.Read(buffer, ByteOffset{static_cast<uint64_t>(t) * kChunk}) != ByteCount{kChunk} ||
                         buffer != std::string(kChunk, static_cast<char>('a' + t))) {
                         ++failures;
                     }

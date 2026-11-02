@@ -76,15 +76,15 @@ template <typename TBlob> class BasicWriteableFileImpl {
 
     // Size and capacity of the blob when the caller already knows them, which saves two GetProperties round trips.
     struct BlobState {
-        int64_t Size;
-        int64_t Capacity;
+        Core::ByteCount Size;
+        Core::ByteCount Capacity;
     };
 
     BasicWriteableFileImpl(
         std::string_view name, std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TBlob> blob,
         std::shared_ptr<Core::FileCache> fileCache,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-        Core::ByteCount bufferSize = Configuration::PageBlob::DefaultBufferSize);
+        Core::ByteCount bufferSize = Defaults::DataFileBufferSize);
     BasicWriteableFileImpl(
         std::string_view name, std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TBlob> blob,
         std::shared_ptr<Core::FileCache> fileCache,
@@ -114,7 +114,8 @@ template <typename TBlob> class BasicWriteableFileImpl {
     void RangeSync();
     void Sync();
     [[nodiscard]] int64_t GetFileSize() const noexcept;
-    [[nodiscard]] int64_t GetUniqueId(char* id, int64_t maxIdSize) const noexcept;
+    // Copies as much of the name as fits into `id` and returns how many bytes it wrote.
+    [[nodiscard]] std::size_t GetUniqueId(std::span<char> id) const noexcept;
 
   private:
     // Copies as much of `data` as fits while a page of space remains and returns what is left.

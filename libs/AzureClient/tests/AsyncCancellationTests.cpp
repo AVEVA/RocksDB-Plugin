@@ -17,7 +17,7 @@ using AVEVA::AzureClient::Tests::StartAwaitableOn;
 // a credential that would have completed immediately must not lead to a request.
 TEST(AsyncBehaviorTests, CancellingAnAwaitedOperationCancelsTheInFlightRequest) {
     FakeHttpClient httpClient;
-    httpClient.DeferByDefault() = true;
+    httpClient.DefaultDelivery() = AVEVA::AzureClient::Tests::Delivery::Deferred;
     BlobClient client{httpClient, MakeBlobClientOptions()};
 
     auto operation = StartAwaitable(httpClient, client.DeleteAsync());
@@ -56,14 +56,14 @@ TEST(AsyncBehaviorTests, CancellationDuringTokenAcquisitionCompletesPromptlyAndN
     ASSERT_FALSE(operation.Result().has_value());
     EXPECT_TRUE(IsCanceled(operation.Result().error()));
 
-    EXPECT_FALSE(credential->CompleteNext());
+    EXPECT_EQ(credential->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::NothingPending);
     httpClient.Poll();
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 
 TEST(AsyncBehaviorTests, MidFlightCancellationWorksForContainerClients) {
     FakeHttpClient httpClient;
-    httpClient.DeferByDefault() = true;
+    httpClient.DefaultDelivery() = AVEVA::AzureClient::Tests::Delivery::Deferred;
     BlobContainerClient client{httpClient, MakeBlobContainerClientOptions()};
 
     auto operation = StartAwaitable(httpClient, client.CreateIfNotExistsAsync());
@@ -81,7 +81,7 @@ TEST(AsyncBehaviorTests, MidFlightCancellationWorksForContainerClients) {
 // library clearing the slot when the operation finishes.
 TEST(AsyncBehaviorTests, CancellationEmittedFromTheExecutorCancelsTheOperation) {
     FakeHttpClient httpClient;
-    httpClient.DeferByDefault() = true;
+    httpClient.DefaultDelivery() = AVEVA::AzureClient::Tests::Delivery::Deferred;
     BlobClient client{httpClient, MakeBlobClientOptions()};
 
     auto operation = StartAwaitable(httpClient, client.DeleteAsync());

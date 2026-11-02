@@ -54,7 +54,7 @@ TEST(LruFileIndexTests, ReserveCapacity_EvictsOthersNotTheReservedKeyAndReleases
 
     ASSERT_TRUE(evicted.has_value());
     ASSERT_EQ(1U, evicted->size());
-    EXPECT_NE(std::string::npos, evicted->front().first.find('b'));
+    EXPECT_NE(std::string::npos, evicted->front().OriginalPath.Value().find('b'));
     EXPECT_EQ(60U, index.GetUsage().Value());
     EXPECT_EQ(1U, index.SetCapacity(ByteCount{}).size());
 }
@@ -178,7 +178,7 @@ TEST(LruFileIndexTests, EvictionSkipsPinnedTailAndKeepsLruOrder) {
     const auto evicted = index.SetCapacity(ByteCount{kPinned});
 
     ASSERT_EQ(kFree, evicted.size());
-    EXPECT_NE(std::string::npos, evicted.front().first.find("f0"));
+    EXPECT_NE(std::string::npos, evicted.front().OriginalPath.Value().find("f0"));
     EXPECT_EQ(kPinned, index.GetUsage().Value());
 }
 
@@ -200,6 +200,6 @@ TEST(LruFileIndexTests, SingleVictimEvictionDoesNotAllocateInProportionToIndexSi
     g_failAllocationsAtLeast = 0;
 
     ASSERT_EQ(1U, evicted.size());
-    EXPECT_NE(std::string::npos, evicted.front().first.find("e0"));
+    EXPECT_NE(std::string::npos, evicted.front().OriginalPath.Value().find("e0"));
     EXPECT_EQ(kEntries, index.GetUsage().Value());
 }

@@ -25,7 +25,7 @@ void ReportLoggerFailure(auto& logger, const char* operation, const char* what) 
 
 void Logger::Logv(const rocksdb::InfoLogLevel log_level, const char* format, va_list ap) {
     try {
-        m_logger->Logv(static_cast<int>(log_level), format, ap);
+        m_logger->Logv(log_level, format, ap);
     } catch (const std::exception& ex) {
         ReportLoggerFailure(*m_diagnostics, "Logv", ex.what());
     } catch (...) {

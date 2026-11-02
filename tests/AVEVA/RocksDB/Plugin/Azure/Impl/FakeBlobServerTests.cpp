@@ -12,6 +12,7 @@
 #include <chrono>
 #include <future>
 #include <memory>
+#include <string>
 #include <vector>
 
 using AVEVA::RocksDB::Plugin::Azure::Impl::Block;
@@ -29,9 +30,10 @@ class FakeBlobServerTests : public ::testing::Test {
 
     // The blob's transport is driven by the environment's pump thread, so results travel through a future.
     std::future<unsigned int> Upload(const int64_t offset, const char fill) {
-        auto payload = std::make_shared<const std::vector<char>>(static_cast<size_t>(Page), fill);
-        auto result = Spawn(m_env.Client->get_executor(),
-                            m_env.Client->UploadPagesAsync(static_cast<uint64_t>(offset), std::move(payload)));
+        auto result =
+            Spawn(m_env.Client->get_executor(),
+                  m_env.Client->UploadPagesAsync(AVEVA::AzureClient::PageOffset{static_cast<uint64_t>(offset)},
+                                                 AVEVA::HttpBody{std::string(static_cast<size_t>(Page), fill)}));
         return std::async(std::launch::deferred, [result = std::move(result)]() mutable {
             const auto outcome = result.get();
             return outcome ? Ok : outcome.error().StatusCode.Value();
@@ -87,7 +89,7 @@ TEST_F(FakeBlobServerTests, ShrinkingTheBlob_DropsRangesBeyondTheNewEnd) {
 TEST_F(FakeBlobServerTests, ReleasedLease_CannotBeRenewedWithTheOldIdAfterANewAcquire) {
     AVEVA::AzureClient::AcquireLeaseOptions acquire;
     acquire.ProposedLeaseId = "first";
-    acquire.Duration = std::chrono::seconds(60);
+    acquire.Duration = AVEVA::AzureClient::LeaseDuration{std::chrono::seconds(60)};
     ASSERT_EQ(Ok, Status(m_env.Client->AcquireLeaseAsync(acquire)));
 
     AVEVA::AzureClient::ReleaseLeaseOptions release;
@@ -108,11 +110,12 @@ TEST_F(FakeBlobServerTests, ReleasedLease_CannotBeRenewedWithTheOldIdAfterANewAc
 TEST_F(FakeBlobServerTests, LeasedBlob_RejectsDeleteAndResizeWithoutTheLeaseId) {
     AVEVA::AzureClient::AcquireLeaseOptions acquire;
     acquire.ProposedLeaseId = "held";
-    acquire.Duration = std::chrono::seconds(60);
+    acquire.Duration = AVEVA::AzureClient::LeaseDuration{std::chrono::seconds(60)};
     ASSERT_EQ(Ok, Status(m_env.Client->AcquireLeaseAsync(acquire)));
 
     EXPECT_EQ(412U, Status(m_env.Client->DeleteAsync()));
-    EXPECT_EQ(412U, Status(m_env.Client->ResizeAsync(2 * Page)));
+    EXPECT_EQ(412U,
+              Status(m_env.Client->ResizeAsync(AVEVA::AzureClient::PageBlobSize{static_cast<uint64_t>(2 * Page)})));
 
     AVEVA::AzureClient::DeleteBlobOptions withLease;
     withLease.Conditions.LeaseId = "held";
@@ -124,11 +127,12 @@ TEST_F(FakeBlobServerTests, LeaseLapsedByTheInjectedClock_NoLongerFencesWrites) 
     m_env.Blob->SetClock([now] { return now->load(); });
     AVEVA::AzureClient::AcquireLeaseOptions acquire;
     acquire.ProposedLeaseId = "held";
-    acquire.Duration = std::chrono::seconds(15);
+    acquire.Duration = AVEVA::AzureClient::LeaseDuration{std::chrono::seconds(15)};
     ASSERT_EQ(Ok, Status(m_env.Client->AcquireLeaseAsync(acquire)));
-    ASSERT_EQ(412U, Status(m_env.Client->ResizeAsync(2 * Page)));
+    ASSERT_EQ(412U,
+              Status(m_env.Client->ResizeAsync(AVEVA::AzureClient::PageBlobSize{static_cast<uint64_t>(2 * Page)})));
 
     now->store(now->load() + std::chrono::seconds(16));
 
-    EXPECT_EQ(Ok, Status(m_env.Client->ResizeAsync(2 * Page)));
+    EXPECT_EQ(Ok, Status(m_env.Client->ResizeAsync(AVEVA::AzureClient::PageBlobSize{static_cast<uint64_t>(2 * Page)})));
 }

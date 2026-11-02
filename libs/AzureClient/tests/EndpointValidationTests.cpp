@@ -22,7 +22,8 @@ TEST(T07_ValidateEndpointTests, PathStyleServiceEndpoint_AppendsAccountPath) {
     opts.ContainerName = "mycontainer";
     opts.BlobName = "path/to/blob.txt";
 
-    const std::string url = BuildBlobUrl(opts);
+    const std::string url =
+        BuildBlobUrl(AVEVA::AzureClient::Private::MakeBlobTarget(opts, AVEVA::AzureClient::CredentialPresence::Absent));
     // Expect the account path preserved before container/blob
     EXPECT_NE(url.find("/devstoreaccount1/mycontainer/path/to/blob.txt"), std::string::npos);
 }

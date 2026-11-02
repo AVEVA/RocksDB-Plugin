@@ -51,26 +51,22 @@ struct Route {
     /// Parses and validates the request's URL.
     /// </summary>
     /// <param name="request">The request whose URL to parse.</param>
-    /// <param name="options">The options the request is validated against.</param>
     /// <returns>The route; <c>Parsed</c> is false when the URL is not valid.</returns>
-    static Route Of(const HttpRequest& request, const HttpRequestOptions& options) {
+    static Route Of(const HttpRequest& request) {
         Route route;
         const auto parsed = urls::parse_uri(request.GetUrl());
         if (!parsed) {
             return route;
         }
         route.Parsed = UrlParse::Parsed;
-        route.Error = ValidateRequest(request, options, *parsed);
+        route.Error = ValidateRequest(request, *parsed);
         route.Tls = parsed->scheme_id() == urls::scheme::https ? Transport::Tls : Transport::Plain;
         // Scheme and DNS host names are case-insensitive, so they are folded here: the pool, limiter, DNS cache and TLS
         // session keys are all derived from them and must not split one origin into several.
         route.Host = parsed->host_address();
+        // host_address() never brackets an IPv6 literal, which is what the resolver and TLS IP check want.
         if (parsed->host_type() == urls::host_type::ipv6) {
-            const auto bracketed = route.Host.starts_with('[') ? std::string_view("[") : std::string_view();
             route.Host = parsed->host_ipv6_address().to_string();
-            if (!bracketed.empty()) {
-                route.Host = '[' + route.Host + ']';
-            }
         } else if (parsed->host_type() == urls::host_type::ipv4) {
             route.Host = parsed->host_ipv4_address().to_string();
         } else if (parsed->host_type() == urls::host_type::name) {

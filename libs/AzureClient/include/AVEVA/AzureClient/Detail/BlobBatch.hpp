@@ -31,6 +31,7 @@
 #include <cstddef>
 #include <exception>
 #include <expected>
+#include <gsl/pointers>
 #include <gsl/util>
 #include <memory>
 #include <optional>
@@ -69,12 +70,14 @@ void AppendBatchClosingBoundary(std::string& body, std::string_view boundary);
 /// </summary>
 /// <param name="response">The response to the batch request.</param>
 /// <param name="names">The blob names that were deleted, in Content-ID order.</param>
-/// <returns>One result per name, in the order of <paramref name="names"/>.</returns>
+/// <returns>One result per name, in the order of <paramref name="names"/>; or, when the service rejected the batch as
+/// a whole (a single part without a Content-ID carrying an error status), that error mapped like any failed
+/// response.</returns>
 /// <exception cref="std::invalid_argument">
 /// Thrown when the response is not a well-formed multipart/mixed answer to every sub-request.
 /// </exception>
-[[nodiscard]] std::vector<Models::DeleteBlobItemResult> ParseBatchDeleteResponse(const HttpResponse& response,
-                                                                                 std::span<const std::string> names);
+[[nodiscard]] std::expected<std::vector<Models::DeleteBlobItemResult>, BlobStorageError>
+ParseBatchDeleteResponse(const HttpResponse& response, std::span<const std::string> names);
 
 namespace BatchDetail {
 /// <summary>Thrown by a worker once the failure is recorded, so the parallel group cancels its siblings.</summary>
@@ -82,23 +85,28 @@ struct StopWorkers {};
 
 /// <summary>
 /// The state shared by the workers of one batch delete. Workers run on one strand, so none of it needs a lock; the
-/// owning coroutine outlives every worker because it awaits the whole group.
+/// owning coroutine outlives every worker because it awaits the whole group. The run owns the names and shares the
+/// target and the HTTP client's owner, so nothing it uses depends on the client that started it.
 /// </summary>
 /// <typeparam name="THttp">The HTTP client type the batch requests are sent through.</typeparam>
 /// <typeparam name="TCred">The credential type the container target authorizes with.</typeparam>
 template <HttpClientLike THttp, TokenCredentialLike TCred> class BatchDeleteRun {
   public:
-    /// <summary>Prepares the run; the arguments are borrowed and must outlive it.</summary>
-    /// <param name="httpClient">The HTTP client to send the batch requests through.</param>
+    /// <summary>Prepares the run.</summary>
+    /// <param name="httpClient">The HTTP client to send the batch requests through; kept alive by
+    /// <paramref name="httpOwner"/> when that is set, otherwise by the caller.</param>
+    /// <param name="httpOwner">The shared owner of the HTTP client; null when it is only borrowed.</param>
     /// <param name="target">The container the blobs are deleted from.</param>
     /// <param name="names">The blob names to delete.</param>
     /// <param name="requestOptions">The options every batch request starts from; their total deadline is the budget of
     /// the whole run.</param>
-    BatchDeleteRun(THttp& httpClient, const BasicContainerTarget<TCred>& target, const std::vector<std::string>& names,
-                   const AzureRequestOptions& requestOptions)
-        : m_httpClient(httpClient), m_target(target), m_names(names), m_requestOptions(requestOptions),
-          m_deadline(requestOptions), m_auth(MakeRequestAuth(*target.Connection, PresenceOf(target.Credential))) {
-        m_items.resize(names.size());
+    BatchDeleteRun(THttp& httpClient, std::shared_ptr<THttp> httpOwner,
+                   gsl::not_null<std::shared_ptr<const BasicContainerTarget<TCred>>> target,
+                   std::vector<std::string> names, AzureRequestOptions requestOptions)
+        : m_httpClient(&httpClient), m_httpOwner(std::move(httpOwner)), m_target(std::move(target)),
+          m_names(std::move(names)), m_requestOptions(std::move(requestOptions)), m_deadline(m_requestOptions),
+          m_auth(MakeRequestAuth(*m_target->Connection, PresenceOf(m_target->Credential))) {
+        m_items.resize(m_names.size());
     }
 
     /// <summary>Counts the batch requests needed to cover every name.</summary>
@@ -185,15 +193,15 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BatchDeleteRun 
     /// afterwards.</param>
     /// <returns>The complete multipart body.</returns>
     /// <exception cref="std::invalid_argument">Thrown when a sub-request is     rejected by
-        /// <see cref="AppendBatchDeletePart"/>.</exception>
+    /// <see cref="AppendBatchDeletePart"/>.</exception>
     [[nodiscard]] std::string BuildChunkBody(std::size_t begin, std::size_t end, const std::string& boundary,
                                              std::string_view token, std::vector<std::string>& urls) const {
         if (urls.size() != end - begin) {
             urls.clear();
             urls.reserve(end - begin);
             for (std::size_t index = begin; index < end; ++index) {
-                urls.push_back(
-                    BuildBlobUrl(MakeBlobTarget(m_target.Connection, m_target.ContainerName, m_names[index])));
+                urls.push_back(BuildBlobUrl(MakeBlobTarget(
+                    m_target->Connection, ContainerNameText{m_target->ContainerName}, BlobNameText{m_names[index]})));
             }
         }
         // One date per body: sub-requests are built within the same instant, well inside the allowed clock skew.
@@ -208,7 +216,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BatchDeleteRun 
         for (std::size_t index = begin; index < end; ++index) {
             HttpRequest subrequest;
             subrequest.SetMethod(HttpMethod::Delete);
-            subrequest.SetUrl(urls[index - begin]);
+            subrequest.SetUrl(AVEVA::HttpUrl{urls[index - begin]});
             AddHeader(subrequest, XMsDateHeaderName, date);
             AuthorizeSubrequest(subrequest, token);
             AddHeader(subrequest, ContentLengthHeaderName, std::string_view{"0"});
@@ -233,7 +241,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BatchDeleteRun 
         std::string boundary;
         try {
             boundary = "batch_" + CreateClientRequestId();
-            request = BuildContainerRequest(m_target, HttpMethod::Post, "comp=batch");
+            request = BuildContainerRequest(*m_target, HttpMethod::Post, "comp=batch");
             AddHeader(request, ContentTypeHeaderName, "multipart/mixed; boundary=" + boundary);
         } catch (...) {
             Fail(MakeFailureFromCurrentException());
@@ -251,29 +259,34 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BatchDeleteRun 
         // The bearer token for each attempt comes from the pipeline's rebuild hook, so a retry never replays stale
         // sub-request dates, signatures or tokens.
         std::vector<std::string> urls;
-        HttpResult sent =
-            co_await SendAuthorizedRequest(m_httpClient, m_target, std::move(request), std::move(chunkOptions),
-                                           [&](HttpRequest& attempt, std::string_view token) {
-                                               attempt.SetBody(BuildChunkBody(begin, end, boundary, token, urls));
-                                           });
+        HttpResult sent = co_await SendAuthorizedRequest(
+            *m_httpClient, *m_target, std::move(request), std::move(chunkOptions),
+            [&](HttpRequest& attempt, std::string_view token) {
+                attempt.SetBody(AVEVA::HttpBody{BuildChunkBody(begin, end, boundary, token, urls)});
+            });
 
         const std::span<const std::string> names = std::span{m_names}.subspan(begin, end - begin);
-        auto outcome = ParseOutcome<std::vector<Models::DeleteBlobItemResult>>(
+        auto outcome = ParseOutcome<std::expected<std::vector<Models::DeleteBlobItemResult>, BlobStorageError>>(
             std::move(sent),
             [names](const HttpResponse& response) { return ParseBatchDeleteResponse(response, names); });
         if (!outcome) {
             Fail(std::move(outcome).error());
             throw StopWorkers{};
         }
-        std::ranges::move(outcome->Value(), m_items.begin() + gsl::narrow_cast<std::ptrdiff_t>(begin));
+        if (!outcome->Value().has_value()) {
+            Fail(std::move(outcome->Value()).error());
+            throw StopWorkers{};
+        }
+        std::ranges::move(*outcome->Value(), m_items.begin() + gsl::narrow_cast<std::ptrdiff_t>(begin));
         if (!m_rawResponse.has_value()) {
             m_rawResponse = std::move(*outcome).RawResponse();
         }
     }
 
-    THttp& m_httpClient;
-    const BasicContainerTarget<TCred>& m_target;
-    const std::vector<std::string>& m_names;
+    gsl::not_null<THttp*> m_httpClient;
+    std::shared_ptr<THttp> m_httpOwner;
+    gsl::not_null<std::shared_ptr<const BasicContainerTarget<TCred>>> m_target;
+    std::vector<std::string> m_names;
     AzureRequestOptions m_requestOptions;
     AggregateDeadline m_deadline;
     RequestAuth m_auth;
@@ -296,6 +309,8 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BatchDeleteRun 
 /// <typeparam name="THttp">The HTTP client type the batch requests are sent through.</typeparam>
 /// <typeparam name="TCred">The credential type the container target authorizes with.</typeparam>
 /// <param name="httpClient">The HTTP client to send the batch requests through.</param>
+/// <param name="httpOwner">The shared owner of <paramref name="httpClient"/>, held for the whole call; null when the
+/// caller keeps the HTTP client alive.</param>
 /// <param name="target">The container the blobs are deleted from.</param>
 /// <param name="blobNames">The names of the blobs to delete.</param>
 /// <param name="options">The operation options; <c>MaxConcurrentRequests</c> bounds the parallel batch
@@ -305,7 +320,8 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BatchDeleteRun 
 /// <returns>The per-blob results, or the first failure; failures are returned rather than thrown.</returns>
 template <HttpClientLike THttp, TokenCredentialLike TCred>
 boost::asio::awaitable<std::expected<Response<Models::DeleteBlobsResult>, BlobStorageError>>
-DeleteBlobsAsync(THttp& httpClient, std::shared_ptr<const BasicContainerTarget<TCred>> target,
+DeleteBlobsAsync(THttp& httpClient, std::shared_ptr<THttp> httpOwner,
+                 gsl::not_null<std::shared_ptr<const BasicContainerTarget<TCred>>> target,
                  std::vector<std::string> blobNames, DeleteBlobsOptions options, AzureRequestOptions requestOptions) {
     using Result = std::expected<Response<Models::DeleteBlobsResult>, BlobStorageError>;
     if (blobNames.empty()) {
@@ -319,8 +335,9 @@ DeleteBlobsAsync(THttp& httpClient, std::shared_ptr<const BasicContainerTarget<T
 
     const auto executor = co_await boost::asio::this_coro::executor;
 
-    BatchDetail::BatchDeleteRun<THttp, TCred> run(httpClient, *target, blobNames, requestOptions);
-    const std::size_t workers = std::min(std::max<std::size_t>(1U, options.MaxConcurrentRequests), run.ChunkCount());
+    BatchDetail::BatchDeleteRun<THttp, TCred> run(httpClient, std::move(httpOwner), std::move(target),
+                                                  std::move(blobNames), std::move(requestOptions));
+    const std::size_t workers = std::min(options.MaxConcurrentRequests.Value(), run.ChunkCount());
     const auto strand = boost::asio::make_strand(executor);
     using Op = decltype(boost::asio::co_spawn(strand, run.Worker(), boost::asio::deferred));
     std::vector<Op> operations;

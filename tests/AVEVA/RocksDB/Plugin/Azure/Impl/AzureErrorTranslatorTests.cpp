@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ErrorTransience.hpp"
 
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 #include <AVEVA/HttpClient/HttpClientError.hpp>
@@ -25,7 +26,13 @@ namespace {
 using ::AVEVA::AzureClient::Transience;
 
 RequestFailedException Failure(unsigned int status, std::string errorCode = "SomeCode", std::error_code code = {}) {
-    return RequestFailedException(HttpStatusCode{status}, std::move(errorCode), "boom", "req-1", code);
+    return RequestFailedException(HttpStatusCode{status}, ServiceErrorCode{std::move(errorCode)}, ErrorMessage{"boom"},
+                                  ServiceRequestId{"req-1"}, code);
+}
+
+rocksdb::IOStatus Translate(const std::exception_ptr& error) {
+    boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level> logger;
+    return AzureErrorTranslator::FromException(logger, error, "Test");
 }
 } // namespace
 
@@ -108,7 +115,7 @@ TEST(AzureErrorTranslatorTests, PermanentHttpClientErrorsAreNonRetryable) {
          {AVEVA::HttpClientError::InvalidUrl, AVEVA::HttpClientError::InvalidRequest, AVEVA::HttpClientError::TlsFailed,
           AVEVA::HttpClientError::ResponseTooLarge, AVEVA::HttpClientError::ProtocolError}) {
         const std::error_code code = error;
-        EXPECT_EQ(AzureErrorTranslator::TransienceOf(Failure(0, "", code)), Transience::Permanent) << code.message();
+        EXPECT_EQ(Impl::TransienceOf(Failure(0, "", code)), Transience::Permanent) << code.message();
         EXPECT_FALSE(AzureErrorTranslator::IOStatusFromError(Failure(0, "", code)).GetRetryable()) << code.message();
     }
 }
@@ -117,7 +124,7 @@ TEST(AzureErrorTranslatorTests, TransientHttpClientErrorsAreRetryable) {
     for (auto error : {AVEVA::HttpClientError::ResolveFailed, AVEVA::HttpClientError::ConnectFailed,
                        AVEVA::HttpClientError::WriteFailed, AVEVA::HttpClientError::ReadFailed}) {
         const std::error_code code = error;
-        EXPECT_EQ(AzureErrorTranslator::TransienceOf(Failure(0, "", code)), Transience::Transient) << code.message();
+        EXPECT_EQ(Impl::TransienceOf(Failure(0, "", code)), Transience::Transient) << code.message();
     }
 }
 
@@ -126,7 +133,7 @@ TEST(AzureErrorTranslatorTests, TransportCancellationIsNonRetryableAborted) {
     auto status = AzureErrorTranslator::IOStatusFromError(Failure(0, "", code));
     EXPECT_TRUE(status.IsAborted());
     EXPECT_FALSE(status.GetRetryable());
-    EXPECT_EQ(AzureErrorTranslator::TransienceOf(Failure(0, "", code)), Transience::Permanent);
+    EXPECT_EQ(Impl::TransienceOf(Failure(0, "", code)), Transience::Permanent);
 }
 
 TEST(AzureErrorTranslatorTests, ConnectionFailureIsRetryableIOError) {
@@ -159,7 +166,7 @@ TEST(AzureErrorTranslatorTests, RejectedCredentialsWithoutStatusAreNonRetryable)
     EXPECT_TRUE(status.IsIOError());
     EXPECT_FALSE(status.GetRetryable());
     EXPECT_NE(status.ToString().find("Authentication failed"), std::string::npos);
-    EXPECT_EQ(AzureErrorTranslator::TransienceOf(Failure(0, "", std::make_error_code(std::errc::permission_denied))),
+    EXPECT_EQ(Impl::TransienceOf(Failure(0, "", std::make_error_code(std::errc::permission_denied))),
               Transience::Permanent);
 }
 
@@ -171,11 +178,11 @@ TEST(AzureErrorTranslatorTests, StatusTextIncludesCodeAndMessage) {
 
 TEST(AzureErrorTranslatorTests, TransientClassification) {
     for (unsigned int code : {408u, 429u, 500u, 502u, 503u, 504u}) {
-        EXPECT_EQ(AzureErrorTranslator::TransienceOf(Failure(code)), Transience::Transient) << code;
+        EXPECT_EQ(Impl::TransienceOf(Failure(code)), Transience::Transient) << code;
     }
 
     for (unsigned int code : {0u, 400u, 401u, 403u, 404u, 409u, 412u, 501u, 505u, 507u}) {
-        EXPECT_EQ(AzureErrorTranslator::TransienceOf(Failure(code)), Transience::Permanent) << code;
+        EXPECT_EQ(Impl::TransienceOf(Failure(code)), Transience::Permanent) << code;
     }
 }
 
@@ -286,7 +293,7 @@ TEST(AzureErrorTranslatorTests, LeaseLossOf_MatchesEveryLeaseCodeAndNoOtherCateg
 }
 
 TEST(AzureErrorTranslatorTests, WritesFencedExceptionIsIOFenced) {
-    const auto status = AzureErrorTranslator::FromException(std::make_exception_ptr(WritesFencedException("fenced")));
+    const auto status = Translate(std::make_exception_ptr(WritesFencedException("fenced")));
     EXPECT_TRUE(status.IsIOFenced());
     EXPECT_FALSE(status.GetRetryable());
 }
@@ -298,7 +305,7 @@ TEST(AzureErrorTranslatorTests, FencedExceptionRaisedFromAFilesystemOperationIsI
         try {
             throw WritesFencedException("Unable to ensure safe database access");
         } catch (...) {
-            return AzureErrorTranslator::FromCurrentException(logger, "NewWritableFile");
+            return AzureErrorTranslator::FromException(logger, std::current_exception(), "NewWritableFile");
         }
     }();
     EXPECT_TRUE(status.IsIOFenced());
@@ -310,20 +317,27 @@ TEST(AzureErrorTranslatorTests, InvalidArgumentExceptionIsInvalidArgument) {
         try {
             throw std::invalid_argument("range is out of bounds");
         } catch (...) {
-            return AzureErrorTranslator::FromCurrentException(logger, "Read");
+            return AzureErrorTranslator::FromException(logger, std::current_exception(), "Read");
         }
     }();
     EXPECT_TRUE(status.IsInvalidArgument());
-    EXPECT_TRUE(
-        AzureErrorTranslator::FromException(std::make_exception_ptr(std::invalid_argument("x"))).IsInvalidArgument());
+    EXPECT_TRUE(Translate(std::make_exception_ptr(std::invalid_argument("x"))).IsInvalidArgument());
 }
+
+TEST(AzureErrorTranslatorTests, BlockingOnIoThreadIsInvalidArgument) {
+    const auto status = Translate(std::make_exception_ptr(BlockingOnIoThreadException("blocked on io thread")));
+    EXPECT_TRUE(status.IsInvalidArgument());
+    EXPECT_FALSE(status.GetRetryable());
+}
+
+TEST(AzureErrorTranslatorTests, EmptyExceptionPointerIsIOError) { EXPECT_TRUE(Translate(nullptr).IsIOError()); }
 
 TEST(AzureErrorTranslatorTests, SystemErrorCancellationIsAborted) {
     boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level> logger;
     const auto cancelled =
         std::make_exception_ptr(std::system_error(std::make_error_code(std::errc::operation_canceled)));
     EXPECT_TRUE(AzureErrorTranslator::FromException(logger, cancelled, "Read").IsAborted());
-    EXPECT_TRUE(AzureErrorTranslator::FromException(cancelled).IsAborted());
+    EXPECT_TRUE(Translate(cancelled).IsAborted());
     const auto other = std::make_exception_ptr(std::system_error(std::make_error_code(std::errc::io_error)));
     EXPECT_TRUE(AzureErrorTranslator::FromException(logger, other, "Read").IsIOError());
 }
@@ -469,7 +483,7 @@ TEST(AzureErrorTranslatorTests, RawSystemErrorsMatchTheWrappedClassification) {
     for (const std::error_code code :
          {std::error_code{std::make_error_code(std::errc::timed_out)}, std::error_code{HttpClientError::TimedOut}}) {
         const auto wrapped = AzureErrorTranslator::IOStatusFromError(Failure(0, "", code));
-        const auto raw = AzureErrorTranslator::FromException(std::make_exception_ptr(std::system_error(code, "ctx")));
+        const auto raw = Translate(std::make_exception_ptr(std::system_error(code, "ctx")));
         EXPECT_TRUE(raw.IsTimedOut()) << code.message();
         EXPECT_TRUE(raw.GetRetryable()) << code.message();
         EXPECT_EQ(raw.IsTimedOut(), wrapped.IsTimedOut());
@@ -480,12 +494,12 @@ TEST(AzureErrorTranslatorTests, RawSystemErrorsMatchTheWrappedClassification) {
     for (const std::error_code code :
          {std::error_code{HttpClientError::InvalidUrl}, std::error_code{HttpClientError::InvalidRequest},
           std::error_code{std::make_error_code(std::errc::invalid_argument)}}) {
-        const auto raw = AzureErrorTranslator::FromException(std::make_exception_ptr(std::system_error(code, "ctx")));
+        const auto raw = Translate(std::make_exception_ptr(std::system_error(code, "ctx")));
         EXPECT_TRUE(raw.IsInvalidArgument()) << code.message();
         EXPECT_FALSE(raw.GetRetryable()) << code.message();
     }
 
-    const auto cancelled = AzureErrorTranslator::FromException(
+    const auto cancelled = Translate(
         std::make_exception_ptr(std::system_error(std::make_error_code(std::errc::operation_canceled), "ctx")));
     EXPECT_TRUE(cancelled.IsAborted());
     EXPECT_FALSE(cancelled.GetRetryable());

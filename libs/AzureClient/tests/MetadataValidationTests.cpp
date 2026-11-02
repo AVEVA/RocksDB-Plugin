@@ -90,7 +90,8 @@ TEST(MetadataValidationTests, ValidationAppliesToPageBlobAndContainerCreate) {
 
     CreatePageBlobOptions uploadOptions;
     uploadOptions.Metadata.emplace("bad-name", "v");
-    const auto uploadResult = RunAwaitable(httpClient, pageBlob.CreateAsync(512U, std::move(uploadOptions)));
+    const auto uploadResult = RunAwaitable(
+        httpClient, pageBlob.CreateAsync(AVEVA::AzureClient::PageBlobSize{512U}, std::move(uploadOptions)));
     const std::error_code uploadError = uploadResult.has_value() ? std::error_code{} : uploadResult.error().Code;
 
     CreateBlobContainerOptions createOptions;

@@ -17,7 +17,7 @@ using AVEVA::AzureClient::Tests::Spawn;
 
 TEST(AsyncBehaviorTests, AwaitableRunsAfterItsClientWasMovedFromAndDestroyed) {
     FakeHttpClient httpClient;
-    httpClient.DeferByDefault() = true;
+    httpClient.DefaultDelivery() = AVEVA::AzureClient::Tests::Delivery::Deferred;
 
     auto client = std::make_unique<BlobClient>(httpClient, MakeBlobClientOptions());
     auto operation = client->DeleteAsync();
@@ -26,7 +26,7 @@ TEST(AsyncBehaviorTests, AwaitableRunsAfterItsClientWasMovedFromAndDestroyed) {
 
     auto started = StartAwaitable(httpClient, std::move(operation));
     ASSERT_EQ(httpClient.PendingCount(), 1U);
-    ASSERT_TRUE(httpClient.CompleteNext());
+    ASSERT_EQ(httpClient.CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     httpClient.Poll();
     ASSERT_TRUE(started.Done());
     EXPECT_TRUE(started.Result().has_value());
@@ -34,7 +34,7 @@ TEST(AsyncBehaviorTests, AwaitableRunsAfterItsClientWasMovedFromAndDestroyed) {
 
 TEST(AsyncBehaviorTests, ContainerAwaitableRunsAfterItsClientWasDestroyed) {
     FakeHttpClient httpClient;
-    httpClient.DeferByDefault() = true;
+    httpClient.DefaultDelivery() = AVEVA::AzureClient::Tests::Delivery::Deferred;
 
     auto client = std::make_unique<BlobContainerClient>(httpClient, MakeBlobContainerClientOptions());
     auto operation = client->CreateIfNotExistsAsync();
@@ -42,14 +42,14 @@ TEST(AsyncBehaviorTests, ContainerAwaitableRunsAfterItsClientWasDestroyed) {
 
     auto started = StartAwaitable(httpClient, std::move(operation));
     ASSERT_EQ(httpClient.PendingCount(), 1U);
-    ASSERT_TRUE(httpClient.CompleteNext());
+    ASSERT_EQ(httpClient.CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     httpClient.Poll();
     EXPECT_TRUE(started.Done());
 }
 
 TEST(AsyncBehaviorTests, BlobClientCanBeDestroyedAfterRequestIsInFlight) {
     FakeHttpClient httpClient;
-    httpClient.DeferByDefault() = true;
+    httpClient.DefaultDelivery() = AVEVA::AzureClient::Tests::Delivery::Deferred;
 
     std::optional<Operation<DeleteResult>> operation;
     {
@@ -58,7 +58,7 @@ TEST(AsyncBehaviorTests, BlobClientCanBeDestroyedAfterRequestIsInFlight) {
     }
 
     EXPECT_EQ(httpClient.PendingCount(), 1U);
-    EXPECT_TRUE(httpClient.CompleteNext());
+    EXPECT_EQ(httpClient.CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     httpClient.Poll();
     ASSERT_TRUE(operation->Done());
     EXPECT_TRUE(operation->Result().has_value());
@@ -66,7 +66,7 @@ TEST(AsyncBehaviorTests, BlobClientCanBeDestroyedAfterRequestIsInFlight) {
 
 TEST(AsyncBehaviorTests, PageBlobClientCanBeDestroyedAfterRequestIsInFlight) {
     FakeHttpClient httpClient;
-    httpClient.DeferByDefault() = true;
+    httpClient.DefaultDelivery() = AVEVA::AzureClient::Tests::Delivery::Deferred;
 
     std::optional<Operation<DeleteResult>> operation;
     {
@@ -75,7 +75,7 @@ TEST(AsyncBehaviorTests, PageBlobClientCanBeDestroyedAfterRequestIsInFlight) {
     }
 
     EXPECT_EQ(httpClient.PendingCount(), 1U);
-    EXPECT_TRUE(httpClient.CompleteNext());
+    EXPECT_EQ(httpClient.CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     httpClient.Poll();
     ASSERT_TRUE(operation->Done());
     EXPECT_TRUE(operation->Result().has_value());
@@ -83,7 +83,7 @@ TEST(AsyncBehaviorTests, PageBlobClientCanBeDestroyedAfterRequestIsInFlight) {
 
 TEST(AsyncBehaviorTests, TokenCredentialRequestCanDestroyClientAfterRequestIsSent) {
     FakeHttpClient httpClient;
-    httpClient.DeferByDefault() = true;
+    httpClient.DefaultDelivery() = AVEVA::AzureClient::Tests::Delivery::Deferred;
 
     auto tokenCredential = std::make_shared<ScriptedTokenCredential>();
     tokenCredential->EnqueueDeferred({}, MakeToken("token-value", std::chrono::hours(1)));
@@ -96,14 +96,14 @@ TEST(AsyncBehaviorTests, TokenCredentialRequestCanDestroyClientAfterRequestIsSen
     EXPECT_EQ(tokenCredential->PendingCount(), 1U);
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 
-    EXPECT_TRUE(tokenCredential->CompleteNext());
+    EXPECT_EQ(tokenCredential->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     httpClient.Poll();
     ASSERT_EQ(httpClient.RequestCount(), 1U);
     EXPECT_EQ(httpClient.PendingCount(), 1U);
 
     client.reset();
 
-    EXPECT_TRUE(httpClient.CompleteNext());
+    EXPECT_EQ(httpClient.CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     httpClient.Poll();
     ASSERT_TRUE(operation.Done());
     EXPECT_TRUE(operation.Result().has_value());
@@ -111,7 +111,7 @@ TEST(AsyncBehaviorTests, TokenCredentialRequestCanDestroyClientAfterRequestIsSen
 
 TEST(AsyncBehaviorTests, CompletionHandlerCanDestroyClientAfterCompletionBegins) {
     FakeHttpClient httpClient;
-    httpClient.DeferByDefault() = true;
+    httpClient.DefaultDelivery() = AVEVA::AzureClient::Tests::Delivery::Deferred;
 
     auto client = std::make_unique<BlobClient>(httpClient, MakeBlobClientOptions());
     bool invoked = false;
@@ -122,7 +122,7 @@ TEST(AsyncBehaviorTests, CompletionHandlerCanDestroyClientAfterCompletionBegins)
     });
     httpClient.Poll();
 
-    EXPECT_TRUE(httpClient.CompleteNext());
+    EXPECT_EQ(httpClient.CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     httpClient.Poll();
     EXPECT_TRUE(invoked);
     EXPECT_EQ(client, nullptr);
@@ -134,7 +134,7 @@ TEST(AsyncBehaviorTests, CompletionHandlerCanDestroyClientAfterCompletionBegins)
 TEST(AsyncBehaviorTests, DestroyingTheIoContextWithPendingWorkReleasesTheHandlerWithoutInvokingIt) {
     auto context = std::make_unique<boost::asio::io_context>();
     auto httpClient = std::make_unique<FakeHttpClient>(*context);
-    httpClient->DeferByDefault() = true;
+    httpClient->DefaultDelivery() = AVEVA::AzureClient::Tests::Delivery::Deferred;
     auto client = std::make_unique<BlobClient>(*httpClient, MakeBlobClientOptions());
 
     auto sentinel = std::make_shared<int>(0);

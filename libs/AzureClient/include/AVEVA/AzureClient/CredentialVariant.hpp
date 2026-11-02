@@ -48,13 +48,20 @@ template <class... TCreds> class CredentialVariant {
     /// <param name="scopes">The scopes the token must cover.</param>
     /// <returns>The held credential's result.</returns>
     [[nodiscard]] boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> scopes) {
-        // Visiting inside the coroutine keeps the held credential (a shared_ptr copy) alive across suspension.
-        co_return co_await std::visit(
-            [&](const auto& credential) -> boost::asio::awaitable<TokenResult> {
-                const auto held = credential;
-                co_return co_await held->GetTokenAsync(std::move(scopes));
-            },
-            m_value);
+        // Visited eagerly so the lazy coroutine owns a copy of the held credential and never reads this variant.
+        return std::visit([&scopes](const auto& credential) { return Forward(credential, std::move(scopes)); },
+                          m_value);
+    }
+
+  private:
+    /// <summary>Keeps <paramref name="credential"/> alive until its request completes.</summary>
+    /// <typeparam name="T">The held credential type.</typeparam>
+    /// <param name="credential">The credential to ask.</param>
+    /// <param name="scopes">The scopes the token must cover.</param>
+    /// <returns>The credential's result.</returns>
+    template <class T>
+    static boost::asio::awaitable<TokenResult> Forward(std::shared_ptr<T> credential, std::vector<std::string> scopes) {
+        co_return co_await credential->GetTokenAsync(std::move(scopes));
     }
 };
 } // namespace AVEVA::AzureClient

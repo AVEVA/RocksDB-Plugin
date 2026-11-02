@@ -4,6 +4,7 @@
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntimeTransport.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/TokenCredentials.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Models/ChainedCredentialInfo.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Models/ServicePrincipalStorageInfo.hpp"
@@ -26,8 +27,9 @@ template <AzureClient::HttpClientLike THttp>
 std::shared_ptr<BasicPluginCredential<THttp>> MakePluginCredential(BasicSourceCredential<THttp> source);
 template <AzureClient::HttpClientLike THttp>
 std::shared_ptr<BasicPluginCredential<THttp>>
-CreateClientSecretCredential(const std::shared_ptr<BasicClientRuntime<THttp>>& runtime, const std::string& tenantId,
-                             const std::string& clientId, const std::string& clientSecret);
+CreateClientSecretCredential(const std::shared_ptr<BasicClientRuntime<THttp>>& runtime,
+                             const Models::TenantId& tenantId, const Models::ClientId& clientId,
+                             const Models::ClientSecret& clientSecret);
 template <AzureClient::HttpClientLike THttp>
 std::shared_ptr<BasicPluginCredential<THttp>>
 CreatePipelinesCredential(const std::shared_ptr<BasicClientRuntime<THttp>>& runtime, const std::string& tenantId,
@@ -51,19 +53,8 @@ BlobServiceClientOn<THttp> CreateServiceClient(const std::shared_ptr<BasicClient
                                                const Models::ChainedCredentialInfo& servicePrincipal);
 template <AzureClient::HttpClientLike THttp>
 BlobServiceClientOn<THttp> CreateSharedKeyServiceClient(const std::shared_ptr<BasicClientRuntime<THttp>>& runtime,
-                                                        const std::string& storageAccountUrl,
-                                                        const std::string& storageAccountKey);
-template <AzureClient::HttpClientLike THttp>
-BlobServiceClientOn<THttp> CreateClientSecretServiceClient(const std::shared_ptr<BasicClientRuntime<THttp>>& runtime,
-                                                           const std::string& storageAccountUrl,
-                                                           const std::string& tenantId, const std::string& clientId,
-                                                           const std::string& clientSecret);
-template <AzureClient::HttpClientLike THttp>
-BlobServiceClientOn<THttp> CreatePipelinesServiceClient(const std::shared_ptr<BasicClientRuntime<THttp>>& runtime,
-                                                        const std::string& storageAccountUrl,
-                                                        const std::string& tenantId, const std::string& clientId,
-                                                        const std::string& serviceConnectionId,
-                                                        const std::string& systemAccessToken);
+                                                        const Models::AccountUrl& storageAccountUrl,
+                                                        const StorageAccountKey& storageAccountKey);
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl::ClientFactory
 
 // The production instantiations are compiled once, in ClientFactory.cpp, so that every file that builds a filesystem
@@ -71,8 +62,8 @@ BlobServiceClientOn<THttp> CreatePipelinesServiceClient(const std::shared_ptr<Ba
 namespace AVEVA::RocksDB::Plugin::Azure::Impl::ClientFactory {
 extern template std::shared_ptr<PluginCredential> MakePluginCredential<::AVEVA::HttpClient>(SourceCredential);
 extern template std::shared_ptr<PluginCredential>
-CreateClientSecretCredential<::AVEVA::HttpClient>(const std::shared_ptr<ClientRuntime>&, const std::string&,
-                                                  const std::string&, const std::string&);
+CreateClientSecretCredential<::AVEVA::HttpClient>(const std::shared_ptr<ClientRuntime>&, const Models::TenantId&,
+                                                  const Models::ClientId&, const Models::ClientSecret&);
 extern template std::shared_ptr<PluginCredential>
 CreatePipelinesCredential<::AVEVA::HttpClient>(const std::shared_ptr<ClientRuntime>&, const std::string&,
                                                const std::string&, const std::string&, const std::string&);
@@ -87,13 +78,6 @@ extern template BlobServiceClient CreateServiceClient<::AVEVA::HttpClient>(const
 extern template BlobServiceClient CreateServiceClient<::AVEVA::HttpClient>(const std::shared_ptr<ClientRuntime>&,
                                                                            const Models::ChainedCredentialInfo&);
 extern template BlobServiceClient
-CreateSharedKeyServiceClient<::AVEVA::HttpClient>(const std::shared_ptr<ClientRuntime>&, const std::string&,
-                                                  const std::string&);
-extern template BlobServiceClient
-CreateClientSecretServiceClient<::AVEVA::HttpClient>(const std::shared_ptr<ClientRuntime>&, const std::string&,
-                                                     const std::string&, const std::string&, const std::string&);
-extern template BlobServiceClient
-CreatePipelinesServiceClient<::AVEVA::HttpClient>(const std::shared_ptr<ClientRuntime>&, const std::string&,
-                                                  const std::string&, const std::string&, const std::string&,
-                                                  const std::string&);
+CreateSharedKeyServiceClient<::AVEVA::HttpClient>(const std::shared_ptr<ClientRuntime>&, const Models::AccountUrl&,
+                                                  const StorageAccountKey&);
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl::ClientFactory

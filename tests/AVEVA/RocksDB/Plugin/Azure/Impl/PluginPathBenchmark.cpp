@@ -390,8 +390,9 @@ TEST_F(PluginPathBenchmark, PrefetchHit4MiB) {
 // Append 4 KiB then Sync, repeatedly: the small durable-write pattern of a WAL.
 TEST_F(PluginPathBenchmark, SmallAppendSync4KiB) {
     m_env.Blob->SetCapacity(64 * MiB);
-    FakeWriteableFileImpl file{"bench.log", m_env.Runtime, m_env.Client,
-                               nullptr,     m_logger,      Configuration::PageBlob::DefaultBufferSize};
+    FakeWriteableFileImpl file{"bench.log",  m_env.Runtime,
+                               m_env.Client, nullptr,
+                               m_logger,     ::AVEVA::RocksDB::Plugin::Azure::Defaults::DataFileBufferSize};
     const std::vector<char> record(4096, 'w');
     constexpr int operations = 64;
     PrintEnvironmentOnce();

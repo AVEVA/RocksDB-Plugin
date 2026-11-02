@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/HandleFactory.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LoggerImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Logger.hpp"
 
@@ -16,6 +17,11 @@ using AVEVA::RocksDB::Plugin::Azure::Impl::LoggerImpl;
 using AVEVA::RocksDB::Plugin::Azure::Impl::LogSink;
 
 namespace {
+std::unique_ptr<AVEVA::RocksDB::Plugin::Azure::Logger> MakeLogger(LoggerImpl&& impl) {
+    return AVEVA::RocksDB::Plugin::Azure::Impl::HandleFactory::Create<AVEVA::RocksDB::Plugin::Azure::Logger>(
+        std::move(impl));
+}
+
 // Records every Append as a separate entry; the sleep widens the race window if the logger is not serialised.
 class RecordingSink final : public LogSink {
   public:
@@ -68,7 +74,8 @@ TEST(LoggerTests, ConcurrentLogv_EveryLineIsIntact) {
     for (int t = 0; t < kThreads; ++t) {
         threads.emplace_back([&logger, t] {
             for (int i = 0; i < kLinesPerThread; ++i) {
-                logger.Logv(1, " thread=%d line=%d payload=%s\n", t, i, "abcdefghijklmnopqrstuvwxyz");
+                logger.Logv(rocksdb::InfoLogLevel::INFO_LEVEL, " thread=%d line=%d payload=%s\n", t, i,
+                            "abcdefghijklmnopqrstuvwxyz");
             }
         });
     }
@@ -104,7 +111,8 @@ TEST(LoggerTests, Logger_SinkThrows_DoesNotEscape) {
     auto sink = std::make_unique<RecordingSink>();
     sink->throwOnAppend = true;
     sink->throwOnSync = true;
-    AVEVA::RocksDB::Plugin::Azure::Logger logger(LoggerImpl(std::move(sink), 0));
+    const auto owned = MakeLogger(LoggerImpl(std::move(sink)));
+    auto& logger = *owned;
 
     // Act / Assert
     const auto logv = [&logger](const char* format, ...) {
@@ -122,7 +130,8 @@ TEST(LoggerTests, Close_ClosesTheSinkOnce) {
     auto sink = std::make_unique<RecordingSink>();
     sink->closeCount = &closeCount;
     {
-        AVEVA::RocksDB::Plugin::Azure::Logger logger(LoggerImpl(std::move(sink), 0));
+        const auto owned = MakeLogger(LoggerImpl(std::move(sink)));
+        auto& logger = *owned;
 
         EXPECT_TRUE(logger.Close().ok());
         EXPECT_EQ(1, closeCount);
@@ -137,7 +146,7 @@ TEST(LoggerTests, Destructor_ClosesAnUnclosedSink) {
     sink->closeCount = &closeCount;
 
     {
-        AVEVA::RocksDB::Plugin::Azure::Logger logger(LoggerImpl(std::move(sink), 0));
+        const auto owned = MakeLogger(LoggerImpl(std::move(sink)));
     }
 
     EXPECT_EQ(1, closeCount);
@@ -146,7 +155,8 @@ TEST(LoggerTests, Destructor_ClosesAnUnclosedSink) {
 TEST(LoggerTests, Close_SinkThrows_ReturnsIOError) {
     auto sink = std::make_unique<RecordingSink>();
     sink->throwOnClose = true;
-    AVEVA::RocksDB::Plugin::Azure::Logger logger(LoggerImpl(std::move(sink), 0));
+    const auto owned = MakeLogger(LoggerImpl(std::move(sink)));
+    auto& logger = *owned;
 
     rocksdb::Status status;
     EXPECT_NO_THROW(status = logger.Close());
@@ -157,10 +167,10 @@ TEST(LoggerTests, Close_SinkThrows_ReturnsIOError) {
 TEST(LoggerTests, Logv_SeparatesTheTimestampAndTerminatesTheLine) {
     auto sink = std::make_unique<RecordingSink>();
     auto* rawSink = sink.get();
-    LoggerImpl logger(std::move(sink), 3);
+    LoggerImpl logger(std::move(sink));
 
-    logger.Logv(1, "msg %d", 1);
-    logger.Logv(1, "already terminated\n");
+    logger.Logv(rocksdb::InfoLogLevel::INFO_LEVEL, "msg %d", 1);
+    logger.Logv(rocksdb::InfoLogLevel::INFO_LEVEL, "already terminated\n");
 
     ASSERT_EQ(2U, rawSink->lines.size());
     EXPECT_EQ(" msg 1\n", rawSink->lines[0].substr(20));
@@ -170,9 +180,9 @@ TEST(LoggerTests, Logv_SeparatesTheTimestampAndTerminatesTheLine) {
 TEST(LoggerTests, Logv_DoesNotFilterByItsOwnLevel) {
     auto sink = std::make_unique<RecordingSink>();
     auto* rawSink = sink.get();
-    LoggerImpl logger(std::move(sink), 3);
+    LoggerImpl logger(std::move(sink));
 
-    logger.Logv(0, "debug message");
+    logger.Logv(rocksdb::InfoLogLevel::DEBUG_LEVEL, "debug message");
 
     EXPECT_EQ(1U, rawSink->lines.size());
 }

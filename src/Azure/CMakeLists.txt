@@ -36,6 +36,7 @@ target_sources(aveva-rocksdb-plugin-azure
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/BlobFilesystem.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Plugin.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Defaults.hpp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/SignedByteCount.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 )
 find_package(RocksDB CONFIG REQUIRED)

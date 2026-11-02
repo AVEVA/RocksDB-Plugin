@@ -60,8 +60,18 @@ template <class T> void Run(Clients& clients, boost::asio::awaitable<T> awaitabl
     static_cast<void>(AVEVA::AzureClient::Tests::RunAwaitable(clients.Http, std::move(awaitable)));
 }
 
+// Values whose wire form the cases below spell out literally in the expected headers.
+constexpr int FixtureYear = 2024;
+constexpr std::uint64_t RangeOffset = 10;
+constexpr std::uint64_t RangeLength = 20;
+constexpr std::uint64_t SpanLength = 1024;
+constexpr std::chrono::seconds LeaseSeconds{30};
+constexpr std::uint64_t CreatedBlobBytes = 1024U;
+constexpr std::size_t OnePage = AVEVA::AzureClient::PageBlobPageSize;
+constexpr std::uint64_t ResizedBlobBytes = 2048U;
+constexpr std::uint32_t ListPageSize = 10;
 [[nodiscard]] std::chrono::system_clock::time_point Day(int day) {
-    return std::chrono::sys_days{std::chrono::year{2024} / std::chrono::January / day};
+    return std::chrono::sys_days{std::chrono::year{FixtureYear} / std::chrono::January / day};
 }
 
 [[nodiscard]] Models::BlobRequestConditions FullConditions() {
@@ -190,7 +200,7 @@ std::vector<RequestShapeCase> BlobCases() {
                      .Start =
                          [](Clients& c) {
                              DownloadBlobOptions o;
-                             o.Range = Models::BlobByteRange{.Offset = 10, .Length = 20};
+                             o.Range = Models::BlobByteRange{.Offset = RangeOffset, .Length = RangeLength};
                              Run(c, c.Blob.DownloadAsync(std::move(o)));
                          },
                      .Method = HttpMethod::Get,
@@ -203,7 +213,7 @@ std::vector<RequestShapeCase> BlobCases() {
                      .Start =
                          [](Clients& c) {
                              DownloadBlobOptions o;
-                             o.Range = Models::BlobByteRange{.Offset = 0, .Length = 1024};
+                             o.Range = Models::BlobByteRange{.Offset = 0, .Length = SpanLength};
                              Run(c, c.Blob.DownloadToAsync(std::span<char>(c.Sink), std::move(o)));
                          },
                      .Method = HttpMethod::Get,
@@ -259,7 +269,7 @@ std::vector<RequestShapeCase> BlobCases() {
                      .Start =
                          [](Clients& c) {
                              AcquireLeaseOptions o;
-                             o.Duration = 30s;
+                             o.Duration = AVEVA::AzureClient::LeaseDuration{LeaseSeconds};
                              o.ProposedLeaseId = "proposed-1";
                              o.Conditions = FullConditions();
                              Run(c, c.Blob.AcquireLeaseAsync(std::move(o)));
@@ -323,7 +333,7 @@ std::vector<RequestShapeCase> TypedBlobCases() {
                  CreatePageBlobOptions o;
                  o.Metadata = Metadata();
                  o.Conditions = FullConditions();
-                 Run(c, c.Page.CreateAsync(1024, std::move(o)));
+                 Run(c, c.Page.CreateAsync(AVEVA::AzureClient::PageBlobSize{CreatedBlobBytes}, std::move(o)));
              },
          .Method = HttpMethod::Put,
          .Path = blob,
@@ -339,20 +349,22 @@ std::vector<RequestShapeCase> TypedBlobCases() {
              [](Clients& c) {
                  UploadPagesOptions o;
                  o.Conditions = FullConditions();
-                 Run(c, c.Page.UploadPagesAsync(512, std::string(512, 'x'), std::move(o)));
+                 Run(c, c.Page.UploadPagesAsync(AVEVA::AzureClient::PageOffset{OnePage},
+                                                AVEVA::HttpBody{std::string(OnePage, 'x')}, std::move(o)));
              },
          .Method = HttpMethod::Put,
          .Path = blob,
          .Query = {{"comp", "page"}},
          .Headers = Concat({{"x-ms-page-write", "update"}, {"x-ms-range", "bytes=512-1023"}}, ConditionHeaders()),
          .AbsentHeaders = {},
-         .Body = std::string(512, 'x')});
+         .Body = std::string(OnePage, 'x')});
     cases.push_back({.Name = "Page_Resize",
                      .Start =
                          [](Clients& c) {
                              ResizePageBlobOptions o;
                              o.Conditions = FullConditions();
-                             Run(c, c.Page.ResizeAsync(2048, std::move(o)));
+                             Run(c,
+                                 c.Page.ResizeAsync(AVEVA::AzureClient::PageBlobSize{ResizedBlobBytes}, std::move(o)));
                          },
                      .Method = HttpMethod::Put,
                      .Path = blob,
@@ -382,7 +394,7 @@ std::vector<RequestShapeCase> ContainerCases() {
                              ListBlobsOptions o;
                              o.Prefix = "dir/a b";
                              o.Marker = "m1";
-                             o.MaxResults = 10;
+                             o.MaxResults = ListPageSize;
                              o.Metadata = MetadataListing::Include;
                              Run(c, c.Container.ListBlobsAsync(std::move(o)));
                          },

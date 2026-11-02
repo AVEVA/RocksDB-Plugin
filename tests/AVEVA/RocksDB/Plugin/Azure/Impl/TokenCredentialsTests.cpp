@@ -48,7 +48,7 @@ class TokenCredentialsTests : public ::testing::Test {
         options.ServiceConnectionId = "connection";
         options.SystemAccessToken = "system";
         options.OidcRequestUri = "https://pipelines.example/oidc";
-        options.Retry.MaxRetries = 2;
+        options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{2U};
         return options;
     }
 
@@ -64,8 +64,8 @@ class TokenCredentialsTests : public ::testing::Test {
 TEST_F(TokenCredentialsTests, ChainFallsThroughToLaterSource) {
     auto failing = std::make_shared<ClientSecretCredential>(m_httpClient, ClientSecretCredentialOptions{});
     auto working = std::make_shared<StaticTokenCredential>("static");
-    auto chain = std::make_shared<TestChain>(std::vector<std::shared_ptr<TestSource>>{
-        std::make_shared<TestSource>(failing), std::make_shared<TestSource>(working)});
+    auto chain = TestChain::Create(std::vector<std::shared_ptr<TestSource>>{std::make_shared<TestSource>(failing),
+                                                                            std::make_shared<TestSource>(working)});
 
     const auto [error, token] = GetToken(*chain);
 
@@ -76,8 +76,8 @@ TEST_F(TokenCredentialsTests, ChainFallsThroughToLaterSource) {
 TEST_F(TokenCredentialsTests, ChainReportsLastErrorWhenAllSourcesFail) {
     auto first = std::make_shared<ClientSecretCredential>(m_httpClient, ClientSecretCredentialOptions{});
     auto second = std::make_shared<ClientSecretCredential>(m_httpClient, ClientSecretCredentialOptions{});
-    auto chain = std::make_shared<TestChain>(std::vector<std::shared_ptr<TestSource>>{
-        std::make_shared<TestSource>(first), std::make_shared<TestSource>(second)});
+    auto chain = TestChain::Create(std::vector<std::shared_ptr<TestSource>>{std::make_shared<TestSource>(first),
+                                                                            std::make_shared<TestSource>(second)});
 
     const auto [error, token] = GetToken(*chain);
 
@@ -86,7 +86,9 @@ TEST_F(TokenCredentialsTests, ChainReportsLastErrorWhenAllSourcesFail) {
 
 TEST_F(TokenCredentialsTests, RetryAfterIsHonoredOn429) {
     m_httpClient.EnqueueResponse(
-        HttpResponse{::AVEVA::HttpStatus::TooManyRequests, {HttpHeader{"Retry-After", "1"}}, ""});
+        HttpResponse{::AVEVA::HttpStatus::TooManyRequests,
+                     {HttpHeader(::AVEVA::HeaderName{"Retry-After"}, ::AVEVA::HeaderValue{"1"})},
+                     ""});
     m_httpClient.EnqueueResponse(OidcResponse());
     m_httpClient.EnqueueResponse(TokenResponse());
     auto credential = std::make_shared<PipelinesCredential>(m_httpClient, PipelineOptions());

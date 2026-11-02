@@ -51,13 +51,14 @@ int64_t BlobHelpers::FileSizeFromProperties(const AzureClient::Models::BlobPrope
     return size;
 }
 
-void BlobHelpers::RequireFullDownload(std::string_view name, int64_t offset, int64_t expected, int64_t actual) {
+void BlobHelpers::RequireFullDownload(std::string_view name, const Core::ByteOffset offset,
+                                      const Core::ByteCount expected, const Core::ByteCount actual) {
     if (actual != expected) {
-        throw RequestFailedException(HttpStatus::NoResponse, "ShortDownload",
-                                     "Expected " + std::to_string(expected) + " bytes at offset " +
-                                         std::to_string(offset) + " of '" + std::string(name) + "' but received " +
-                                         std::to_string(actual),
-                                     "", AzureClient::BlobStorageErrorCode::InvalidResponse);
+        throw RequestFailedException(HttpStatus::NoResponse, ServiceErrorCode{"ShortDownload"},
+                                     ErrorMessage{"Expected " + std::to_string(expected.Value()) + " bytes at offset " +
+                                                  std::to_string(offset.Value()) + " of '" + std::string(name) +
+                                                  "' but received " + std::to_string(actual.Value())},
+                                     ServiceRequestId{""}, AzureClient::BlobStorageErrorCode::InvalidResponse);
     }
 }
 

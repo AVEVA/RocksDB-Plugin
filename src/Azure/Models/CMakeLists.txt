@@ -10,6 +10,7 @@ target_sources(aveva-rocksdb-plugin-azure-models
   BASE_DIRS "${base-include-dir}"
   FILES
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Models/ChainedCredentialInfo.hpp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Models/Identifiers.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Models/ServicePrincipalStorageInfo.hpp"
 )
 find_package(aveva-install-library CONFIG REQUIRED)

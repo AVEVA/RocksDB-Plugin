@@ -45,6 +45,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -64,9 +65,40 @@ std::string Require(const char* name, const std::optional<std::string>& value) {
     return *value;
 }
 
-} // namespace
+// Runs the host io_context the plugin blocks on. The plugin is called from RocksDB threads, so the context must be run
+// by dedicated threads that never call into RocksDB. The destructor stops the context and joins the threads, so they
+// never observe a destroyed context.
+class IoThreadPool {
+  public:
+    explicit IoThreadPool(const unsigned threadCount)
+        : m_context(std::make_shared<boost::asio::io_context>()),
+          m_workGuard(boost::asio::make_work_guard(*m_context)) {
+        m_threads.reserve(threadCount);
+        for (unsigned i = 0; i < threadCount; ++i) {
+            m_threads.emplace_back([context = m_context] { context->run(); });
+        }
+    }
+    IoThreadPool(const IoThreadPool&) = delete;
+    IoThreadPool& operator=(const IoThreadPool&) = delete;
+    IoThreadPool(IoThreadPool&&) = delete;
+    IoThreadPool& operator=(IoThreadPool&&) = delete;
+    ~IoThreadPool() {
+        m_workGuard.reset();
+        m_context->stop();
+        m_threads.clear(); // jthread joins
+    }
 
-int main(int argc, char** argv) {
+    [[nodiscard]] boost::asio::io_context& Context() noexcept { return *m_context; }
+
+  private:
+    std::shared_ptr<boost::asio::io_context> m_context;
+    boost::asio::executor_work_guard<boost::asio::io_context::executor_type> m_workGuard;
+    std::vector<std::jthread> m_threads;
+};
+
+// Registers the plugin and runs db_bench, returning the process exit code. The io threads are scoped to this call, so
+// they are joined (after the plugin objects are released) before main skips static destructors.
+int Run(int argc, char** argv) {
     using AVEVA::RocksDB::Plugin::Azure::Plugin;
 
     using AVEVA::RocksDB::Plugin::Azure::Models::ServicePrincipalStorageInfo;
@@ -78,43 +110,34 @@ int main(int argc, char** argv) {
     const auto clientId = Require("AVEVA_DB_BENCH_CLIENT_ID", Env("AVEVA_DB_BENCH_CLIENT_ID"));
     const auto clientSecret = Require("AVEVA_DB_BENCH_CLIENT_SECRET", Env("AVEVA_DB_BENCH_CLIENT_SECRET"));
 
-    ServicePrincipalStorageInfo primary{
-        container, storageAccountUrl, clientId, clientSecret, tenantId,
-    };
+    namespace Models = AVEVA::RocksDB::Plugin::Azure::Models;
+    const Models::AccountUrl accountUrl{storageAccountUrl};
+    const Models::DbName dbName{container};
+    const Plugin::StorageAccounts accounts = Plugin::AccountPair<ServicePrincipalStorageInfo>{
+        ServicePrincipalStorageInfo{dbName, accountUrl, Models::ClientId{clientId}, Models::ClientSecret{clientSecret},
+                                    Models::TenantId{tenantId}},
+        std::nullopt};
 
     boost::log::core::get()->set_filter(boost::log::trivial::severity >= boost::log::trivial::warning);
 
     auto logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
 
+    // Declared before the plugin objects so it is destroyed after them.
+    IoThreadPool ioThreads{std::max(2U, std::thread::hardware_concurrency())};
+
     rocksdb::ConfigOptions configOptions;
     rocksdb::Env* env = nullptr;
     std::shared_ptr<rocksdb::Env> guard;
 
-    // The plugin blocks on this context from RocksDB threads, so it must be run by dedicated threads
-    // that never call into RocksDB. Statics live until process exit (see std::_Exit below), which skips
-    // their destructors, so the detached threads never observe a destroyed context.
-    static auto ioContextStorage = std::make_shared<boost::asio::io_context>();
-    static auto workGuard = boost::asio::make_work_guard(*ioContextStorage);
-    auto* ioContext = ioContextStorage.get();
-    const auto ioThreadCount = std::max(2U, std::thread::hardware_concurrency());
-    for (unsigned i = 0; i < ioThreadCount; ++i) {
-        std::thread([ioContext] { ioContext->run(); }).detach();
-    }
-
-    auto status = Plugin::Register(
-        configOptions, &env, &guard,
-        Plugin::RegisterOptions{.IoContext = ioContextStorage,
-                                .Accounts = Plugin::AccountPair<ServicePrincipalStorageInfo>{primary, std::nullopt},
-                                .Log = logger});
+    auto status = Plugin::Register(configOptions, &env, &guard, ioThreads.Context(),
+                                   Plugin::RegisterOptions{.Accounts = accounts, .Log = logger});
     if (!status.ok()) {
         std::cerr << "aveva_db_bench: Plugin::Register failed: " << status.ToString() << "\n";
-        // Not `return`: that runs static destructors while the detached threads are still inside run().
-        std::fflush(nullptr);
-        std::_Exit(3);
+        return 3;
     }
 
-    const auto fsUri = Plugin::NameFor(primary);
-    const auto dbPath = Plugin::UniquePrefix(storageAccountUrl, container);
+    const auto fsUri = Plugin::NameFor(accounts);
+    const auto dbPath = Plugin::UniquePrefix(accountUrl, dbName);
 
     std::cerr << "aveva_db_bench: Azure plugin registered.\n"
               << "  Suggested flags:\n"
@@ -137,6 +160,16 @@ int main(int argc, char** argv) {
     std::fflush(nullptr);
     std::cout.flush();
     const auto rc = rocksdb::db_bench_tool(argc, argv);
+    // The registration refers to the io_context, which is destroyed when this function returns.
+    guard.reset();
+    Plugin::Unregister(accounts);
+    return rc;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    const auto rc = Run(argc, argv);
 
     // Skip C++ static destructors: boost.log tears down thread-local storage
     // before the plugin's background threads exit, which triggers SIGABRT

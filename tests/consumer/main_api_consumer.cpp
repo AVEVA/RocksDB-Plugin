@@ -20,12 +20,14 @@ int main(int argc, char**) {
         rocksdb::ConfigOptions configOptions;
         rocksdb::Env* env = nullptr;
         std::shared_ptr<rocksdb::Env> guard;
-        auto ioContext = std::make_shared<boost::asio::io_context>();
-        const auto first = RegisterServicePrincipalLikeMain(configOptions, &env, &guard, ioContext,
-                                                            "https://account.blob.core.windows.net");
-        const auto second = RegisterChainedCredentialLikeMain(configOptions, &env, &guard, ioContext,
-                                                              "https://account.blob.core.windows.net");
-        if (!first.ok() || !second.ok() || !UseFilesLikeMain(*env->GetFileSystem()).ok()) {
+        boost::asio::io_context ioContext;
+        const std::string accountUrl = "https://account.blob.core.windows.net";
+        const auto first = RegisterServicePrincipalLikeMain(configOptions, &env, &guard, ioContext, accountUrl);
+        const auto second = RegisterChainedCredentialLikeMain(configOptions, &env, &guard, ioContext, accountUrl);
+        const auto used = first.ok() && second.ok() && UseFilesLikeMain(*env->GetFileSystem()).ok();
+        guard.reset();
+        UnregisterLikeMain(accountUrl);
+        if (!used) {
             return 1;
         }
     }

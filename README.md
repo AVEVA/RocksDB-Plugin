@@ -56,30 +56,31 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
 
     using AVEVA::RocksDB::Plugin::Azure::Plugin;
     using AVEVA::RocksDB::Plugin::Azure::Models::ServicePrincipalStorageInfo;
+    namespace Models = AVEVA::RocksDB::Plugin::Azure::Models;
 
     // The application owns the io_context the plugin performs its Azure I/O on. Keep it alive and running
     // (on threads that never call into RocksDB) for as long as the filesystem is in use.
     auto ioContext = std::make_shared<boost::asio::io_context>();
     auto workGuard = boost::asio::make_work_guard(*ioContext);
     std::thread ioThread{[ioContext] { ioContext->run(); }};
-    // On shutdown, in this order: close the database and release the Env, then `workGuard.reset();`
-    // so that ioContext.run() can return, and only then `ioThread.join();`. Joining first never returns.
+    // On shutdown, in this order: close the database, release the Env and call Plugin::Unregister for the accounts,
+    // then `workGuard.reset();` so that ioContext.run() can return, and only then `ioThread.join();`. Joining first
+    // never returns. The host owns ioContext; the plugin only refers to it.
 
     rocksdb::ConfigOptions primaryDbOptions;
     rocksdb::Env* env = nullptr;
     std::shared_ptr<rocksdb::Env> guard = nullptr;
     ServicePrincipalStorageInfo storageCredentials
     {
-        "blobContainerPath",
-        "azureAccountURL",
-        "servicePrincipalID",
-        "servicePrincipalSecret",
-        "tenantID"
+        Models::DbName{"blobContainerPath"},
+        Models::AccountUrl{"azureAccountURL"},
+        Models::ClientId{"servicePrincipalID"},
+        Models::ClientSecret{"servicePrincipalSecret"},
+        Models::TenantId{"tenantID"}
     };
     
-    rocksdb::Status status = Plugin::Register(primaryDbOptions, &env, &guard,
+    rocksdb::Status status = Plugin::Register(primaryDbOptions, &env, &guard, *ioContext,
         Plugin::RegisterOptions{
-            .IoContext = ioContext,
             .Accounts = Plugin::AccountPair<ServicePrincipalStorageInfo>{storageCredentials, std::nullopt},
             .Log = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>(),
             .DataFileBufferSize = Core::ByteCount{2 * 1024 * 1024},
@@ -95,7 +96,7 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
    
     std::unique_ptr<rocksdb::DB> db;
     rocksdb::Status status = rocksdb::DB::Open(options,
-        Plugin::UniquePrefix("azureAccountURL", "blobContainerName"),
+        Plugin::UniquePrefix(Models::AccountUrl{"azureAccountURL"}, Models::DbName{"blobContainerName"}),
         &db);
    ```
 
@@ -103,7 +104,9 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
 
 ###### Credential chain
 
-`ChainedCredentialInfo` authenticates with the first source below that yields a token (each failure is logged at warning level):
+`ChainedCredentialInfo` authenticates with the first source below that yields a token. A failed source is logged at
+debug level while later sources remain to be tried; only the failure of the last source in the chain is logged at
+warning level:
 
 1. **Service principal** (client id/secret/tenant from `ChainedCredentialInfo`), always tried first.
 2. **Managed identity**, always tried: the user-assigned identity when a managed identity id is supplied, otherwise the system-assigned identity (IMDS or the `IDENTITY_ENDPOINT` of App Service/Functions/Container Apps).
@@ -117,19 +120,20 @@ The plugin's public headers only forward-declare `boost::asio::io_context`, but 
 ###### File cache
 
 SST files can be cached on local disk. Set `RegisterOptions::Cache` (a `Plugin::CacheOptions` with a directory on
-local storage and a `Core::ByteCount` maximum size, which must be greater than zero for anything to be cached);
+local storage, a `std::filesystem::path`, and a `SignedByteCount` maximum size, which must be greater than zero for
+anything to be cached);
 leave it empty to disable the cache. Only the primary storage account is cached; the backup never is.
 
 ```cpp
-Plugin::RegisterOptions options{.IoContext = ioContext,
-                                .Accounts = Plugin::AccountPair<ServicePrincipalStorageInfo>{storageCredentials, std::nullopt},
+Plugin::RegisterOptions options{.Accounts = Plugin::AccountPair<ServicePrincipalStorageInfo>{storageCredentials, std::nullopt},
                                 .Log = logger};
-options.Cache = Plugin::CacheOptions{"/var/cache/rocksdb-azure", Core::ByteCount{20ULL * 1024 * 1024 * 1024}};
-Plugin::Register(primaryDbOptions, &env, &guard, std::move(options));
+options.Cache = Plugin::CacheOptions{"/var/cache/rocksdb-azure",
+                                     SignedByteCount{Core::ByteCount{20ULL * 1024 * 1024 * 1024}}};
+Plugin::Register(primaryDbOptions, &env, &guard, *ioContext, std::move(options));
 ```
 
 An SST is downloaded only on its second access, least recently used files are evicted to stay within
-`maxCacheSize`, and a file larger than `maxCacheSize` is never cached. See "File cache" in
+`CacheOptions::MaxSize`, and a file larger than `CacheOptions::MaxSize` is never cached. See "File cache" in
 [ARCHITECTURE.md](ARCHITECTURE.md) for details.
 
 ###### Configuration Options
@@ -149,12 +153,20 @@ The Azure client is now trimmed and in-tree, which changed the public surface:
 
 * **`Core/BlobClient.hpp` and `Impl/PageBlob.hpp` are gone.** Code that included `AVEVA/RocksDB/Plugin/Core/BlobClient.hpp` should use the in-tree AzureClient types for blob I/O: `AVEVA::AzureClient::BlobContainerClient`, `PageBlobClient` and `BlobClient` (headers under `AVEVA/AzureClient/`, package `aveva-azure-client`, see [libs/README.md](libs/README.md)). Calls return `boost::asio::awaitable<std::expected<Response<T>, BlobStorageError>>` (coroutine-only, no completion token); co_await them from a coroutine on the client executor and never block on the host `io_context` thread.
 * **The `aveva-rocksdb-plugin-core` interface has breaking changes for implementers and mocks:**
-  - `Core::File::Read` is now `ByteCount Read(char*, ByteOffset, ByteCount)` using strong types from `Core/Units.hpp`; it was `int64_t(char*, int64_t, int64_t)`.
-  - `Core::Filesystem::DeleteFile`, `DeleteDir`, `CreateDir`, `RenameFile` return `FilesystemResult` instead of `bool`.
+  - `Core::File::Read` is now `ByteCount Read(std::span<char> buffer, ByteOffset)` using strong types from `Core/Units.hpp`; it was `int64_t(char*, int64_t, int64_t)`.
+  - `Core::Filesystem::DeleteFile`, `DeleteDir`, `CreateDir`, `RenameFile` return `FilesystemResult` instead of `bool`. `RenameFile` takes `RenameSource` and `RenameDestination` so the paths cannot be swapped.
   - `Filesystem::WriteFileAtomic(const char*, size_t)` is now `WriteFileAtomic(std::span<const char>)`.
-  - `Core::ContainerClient::GetBlobClient` was removed; implementers provide only `GetBlobSize` and `DownloadBlobTo`.
+  - `Core::ContainerClient::GetBlobClient` was removed; implementers provide only `GetBlobSize` and `DownloadBlobTo`, which take a `Core::BlobName`.
+  - `Core::FileCache` is now a pimpl: `ReadFile` takes a `std::span<char>` buffer, `FileCacheEntry.hpp` is no longer installed, and the test-only `WaitUntilIdle`/`IdleWaitResult` were removed from the public header.
   - `RocksDBHelpers::IsManifestFile`, `IsIdentityFile`, `IsLogFile` were removed; use `GetFileType()` and check the returned `FileClass` enum.
   * The Azure implementation classes (`BlobFilesystem` and the file, lock and directory types behind it) now take the injected `io_context` and client types. Consumers should not construct them directly: register the filesystem through `Plugin::Register` and let RocksDB create it from its `azblobfs...` URI.* The six `Plugin::Register` overloads (including the deprecated ones without an `io_context`) are replaced by one entry point taking `Plugin::RegisterOptions`; the plugin never owns an `io_context`. The filesystem is registered under both the new `Plugin::NameFor` name and the legacy `Plugin::Name + db + backupDb` name so existing `azblobfs...` URIs keep resolving.
+* `Plugin::Register` takes the host's `boost::asio::io_context&` as a parameter; `RegisterOptions::IoContext` is gone and the plugin no longer shares ownership of the context. Call `Plugin::Unregister` before destroying it.
+* `Plugin::Unregister` and `Plugin::NameFor` take a `Plugin::StorageAccounts`; the overloads taking storage infos and the name-based `Unregister(std::string)` were removed. `Plugin::UniquePrefix` takes `Models::AccountUrl` and `Models::DbName`.
+* `ServicePrincipalStorageInfo` and `ChainedCredentialInfo` take and return strong types (`Models::DbName`, `AccountUrl`, `ClientId`, `ClientSecret`, `TenantId`, `ManagedIdentityId` from `Models/Identifiers.hpp`) with explicit constructors; `Value()` is only callable on a named object, so a getter result cannot silently dangle as a `string_view`.
+* `CacheOptions::Directory` is a `std::filesystem::path`; `CacheOptions::MaxSize`, `RegisterOptions::MaxPrefetchBytes` and `Defaults::MaxPrefetchBytes` are `SignedByteCount` (refuses values above `INT64_MAX` at construction).
+* `Impl::Configuration::PageBlob::DefaultSize`, `DefaultBufferSize` and `DefaultPrefetchBudgetBytes` were removed; use `Defaults::DataFileInitialSize`, `DataFileBufferSize` and `MaxPrefetchBytes`. `Plugin.hpp` no longer includes `Impl/Configuration.hpp`.
+* `AzureErrorTranslator` keeps `IOStatusFromError`, `LeaseLossOf`, `FromException(logger, std::exception_ptr, context)` and `Invoke`; `TransienceOf` and the other exception overloads were removed. Blocking on a thread that runs the host `io_context` now fails with `BlockingOnIoThreadException` (InvalidArgument) in every build type.
+* The constructors of `BlobFilesystem`, `Directory`, `Logger` and `LockFile` are private: they are created only by the plugin.
 * `http:` endpoints are rejected unless `AllowInsecureHttp = true` is set on the client options (credentials are still refused over non-loopback `http`).
 * Ranged downloads now require a valid `Content-Range` on every `206` response.
 * `AzureClient::AzureRequestOptions::SetMaxRetries` and `HttpClientOptions::SetIdleConnectionTimeout` throw `std::invalid_argument` for negative values.
@@ -164,18 +176,20 @@ The Azure client is now trimmed and in-tree, which changed the public surface:
 * `HttpClientOptions::SetDiagnosticsCallback()` (new, additive) reports stale-connection retries, connections that could not be pooled, swallowed exceptions, DNS cache invalidations and timeouts with the request phase. The plugin logs these through Boost.Log.
 ## Source and binary compatibility
 
-**Compatibility with `main` is source-only. Binary (ABI) compatibility is not provided: rebuild every consumer
-against this version.** No requirement for binary compatibility is recorded (the library already changes
-`BlobFilesystem`'s layout, see above), and the executor injection cannot be hidden behind the old symbols, so the
-old `Plugin::Register` signatures are not kept.
+**0.2.0 breaks both source and binary (ABI) compatibility with `main`: update and rebuild every consumer.** The old
+`Plugin::Register` overloads are removed (the executor injection cannot be hidden behind the old symbols), and other
+public API under [include/AVEVA/RocksDB/Plugin](include/AVEVA/RocksDB/Plugin) changed as listed above and in the
+table below (for example the `Core` interfaces and `BlobFilesystem`'s layout). Only code that uses the registered
+filesystem through `rocksdb::FileSystem` carries over unchanged.
 
-Supported (checked by `tests/consumer`, built in-tree by `SourceCompatTests` and against the installed package by the
-`install-consume` CI job):
+What the current API supports (checked by `tests/consumer`, built in-tree by `SourceCompatTests` and against the
+installed package by the `install-consume` CI job):
 
-* `Plugin::Register(configOptions, &env, &guard, RegisterOptions{...})` for both `ServicePrincipalStorageInfo` and
-  `ChainedCredentialInfo` (through `Plugin::AccountPair`). It replaces every earlier overload; migrate by moving the
-  arguments into `RegisterOptions` and passing your `std::shared_ptr<io_context>`.
-* `Defaults::*` (`Core::ByteCount`) and `Impl::Configuration::PageBlob::DefaultBufferSize` / `DefaultSize`.
+* `Plugin::Register(configOptions, &env, &guard, ioContext, RegisterOptions{...})` for both
+  `ServicePrincipalStorageInfo` and `ChainedCredentialInfo` (through `Plugin::AccountPair`), and
+  `Plugin::Unregister(StorageAccounts)`. It replaces every earlier overload; migrate by moving the arguments into
+  `RegisterOptions` and passing your `io_context` by reference.
+* `Defaults::*` (`Core::ByteCount`, and `SignedByteCount` for `MaxPrefetchBytes`).
 * Normal RocksDB use of the registered filesystem through `rocksdb::FileSystem`
   (`NewWritableFile`, `NewRandomAccessFile`, `NewSequentialFile`, `NewRandomRWFile`).
 * `ReadableFile`, `ReadWriteFile` and `WriteableFile` as `FSRandomAccessFile`, `FSRandomRWFile` and `FSWritableFile`.

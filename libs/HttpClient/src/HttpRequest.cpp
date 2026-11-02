@@ -3,59 +3,46 @@
 
 #include "AVEVA/HttpClient/HttpRequest.hpp"
 
+#include <algorithm>
+#include <string_view>
 #include <utility>
 
 namespace AVEVA {
+namespace {
+// ASCII-only fold: std::tolower follows the process locale, and field names are ASCII tokens.
+char FoldCase(char character) noexcept {
+    return character >= 'A' && character <= 'Z' ? static_cast<char>(character - 'A' + 'a') : character;
+}
+
+bool SameFieldName(std::string_view left, std::string_view right) noexcept {
+    return std::ranges::equal(left, right, {}, FoldCase, FoldCase);
+}
+} // namespace
+
 HttpRequest::HttpRequest() = default;
 
 HttpMethod HttpRequest::GetMethod() const noexcept { return m_method; }
 
-const std::string& HttpRequest::GetUrl() const noexcept { return m_url; }
+const std::string& HttpRequest::GetUrl() const& noexcept { return m_url; }
 
-const std::vector<HttpHeader>& HttpRequest::GetHeaders() const noexcept { return m_headers; }
+std::string HttpRequest::GetUrl() && noexcept { return std::move(m_url); }
 
-std::vector<HttpHeader>& HttpRequest::GetHeaders() noexcept { return m_headers; }
+const std::vector<HttpHeader>& HttpRequest::GetHeaders() const& noexcept { return m_headers; }
 
-const std::string& HttpRequest::GetBody() const noexcept { return m_body; }
+std::vector<HttpHeader> HttpRequest::GetHeaders() && noexcept { return std::move(m_headers); }
+
+HttpBody HttpRequest::GetBody() const noexcept { return m_body; }
 
 void HttpRequest::SetMethod(HttpMethod method) noexcept { m_method = method; }
 
-void HttpRequest::SetUrl(std::string url) { m_url = std::move(url); }
-
-void HttpRequest::SetHeaders(std::vector<HttpHeader> headers) { m_headers = std::move(headers); }
+void HttpRequest::SetUrl(HttpUrl url) noexcept { m_url = std::move(url).Value(); }
 
 void HttpRequest::AddHeader(HttpHeader header) { m_headers.push_back(std::move(header)); }
 
-void HttpRequest::ReserveHeaders(std::size_t count) { m_headers.reserve(count); }
-
-void HttpRequest::SetBody(std::string body) {
-    m_body = std::move(body);
-    m_bodyView = {};
-    m_bodyKeepAlive.reset();
+void HttpRequest::RemoveHeaders(const HeaderName& name) noexcept {
+    std::erase_if(m_headers,
+                  [&name](const HttpHeader& header) { return SameFieldName(header.GetName(), name.Value()); });
 }
 
-void HttpRequest::SetBodyView(std::span<const std::byte> content) noexcept {
-    m_body.clear();
-    m_bodyKeepAlive.reset();
-    m_bodyView = content;
-}
-
-void HttpRequest::SetBodyView(std::span<const std::byte> content, std::shared_ptr<const void> keepAlive) noexcept {
-    SetBodyView(content);
-    m_bodyKeepAlive = std::move(keepAlive);
-}
-
-const std::shared_ptr<const void>& HttpRequest::GetBodyKeepAlive() const noexcept { return m_bodyKeepAlive; }
-
-std::string HttpRequest::ReleaseBody() noexcept { return std::exchange(m_body, std::string{}); }
-
-BodyStorage HttpRequest::GetBodyStorage() const noexcept {
-    return m_bodyView.empty() ? BodyStorage::Owned : BodyStorage::View;
-}
-
-std::span<const std::byte> HttpRequest::GetBodyView() const noexcept { return m_bodyView; }
-
-std::size_t HttpRequest::GetBodySize() const noexcept {
-    return GetBodyStorage() == BodyStorage::View ? m_bodyView.size() : m_body.size();
-}
+void HttpRequest::SetBody(HttpBody body) noexcept { m_body = std::move(body); }
 } // namespace AVEVA

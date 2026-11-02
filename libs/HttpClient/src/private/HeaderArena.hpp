@@ -3,10 +3,9 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <new>
+#include <memory_resource>
 
 namespace AVEVA::Private {
 
@@ -17,63 +16,33 @@ namespace AVEVA::Private {
 /// </summary>
 class HeaderArena {
   public:
-    HeaderArena() = default;
+    HeaderArena() : m_resource(m_inline.data(), m_inline.size(), std::pmr::new_delete_resource()) {}
     HeaderArena(const HeaderArena&) = delete;
     HeaderArena& operator=(const HeaderArena&) = delete;
-    ~HeaderArena() { Reset(); }
+    HeaderArena(HeaderArena&&) = delete;
+    HeaderArena& operator=(HeaderArena&&) = delete;
+    ~HeaderArena() = default;
 
     /// <summary>
     /// Returns storage for <paramref name="bytes"/> bytes aligned to <paramref name="alignment"/>.
     /// </summary>
     /// <exception cref="std::bad_alloc">The heap overflow allocation failed.</exception>
     [[nodiscard]] void* Allocate(std::size_t bytes, std::size_t alignment) {
-        if (void* const inlineSlot = TryBump(m_inline, InlineCapacity, m_used, bytes, alignment)) {
-            return inlineSlot;
-        }
-        // Overflow blocks are sized for the request, with room to align within them.
-        const auto total = sizeof(Block) + bytes + alignment;
-        auto* const block = static_cast<Block*>(::operator new(total));
-        block->next = m_overflow;
-        m_overflow = block;
-        std::size_t used = 0;
-        auto* const data = reinterpret_cast<std::byte*>(block) + sizeof(Block);
-        return TryBump(data, bytes + alignment, used, bytes, alignment);
+        return m_resource.allocate(bytes, alignment);
     }
 
     /// <summary>
-    /// Releases all storage handed out so far. No container allocating from the arena may be alive.
+    /// Releases all storage handed out so far and starts again from the inline buffer. No container allocating from
+    /// the arena may be alive.
     /// </summary>
-    void Reset() noexcept {
-        while (m_overflow != nullptr) {
-            Block* const next = m_overflow->next;
-            ::operator delete(m_overflow);
-            m_overflow = next;
-        }
-        m_used = 0;
-    }
+    void Reset() noexcept { m_resource.release(); }
 
   private:
-    struct Block {
-        Block* next;
-    };
-
     static constexpr std::size_t InlineCapacity = 4096;
 
-    static void* TryBump(std::byte* base, std::size_t capacity, std::size_t& used, std::size_t bytes,
-                         std::size_t alignment) noexcept {
-        const auto start = reinterpret_cast<std::uintptr_t>(base) + used;
-        const auto aligned = (start + alignment - 1) & ~(static_cast<std::uintptr_t>(alignment) - 1);
-        const auto offset = used + (aligned - start);
-        if (offset > capacity || bytes > capacity - offset) {
-            return nullptr;
-        }
-        used = offset + bytes;
-        return base + offset;
-    }
-
-    alignas(std::max_align_t) std::byte m_inline[InlineCapacity];
-    std::size_t m_used = 0;
-    Block* m_overflow = nullptr;
+    // Declared before the resource, which is constructed over it.
+    alignas(std::max_align_t) std::array<std::byte, InlineCapacity> m_inline{};
+    std::pmr::monotonic_buffer_resource m_resource;
 };
 
 /// <summary>
@@ -84,6 +53,7 @@ template <typename T> class ArenaAllocator {
     using value_type = T;
 
     explicit ArenaAllocator(HeaderArena& arena) noexcept : m_arena(&arena) {}
+    // Implicit on purpose: the Allocator requirements make containers rebind and convert allocators implicitly.
     template <typename U> ArenaAllocator(const ArenaAllocator<U>& other) noexcept : m_arena(other.Arena()) {}
 
     [[nodiscard]] T* allocate(std::size_t count) {

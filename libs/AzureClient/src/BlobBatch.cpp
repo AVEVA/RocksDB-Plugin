@@ -6,12 +6,14 @@
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 #include <AVEVA/HttpClient/HttpHeader.hpp>
+#include <AVEVA/HttpClient/Units.hpp>
 
 #include <algorithm>
 #include <array>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -105,7 +107,7 @@ template <class TVisitor> void VisitHeaders(std::string_view text, std::size_t& 
 [[nodiscard]] std::vector<HttpHeader> ReadHeaders(std::string_view text, std::size_t& pos) {
     std::vector<HttpHeader> headers;
     VisitHeaders(text, pos, [&headers](std::string_view name, std::string_view value) {
-        headers.emplace_back(std::string{name}, std::string{value});
+        headers.emplace_back(HeaderName{std::string{name}}, HeaderValue{std::string{value}});
     });
     return headers;
 }
@@ -119,27 +121,32 @@ template <class TVisitor> void VisitHeaders(std::string_view text, std::size_t& 
     return text;
 }
 
+struct ContentIdTag;
+// The Content-ID of a batch part: the position of the sub-request it answers within its batch.
+using ContentId = StrongInteger<ContentIdTag, std::size_t>;
+
 // One sub-response, as views into the batch response body. Headers are only materialised for failures.
 struct BatchPart {
-    std::size_t ContentId = 0;
+    // Absent only when the service rejected the batch as a whole and answered with a single unnumbered part.
+    std::optional<ContentId> Id;
     HttpStatusCode Status;
     std::string_view HeaderBlock; // The sub-response's header lines and everything after them.
 };
 
+// Parses one part: its multipart headers (for the Content-ID) and the status line of the sub-response it carries.
+// Throws std::invalid_argument when the part is malformed.
 [[nodiscard]] BatchPart ParsePart(std::string_view part) {
     std::size_t pos = 0;
-    std::optional<std::size_t> contentId;
+    std::optional<ContentId> contentId;
     VisitHeaders(part, pos, [&contentId](std::string_view name, std::string_view text) {
         if (IEquals(name, "Content-ID") == StringMatch::Match) {
-            contentId = ParseExact<std::size_t>(text);
-            if (!contentId) {
+            const auto parsed = ParseExact<std::size_t>(text);
+            if (!parsed) {
                 throw std::invalid_argument("Batch response part has an invalid Content-ID.");
             }
+            contentId = ContentId{*parsed};
         }
     });
-    if (!contentId) {
-        throw std::invalid_argument("Batch response part has no Content-ID.");
-    }
 
     // "HTTP/1.1 202 Accepted"
     const std::string_view statusLine = ReadLine(part, pos);
@@ -160,7 +167,7 @@ struct BatchPart {
     }
     const HttpStatusCode status{*parsedStatus};
 
-    return BatchPart{.ContentId = *contentId, .Status = status, .HeaderBlock = part.substr(pos)};
+    return BatchPart{.Id = contentId, .Status = status, .HeaderBlock = part.substr(pos)};
 }
 
 [[nodiscard]] HttpResponse MaterializeResponse(const BatchPart& part) {
@@ -232,8 +239,11 @@ void AppendBatchClosingBoundary(std::string& body, std::string_view boundary) {
     body.append("--").append(boundary).append("--").append(LineBreak);
 }
 
-std::vector<Models::DeleteBlobItemResult> ParseBatchDeleteResponse(const HttpResponse& response,
-                                                                   std::span<const std::string> names) {
+namespace {
+
+// Splits a multipart/mixed batch response into its parts (views into the body, without delimiters), checking the
+// delimiter syntax of RFC 2046. Throws std::invalid_argument when the framing is malformed.
+[[nodiscard]] std::vector<std::string_view> SplitParts(const HttpResponse& response) {
     const std::string_view boundary = BoundaryOf(FindHeaderValue(response, ContentTypeHeaderName));
     if (boundary.empty()) {
         throw std::invalid_argument("Batch response has no multipart boundary.");
@@ -242,7 +252,7 @@ std::vector<Models::DeleteBlobItemResult> ParseBatchDeleteResponse(const HttpRes
     const std::size_t delimiterSize = DashDash.size() + boundary.size();
     const std::string_view body = response.GetBody();
 
-    std::vector<std::optional<BatchPart>> byContentId(names.size());
+    std::vector<std::string_view> parts;
     // Delimiters only count at the start of a line, so a boundary-like string inside a part is not a split point.
     const auto findDelimiter = [&](std::size_t from) {
         // Search for the bare boundary and verify the leading "--" so no delimiter string is allocated.
@@ -284,15 +294,39 @@ std::vector<Models::DeleteBlobItemResult> ParseBatchDeleteResponse(const HttpRes
         if (next == std::string_view::npos) {
             throw std::invalid_argument("Batch response is missing its closing boundary.");
         }
-        const BatchPart part = ParsePart(TrimTrailingLineBreak(body.substr(partStart, next - partStart)));
-        if (part.ContentId >= names.size() || byContentId[part.ContentId].has_value()) {
-            throw std::invalid_argument("Batch response has an unexpected or duplicate Content-ID.");
-        }
-        byContentId[part.ContentId] = part;
+        parts.push_back(TrimTrailingLineBreak(body.substr(partStart, next - partStart)));
         delimiterPos = next;
     }
     if (delimiter == Delimiter::Open) {
         throw std::invalid_argument("Batch response has no parts.");
+    }
+    return parts;
+}
+} // namespace
+
+std::expected<std::vector<Models::DeleteBlobItemResult>, BlobStorageError>
+ParseBatchDeleteResponse(const HttpResponse& response, std::span<const std::string> names) {
+    const std::vector<std::string_view> parts = SplitParts(response);
+    std::vector<std::optional<BatchPart>> byContentId(names.size());
+    for (const std::string_view text : parts) {
+        const BatchPart part = ParsePart(text);
+        if (!part.Id.has_value()) {
+            // A batch the service rejected as a whole (for example a malformed body) is still answered with 202, but
+            // with a single unnumbered part carrying the real error; report that error rather than a parse failure.
+            constexpr HttpStatusCode FirstErrorStatus{400};
+            if (parts.size() == 1U && part.Status >= FirstErrorStatus) {
+                if (RequestFailure failure = DetermineBlobStorageFailure({}, MaterializeResponse(part));
+                    failure.Error) {
+                    return std::unexpected(ToDetails(std::move(failure)));
+                }
+            }
+            throw std::invalid_argument("Batch response part has no Content-ID.");
+        }
+        const std::size_t index = part.Id->Value();
+        if (index >= names.size() || byContentId[index].has_value()) {
+            throw std::invalid_argument("Batch response has an unexpected or duplicate Content-ID.");
+        }
+        byContentId[index] = part;
     }
 
     std::vector<Models::DeleteBlobItemResult> items;

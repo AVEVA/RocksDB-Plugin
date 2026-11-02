@@ -46,7 +46,10 @@ using AVEVA::RocksDB::Plugin::Azure::RequestFailedException;
 using AVEVA::RocksDB::Plugin::Azure::Impl::BasicLeaseRenewalLoop;
 using AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntimeBase;
 using AVEVA::RocksDB::Plugin::Azure::Impl::LoopState;
+using AVEVA::RocksDB::Plugin::Azure::Impl::RenewalInterval;
 using AVEVA::RocksDB::Plugin::Azure::Impl::RenewalOutcome;
+using AVEVA::RocksDB::Plugin::Azure::Impl::RetryAttempts;
+using AVEVA::RocksDB::Plugin::Azure::Impl::RetryBaseDelay;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Spawn;
 using LockResult = AVEVA::RocksDB::Plugin::Azure::LockFile::LockResult;
 // The lock over the library's page blob client on the fake transport.
@@ -104,18 +107,20 @@ TEST_F(LockFileImplTests, UnlockDuringInFlightRenewalMakesTheRejectedRenewalBeni
     ASSERT_EQ(lock->Lock(), LockResult::Acquired);
 
     // The service rejects the renewal because the release won; it reaches the completion before Unlock returns.
-    m_httpClient.EnqueueDeferredResponse(
-        MakeAzureErrorResponse(::AVEVA::HttpStatusCode{409}, "LeaseIdMismatchWithLeaseOperation", "m", "r2"));
-    m_httpClient.EnqueueDeferredResponse(HttpResponse{::AVEVA::HttpStatus::Ok, MakeCanonicalSuccessHeaders({}), ""});
+    m_httpClient.EnqueueResponse(
+        MakeAzureErrorResponse(::AVEVA::HttpStatusCode{409}, "LeaseIdMismatchWithLeaseOperation", "m", "r2"), {},
+        AVEVA::AzureClient::Tests::Delivery::Deferred);
+    m_httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::Ok, MakeCanonicalSuccessHeaders({}), ""}, {},
+                                 AVEVA::AzureClient::Tests::Delivery::Deferred);
 
     auto outcome = Spawn(m_httpClient.get_executor(), lock->RenewAsync());
-    ASSERT_TRUE(m_httpClient.WaitForRequest(2));
+    ASSERT_EQ(m_httpClient.WaitForRequest(2), AVEVA::AzureClient::Tests::WaitOutcome::Done);
 
     std::thread unlocker([&lock] { lock->Unlock(); });
-    ASSERT_TRUE(m_httpClient.WaitForRequest(3));
+    ASSERT_EQ(m_httpClient.WaitForRequest(3), AVEVA::AzureClient::Tests::WaitOutcome::Done);
     // The rejected renewal completes while the release is still in flight.
-    ASSERT_TRUE(m_httpClient.CompleteNext());
-    ASSERT_TRUE(m_httpClient.CompleteNext());
+    ASSERT_EQ(m_httpClient.CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
+    ASSERT_EQ(m_httpClient.CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     unlocker.join();
 
     EXPECT_EQ(outcome.get(), RenewalOutcome::NotRenewed);
@@ -166,8 +171,8 @@ TEST_F(LockFileImplTests, ForbiddenThrowsWithoutRetrying) {
         (void)lock->Lock();
         FAIL() << "Expected RequestFailedException";
     } catch (const RequestFailedException& ex) {
-        EXPECT_EQ(ex.StatusCode, HttpStatus::Forbidden);
-        EXPECT_EQ(ex.ErrorCode, "AuthorizationFailure");
+        EXPECT_EQ(ex.StatusCode(), HttpStatus::Forbidden);
+        EXPECT_EQ(ex.ErrorCode().Value(), "AuthorizationFailure");
     }
     EXPECT_EQ(m_httpClient.RequestCount(), 1U);
 }
@@ -204,7 +209,7 @@ TEST_F(LockFileImplTests, StateQueriesAreNotBlockedWhileLockIsRetrying) {
     auto lock = CreateLock(std::chrono::seconds(20));
     std::atomic<LockResult> lockResult{LockResult::HeldElsewhere};
     std::jthread locker([&] { lockResult = lock->Lock(); });
-    ASSERT_TRUE(m_httpClient.WaitForRequestCount(2U));
+    ASSERT_EQ(m_httpClient.WaitForRequestCount(2U), AVEVA::AzureClient::Tests::WaitOutcome::Done);
 
     // None of these may queue behind the retry loop; if one did, it would block until the lock finished.
     EXPECT_EQ(lock->RenewIfLocked(), RenewalOutcome::NotRenewed);
@@ -240,7 +245,8 @@ TEST_F(LockFileImplTests, RenewSendsTheAcquiredLeaseId) {
 TEST_F(LockFileImplTests, RenewThatOutlastsTheLeaseIsCancelledAtTheDeadlineAndTheLeaseIsTreatedAsExpired) {
     m_httpClient.EnqueueResponse(Acquired());
     // Never completed: the renewal hangs until the lease has run out.
-    m_httpClient.EnqueueDeferredResponse(HttpResponse{::AVEVA::HttpStatus::Ok, MakeCanonicalSuccessHeaders({}), ""});
+    m_httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::Ok, MakeCanonicalSuccessHeaders({}), ""}, {},
+                                 AVEVA::AzureClient::Tests::Delivery::Deferred);
 
     // 15s is the shortest lease the service accepts. The lease clock is simulated so that only ~200ms of real time
     // remain before the renewal deadline, which the client enforces with a real timer.
@@ -268,7 +274,8 @@ TEST_F(LockFileImplTests, RenewThatOutlastsTheLeaseIsCancelledAtTheDeadlineAndTh
 TEST_F(LockFileImplTests, UnlockThatOutlastsTheLeaseIsCancelledAtTheLeaseEnd) {
     m_httpClient.EnqueueResponse(Acquired());
     // Never completed: the release hangs, but the lease lapses on its own.
-    m_httpClient.EnqueueDeferredResponse(HttpResponse{::AVEVA::HttpStatus::Ok, MakeCanonicalSuccessHeaders({}), ""});
+    m_httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::Ok, MakeCanonicalSuccessHeaders({}), ""}, {},
+                                 AVEVA::AzureClient::Tests::Delivery::Deferred);
 
     const auto leaseLength = std::chrono::seconds(15);
     auto lock = CreateLock(leaseLength);
@@ -414,11 +421,14 @@ class LeaseRenewalLoopTests : public LockFileImplTests {
     }
 
     void StartLoop(const std::shared_ptr<LockFileImpl>& lock) {
-        m_loop = Loop::Start(m_loopContext.get_executor(), m_logger, FixedSnapshot{lock}, CountFatal{&m_fatalCount},
-                             std::chrono::milliseconds(20), std::chrono::milliseconds(5));
+        m_loop =
+            Loop::Start(m_loopContext.get_executor(), m_logger, FixedSnapshot{lock}, CountFatal{&m_fatalCount},
+                        RenewalInterval{std::chrono::milliseconds(20)}, RetryBaseDelay{std::chrono::milliseconds(5)});
     }
 
-    bool WaitForRequests(const std::size_t count) { return m_httpClient.WaitForRequestCount(count); }
+    ::AVEVA::AzureClient::Tests::WaitOutcome WaitForRequests(const std::size_t count) {
+        return m_httpClient.WaitForRequestCount(count);
+    }
 
     static HttpResponse Renewed() {
         return HttpResponse{::AVEVA::HttpStatus::Ok, MakeCanonicalSuccessHeaders({{"x-ms-lease-id", "lease"}}), ""};
@@ -439,7 +449,8 @@ TEST_F(LeaseRenewalLoopTests, RenewsTheLeaseOnEveryInterval) {
     }
     StartLoop(lock);
 
-    EXPECT_TRUE(WaitForRequests(4)); // the acquire plus at least three renewals
+    EXPECT_EQ(WaitForRequests(4),
+              ::AVEVA::AzureClient::Tests::WaitOutcome::Done); // the acquire plus at least three renewals
     EXPECT_EQ(m_fatalCount.Count(), 0);
 }
 
@@ -449,7 +460,7 @@ TEST_F(LeaseRenewalLoopTests, StopHaltsFurtherRenewals) {
         m_httpClient.EnqueueResponse(Renewed());
     }
     StartLoop(lock);
-    ASSERT_TRUE(WaitForRequests(2));
+    ASSERT_EQ(WaitForRequests(2), ::AVEVA::AzureClient::Tests::WaitOutcome::Done);
 
     m_loop->Stop();
     // Stop() is synchronous (timer cancelled, in-flight rounds drained), so nothing can be sent after it returns.
@@ -516,7 +527,7 @@ TEST_F(LeaseRenewalLoopTests, TransientFailureIsRetriedWithoutBeingFatal) {
     }
     StartLoop(lock);
 
-    EXPECT_TRUE(WaitForRequests(4));
+    EXPECT_EQ(WaitForRequests(4), ::AVEVA::AzureClient::Tests::WaitOutcome::Done);
     EXPECT_EQ(m_fatalCount.Count(), 0);
     EXPECT_EQ(m_loop->State(), LoopState::Running);
 }
@@ -590,7 +601,7 @@ TEST(LeaseRenewalLoopThrowTests, ThrowOnTheNthRenewAsyncIsFatalOnceAfterTheRound
     FatalCounter fatal;
 
     auto loop = BasicLeaseRenewalLoop<ScriptedSnapshot, ScriptedFatal, ScriptedLock>::Start(
-        context.get_executor(), logger, snapshot, ScriptedFatal{&fatal}, std::chrono::milliseconds(5));
+        context.get_executor(), logger, snapshot, ScriptedFatal{&fatal}, RenewalInterval{std::chrono::milliseconds(5)});
     {
         std::unique_lock lock(state->Mutex);
         ASSERT_TRUE(
@@ -642,7 +653,10 @@ struct FailingLock {
         // Yield first so the failure surfaces from a suspended coroutine, as a real request's would.
         co_await boost::asio::post(boost::asio::use_awaitable);
         if (!State->Succeed) {
-            throw RequestFailedException(HttpStatus::ServiceUnavailable, "ServerBusy", "busy", "id",
+            throw RequestFailedException(HttpStatus::ServiceUnavailable,
+                                         AVEVA::RocksDB::Plugin::Azure::ServiceErrorCode{"ServerBusy"},
+                                         AVEVA::RocksDB::Plugin::Azure::ErrorMessage{"busy"},
+                                         AVEVA::RocksDB::Plugin::Azure::ServiceRequestId{"id"},
                                          std::make_error_code(std::errc::io_error), {}, hint);
         }
         co_return RenewalOutcome::Renewed;
@@ -675,8 +689,9 @@ struct FailingLoopRun {
         auto logger = std::make_shared<Loop::Logger>();
         FailingSnapshot snapshot{{std::make_shared<FailingLock>(FailingLock{State, remaining})}};
 
-        auto loop = Loop::Start(context.get_executor(), logger, snapshot, ScriptedFatal{&Fatal},
-                                std::chrono::milliseconds(500), retryDelay, 5);
+        auto loop =
+            Loop::Start(context.get_executor(), logger, snapshot, ScriptedFatal{&Fatal},
+                        RenewalInterval{std::chrono::milliseconds(500)}, RetryBaseDelay{retryDelay}, RetryAttempts{5});
         {
             std::unique_lock lock(State->Mutex);
             State->Attempted.wait_for(lock, std::chrono::seconds(10), [&] { return State->Calls.size() >= 5; });
@@ -740,7 +755,8 @@ TEST(LeaseRenewalLoopBackoffTests, WakeUpAfterRetriesRunOutNeverOutlastsTheRenew
 
     // Five attempts per round, then a regular wake-up that must be pulled in to the 20 ms deadline, not 5 s.
     auto loop = Loop::Start(context.get_executor(), logger, snapshot, ScriptedFatal{&fatal},
-                            std::chrono::milliseconds(1500), std::chrono::milliseconds(1), 5);
+                            RenewalInterval{std::chrono::milliseconds(1500)},
+                            RetryBaseDelay{std::chrono::milliseconds(1)}, RetryAttempts{5});
     {
         std::unique_lock lock(state->Mutex);
         EXPECT_TRUE(state->Attempted.wait_for(lock, std::chrono::seconds(8), [&] { return state->Calls.size() >= 6; }));
@@ -750,6 +766,70 @@ TEST(LeaseRenewalLoopBackoffTests, WakeUpAfterRetriesRunOutNeverOutlastsTheRenew
     thread.join();
     ASSERT_GE(state->Calls.size(), 6u);
     EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(state->Calls[5] - state->Calls[4]).count(), 700);
+}
+
+TEST(LeaseRenewalLoopBackoffTests, HealthyLeasesKeepRenewingWhileAnotherIsRetried) {
+    using Loop = BasicLeaseRenewalLoop<FailingSnapshot, ScriptedFatal, FailingLock>;
+    boost::asio::io_context context;
+    auto guard = boost::asio::make_work_guard(context);
+    std::jthread thread([&context] { context.run(); });
+    auto logger = std::make_shared<Loop::Logger>();
+    auto failing = std::make_shared<FailingLock::Shared>();
+    auto healthy = std::make_shared<FailingLock::Shared>();
+    healthy->Succeed = true;
+    FatalCounter fatal;
+    FailingSnapshot snapshot{{std::make_shared<FailingLock>(FailingLock{failing, std::nullopt}),
+                              std::make_shared<FailingLock>(FailingLock{healthy, std::nullopt})}};
+
+    // Retries back off to at most the interval, so the five attempts span several intervals.
+    auto loop = Loop::Start(context.get_executor(), logger, snapshot, ScriptedFatal{&fatal},
+                            RenewalInterval{std::chrono::milliseconds(100)},
+                            RetryBaseDelay{std::chrono::milliseconds(100)}, RetryAttempts{5});
+    {
+        std::unique_lock lock(failing->Mutex);
+        ASSERT_TRUE(
+            failing->Attempted.wait_for(lock, std::chrono::seconds(10), [&] { return failing->Calls.size() >= 5; }));
+    }
+    loop->Stop();
+    guard.reset();
+    thread.join();
+
+    // Without merging, the healthy lease is renewed once, in the first round, until the retries are spent.
+    const auto lastRetry = failing->Calls[4];
+    const auto renewedDuringRetries = std::ranges::count_if(healthy->Calls, [&](auto at) { return at <= lastRetry; });
+    EXPECT_GE(renewedDuringRetries, 2);
+    EXPECT_EQ(fatal.Count(), 0);
+}
+
+TEST(LeaseRenewalLoopBackoffTests, RetryDelayNeverOutlastsAHealthyLeasesRenewalDeadline) {
+    using Loop = BasicLeaseRenewalLoop<FailingSnapshot, ScriptedFatal, FailingLock>;
+    boost::asio::io_context context;
+    auto guard = boost::asio::make_work_guard(context);
+    std::jthread thread([&context] { context.run(); });
+    auto logger = std::make_shared<Loop::Logger>();
+    auto failing = std::make_shared<FailingLock::Shared>();
+    auto healthy = std::make_shared<FailingLock::Shared>();
+    healthy->Succeed = true;
+    FatalCounter fatal;
+    // Only the healthy lease reports a deadline, so only it can pull the retry in.
+    FailingSnapshot snapshot{{std::make_shared<FailingLock>(FailingLock{failing, std::nullopt}),
+                              std::make_shared<FailingLock>(FailingLock{healthy, std::chrono::milliseconds(20)})}};
+
+    auto loop = Loop::Start(context.get_executor(), logger, snapshot, ScriptedFatal{&fatal},
+                            RenewalInterval{std::chrono::milliseconds(50)},
+                            RetryBaseDelay{std::chrono::milliseconds(2000)}, RetryAttempts{5});
+    {
+        std::unique_lock lock(failing->Mutex);
+        ASSERT_TRUE(
+            failing->Attempted.wait_for(lock, std::chrono::seconds(10), [&] { return failing->Calls.size() >= 2; }));
+    }
+    loop->Stop();
+    guard.reset();
+    thread.join();
+
+    // An unclamped retry would wait at least half of the 2 s base delay.
+    EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(failing->Calls[1] - failing->Calls[0]).count(),
+              900);
 }
 
 TEST(LeaseRenewalLoopThrowTests, ThrowWhileSchedulingTheRetryIsFatalOnceAndDoesNotBlockStop) {
@@ -764,7 +844,8 @@ TEST(LeaseRenewalLoopThrowTests, ThrowWhileSchedulingTheRetryIsFatalOnceAndDoesN
     FailingSnapshot snapshot{{std::make_shared<FailingLock>(FailingLock{state, std::nullopt})}};
 
     auto loop = Loop::Start(context.get_executor(), logger, snapshot, ScriptedFatal{&fatal},
-                            std::chrono::milliseconds(5), std::chrono::milliseconds(1), 5);
+                            RenewalInterval{std::chrono::milliseconds(5)}, RetryBaseDelay{std::chrono::milliseconds(1)},
+                            RetryAttempts{5});
     ASSERT_TRUE(fatal.WaitForAtLeast(1));
 
     // The round was released before fencing, so Stop must return promptly and the host thread must have survived.
@@ -788,8 +869,8 @@ TEST(LeaseRenewalLoopThrowTests, StopGivesUpOnARoundThatNeverCompletes) {
     snapshot.Locks.push_back(std::make_shared<ScriptedLock>(ScriptedLock{state}));
     FatalCounter fatal;
 
-    auto loop =
-        Loop::Start(context.get_executor(), logger, snapshot, ScriptedFatal{&fatal}, std::chrono::milliseconds(5));
+    auto loop = Loop::Start(context.get_executor(), logger, snapshot, ScriptedFatal{&fatal},
+                            RenewalInterval{std::chrono::milliseconds(5)});
     {
         std::unique_lock lock(state->Mutex);
         ASSERT_TRUE(

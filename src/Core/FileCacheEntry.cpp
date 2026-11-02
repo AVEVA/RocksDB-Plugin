@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
-#include "AVEVA/RocksDB/Plugin/Core/FileCacheEntry.hpp"
+#include "FileCacheEntry.hpp"
+#include <cassert>
 namespace AVEVA::RocksDB::Plugin::Core {
 // New entries start as stale. The first access records the file in cache
 // metadata, and a subsequent access queues it for background download.
@@ -22,7 +23,9 @@ Generation FileCacheEntry::GetGeneration() const noexcept { return m_generation;
 
 void FileCacheEntry::SetGeneration(Generation generation) noexcept { m_generation = generation; }
 
-std::shared_ptr<detail::CachedReadHandle> FileCacheEntry::GetOrCreateReadHandle() {
+std::shared_ptr<detail::CachedReadHandle>
+FileCacheEntry::GetOrCreateReadHandle([[maybe_unused]] const std::unique_lock<std::mutex>& cacheLock) {
+    assert(cacheLock.owns_lock() && "The owning cache's mutex must be held");
     if (!m_readHandle) {
         m_readHandle = std::make_shared<detail::CachedReadHandle>();
     }

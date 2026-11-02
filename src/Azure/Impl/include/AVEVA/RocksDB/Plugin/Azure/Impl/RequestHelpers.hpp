@@ -35,7 +35,7 @@ namespace Detail {
 // Connects a std::stop_token to the cancellation slot given to co_spawn. The registration is made after co_spawn has
 // installed its handler, so a stop that was already requested fires immediately on arming. Arm and Release may race
 // (the operation can finish before arming): whichever comes second wins, so no registration is left behind. The
-// registration holds a reference to the state until Release, which the completion must call.
+// registration only refers to the state weakly; the completion handler owns it and must call Release.
 class CancelState {
     std::mutex m_mutex;
     boost::asio::cancellation_signal m_signal;
@@ -49,8 +49,13 @@ class CancelState {
     void Arm(std::stop_token token, const std::shared_ptr<CancelState>& self) {
         const std::lock_guard lock(m_mutex);
         if (m_lifecycle == Lifecycle::Live) {
-            m_registration.emplace(std::move(token),
-                                   [self] { self->m_signal.emit(boost::asio::cancellation_type::terminal); });
+            // Weak: the completion handler owns the state, so a registration that outlives it (an io_context stopped
+            // before the operation completed) must not keep it alive through a cycle.
+            m_registration.emplace(std::move(token), [weak = std::weak_ptr<CancelState>(self)] {
+                if (const auto state = weak.lock()) {
+                    state->m_signal.emit(boost::asio::cancellation_type::terminal);
+                }
+            });
         }
     }
 
@@ -113,26 +118,39 @@ Unwrapped(boost::asio::awaitable<std::expected<AzureClient::Response<T>, AzureCl
     co_return Unwrap(co_await std::move(operation));
 }
 
-/// <summary>
-/// Blocking on an io thread can never finish. That is a contract violation (RocksDB threads are never io threads),
-/// so it is checked in debug builds only and not defended against at runtime. An executor that cannot report whether
-/// the calling thread runs it (an erased one that does not wrap an io_context) is not checked.
-/// </summary>
-template <class Executor> void AssertNotRunningOn([[maybe_unused]] const Executor& executor) {
-#ifndef NDEBUG
+namespace Detail {
+enum class ThreadAffinity : std::uint8_t { OtherThread, ThisThread };
+
+/// <summary>Whether the calling thread runs `executor` (or the io_context an erased/strand executor wraps).</summary>
+template <class Executor> [[nodiscard]] ThreadAffinity AffinityOf(const Executor& executor) {
     if constexpr (requires { executor.running_in_this_thread(); }) {
-        assert(!executor.running_in_this_thread() &&
-               "Blocking calls must not be made from a thread running the io_context that drives the client.");
+        if (executor.running_in_this_thread()) {
+            return ThreadAffinity::ThisThread;
+        }
         if constexpr (requires { executor.get_inner_executor(); }) {
-            AssertNotRunningOn(executor.get_inner_executor());
+            return AffinityOf(executor.get_inner_executor());
         }
+        return ThreadAffinity::OtherThread;
     } else if constexpr (requires { executor.template target<boost::asio::io_context::executor_type>(); }) {
-        if (const auto* ioExecutor = executor.template target<boost::asio::io_context::executor_type>()) {
-            assert(!ioExecutor->running_in_this_thread() &&
-                   "Blocking calls must not be made from a thread running the io_context that drives the client.");
-        }
+        const auto* ioExecutor = executor.template target<boost::asio::io_context::executor_type>();
+        return ioExecutor != nullptr && ioExecutor->running_in_this_thread() ? ThreadAffinity::ThisThread
+                                                                             : ThreadAffinity::OtherThread;
+    } else {
+        return ThreadAffinity::OtherThread;
     }
-#endif
+}
+} // namespace Detail
+
+/// <summary>
+/// Blocking on an io thread can never finish (or races the completion it waits for), so every blocking entry point
+/// refuses it, in release builds too, with a BlockingOnIoThreadException that translates to an IOStatus. An executor
+/// that cannot report whether the calling thread runs it (an erased one that does not wrap an io_context) passes.
+/// </summary>
+template <class Executor> void ThrowIfRunningOn(const Executor& executor) {
+    if (Detail::AffinityOf(executor) == Detail::ThreadAffinity::ThisThread) {
+        throw BlockingOnIoThreadException(
+            "Blocking calls must not be made from a thread running the io_context that drives the Azure clients");
+    }
 }
 
 /// <summary>
@@ -190,7 +208,7 @@ template <class Executor, class Awaitable>
 /// running that executor.
 /// </summary>
 template <class Client, class Awaitable> auto Block(const Client& client, Awaitable operation) {
-    AssertNotRunningOn(client.get_executor());
+    ThrowIfRunningOn(client.get_executor());
     return Spawn(client.get_executor(), std::move(operation)).get();
 }
 

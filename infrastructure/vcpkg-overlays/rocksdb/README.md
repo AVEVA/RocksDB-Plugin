@@ -38,8 +38,12 @@ update either fails to download or silently builds a different source tree than 
 4. Update the version recorded under "Forked from" above, then build with
    `cmake --preset LinuxRelease -DAVEVA_ROCKSDB_TESTS=OFF -DAVEVA_ROCKSDB_BUILD_DB_BENCH=ON` (or the Windows preset).
 
-The opt-in `db-bench` CI job (workflow_dispatch, and pull requests that touch this directory or `tools/db_bench`) is the
-only job that builds the overlay's db_bench path.
+The `db-bench` CI job (`.github/workflows/build-and-test.yml`) is the only job that builds the overlay's db_bench path.
+It runs on every push to `main`, on manual `workflow_dispatch` runs with `build_db_bench` checked, and on pull
+requests that `.github/scripts/detect-relevant-changes.sh` selects: those touching `include/`, `src/`, `libs/`,
+`infrastructure/` (including this directory), `tools/db_bench/`, `tools/CMakeLists.txt`, the root `CMakeLists.txt`,
+`CMakePresets.json`, `vcpkg.json`, `vcpkg-configuration.json`, `.github/actions/setup-vcpkg/`, the workflow itself or
+the detection script. Other pull requests skip its build steps.
 
 `0004` is AVEVA-only and has not been proposed upstream: no upstream RocksDB issue or pull request exists for it yet.
 Upstream's `db_bench` links these sources straight into the executable, so the patch cannot be dropped until RocksDB

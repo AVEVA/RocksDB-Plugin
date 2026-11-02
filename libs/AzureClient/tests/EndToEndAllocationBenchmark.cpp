@@ -72,6 +72,13 @@ namespace {
 using boost::asio::ip::tcp;
 namespace asio = boost::asio;
 
+constexpr int DecimalBase = 10;
+constexpr double BytesPerMiB = 1024.0 * 1024.0;
+constexpr double Median = 0.50;
+constexpr double Percentile99 = 0.99;
+constexpr std::chrono::milliseconds PollSlice{50};
+constexpr std::chrono::seconds DrainBound{10};
+constexpr std::size_t IdleServerBlobBytes = 4096;
 constexpr std::string_view Etag = "\"0x8DBENCH\"";
 
 std::string Lower(std::string text) {
@@ -182,8 +189,8 @@ class BlobServer {
         if (const auto at = head.find(RangePrefix); at != std::string::npos) {
             const char* cursor = head.c_str() + at + RangePrefix.size();
             char* end = nullptr;
-            first = std::strtoull(cursor, &end, 10);
-            last = std::min(last, std::strtoull(end + 1, nullptr, 10));
+            first = std::strtoull(cursor, &end, DecimalBase);
+            last = std::min(last, std::strtoull(end + 1, nullptr, DecimalBase));
         }
         const std::string body(static_cast<std::size_t>(last - first + 1), 'z');
         return "HTTP/1.1 206 Partial Content\r\nETag: " + std::string{Etag} +
@@ -292,12 +299,12 @@ class ReadDriver {
                 std::min(m_latencies.size() - 1, static_cast<std::size_t>(fraction * m_latencies.size()));
             return std::chrono::duration<double, std::micro>(m_latencies[index]).count();
         };
-        m.p50Micros = micros(0.50);
-        m.p99Micros = micros(0.99);
+        m.p50Micros = micros(Median);
+        m.p99Micros = micros(Percentile99);
         m.maxMicros = std::chrono::duration<double, std::micro>(m_latencies.back()).count();
         const double seconds = std::chrono::duration<double>(m_end - m_begin).count();
         m.readsPerSecond = static_cast<double>(m_total) / seconds;
-        m.throughputMiBPerSecond = static_cast<double>(m_total * m_readSize) / seconds / (1024.0 * 1024.0);
+        m.throughputMiBPerSecond = static_cast<double>(m_total * m_readSize) / seconds / BytesPerMiB;
         return m;
     }
 
@@ -345,7 +352,7 @@ RunResult Measure(std::size_t readSize, std::size_t inFlight, std::size_t reads,
     options.InsecureHttp = AVEVA::AzureClient::InsecureHttpPolicy::Allow;
     if (behavior == ServerBehavior::Stall) {
         // Otherwise the pipeline would retry the closed connection with backoff and outlive the drain bound.
-        options.Retry.MaxRetries = 0;
+        options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{0U};
     }
     AVEVA::AzureClient::BlobClient client{http, options};
 
@@ -353,7 +360,7 @@ RunResult Measure(std::size_t readSize, std::size_t inFlight, std::size_t reads,
         const auto deadline = std::chrono::steady_clock::now() + limit;
         while (!done() && std::chrono::steady_clock::now() < deadline) {
             context.restart();
-            context.run_one_for(std::chrono::milliseconds{50});
+            context.run_one_for(PollSlice);
         }
         return done();
     };
@@ -365,7 +372,7 @@ RunResult Measure(std::size_t readSize, std::size_t inFlight, std::size_t reads,
         counting = false;
         driver.Abandon();
         server.Stop();
-        if (!runUntil([&] { return driver.Outstanding() == 0; }, std::chrono::seconds{10})) {
+        if (!runUntil([&] { return driver.Outstanding() == 0; }, DrainBound)) {
             ADD_FAILURE() << "outstanding reads did not drain after the server stopped";
         }
     };
@@ -466,14 +473,14 @@ TEST(EndToEndAllocationBenchmark, PooledRangedReadsThroughTheProductionClientAnd
 
 // The server must stop promptly with no connection ever made.
 TEST(EndToEndAllocationBenchmark, ServerStopsWithNoConnection) {
-    BlobServer server(4096);
+    BlobServer server(IdleServerBlobBytes);
     server.Stop();
     EXPECT_EQ(server.Connections(), 0);
 }
 
 // Idle keep-alive connections that never send a request must not block shutdown.
 TEST(EndToEndAllocationBenchmark, ServerStopsWithIdleKeepAliveConnections) {
-    BlobServer server(4096);
+    BlobServer server(IdleServerBlobBytes);
     asio::io_context context;
     std::vector<tcp::socket> idle;
     for (int i = 0; i < 3; ++i) {

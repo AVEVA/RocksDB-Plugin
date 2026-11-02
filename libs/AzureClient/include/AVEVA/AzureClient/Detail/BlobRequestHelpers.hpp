@@ -40,7 +40,6 @@
 #include <expected>
 #include <filesystem>
 #include <functional>
-#include <gsl/zstring>
 #include <memory>
 #include <optional>
 #include <span>
@@ -70,17 +69,12 @@ template <std::integral T> [[nodiscard]] constexpr std::optional<T> ParseExact(s
     return value;
 }
 
-/// <summary>The shortest fixed lease duration defined by the Blob service.</summary>
-inline constexpr std::chrono::seconds MinFixedLeaseDuration{15};
-/// <summary>The longest fixed lease duration defined by the Blob service.</summary>
-inline constexpr std::chrono::seconds MaxFixedLeaseDuration{60};
-
 /// <summary>
 /// Gives an otherwise-plain string-like parameter a distinct type (tagged by <typeparamref name="Tag"/>, an empty
 /// caller-defined struct) so it is never adjacent-and-same-type with another string-like
-/// parameter in a function signature (see bugprone-easily-swappable-parameters). Implicitly
-/// constructible from anything that already implicitly converts to std::string_view at the call
-/// site, so callers are unaffected.
+/// parameter in a function signature (see bugprone-easily-swappable-parameters). Construction is explicit so the
+/// call site names the role of the text, and only from text that outlives the label: a literal, a view or an lvalue
+/// string. Temporaries and null pointers are rejected at compile time because the label only views them.
 /// </summary>
 /// <typeparam name="Tag">The empty struct that makes this label a distinct type.</typeparam>
 template <class Tag> struct AVEVA_GSL_POINTER StringLabel {
@@ -89,17 +83,26 @@ template <class Tag> struct AVEVA_GSL_POINTER StringLabel {
     /// <summary>Creates a label holding an empty view.</summary>
     constexpr StringLabel() noexcept = default;
 
-    /// <summary>Labels a null-terminated string, which must outlive the label.</summary>
+    /// <summary>Labels a string literal (or other character array), which must outlive the label.</summary>
+    /// <typeparam name="N">The array size, including the terminator.</typeparam>
     /// <param name="value">The text to label.</param>
-    constexpr StringLabel(gsl::czstring value AVEVA_LIFETIMEBOUND) noexcept : Value(value) {}
+    template <std::size_t N>
+    constexpr explicit StringLabel(const char (&value AVEVA_LIFETIMEBOUND)[N]) noexcept
+        : Value(std::string_view{value}) {}
 
     /// <summary>Labels a view, whose characters must outlive the label.</summary>
     /// <param name="value">The text to label.</param>
-    constexpr StringLabel(std::string_view value AVEVA_LIFETIMEBOUND) noexcept : Value(value) {}
+    constexpr explicit StringLabel(std::string_view value AVEVA_LIFETIMEBOUND) noexcept : Value(value) {}
 
     /// <summary>Labels a string, which must outlive the label.</summary>
     /// <param name="value">The text to label.</param>
-    StringLabel(const std::string& value AVEVA_LIFETIMEBOUND) noexcept : Value(value) {}
+    explicit StringLabel(const std::string& value AVEVA_LIFETIMEBOUND) noexcept : Value(value) {}
+
+    /// <summary>A temporary string would be destroyed while the label still views it.</summary>
+    explicit StringLabel(std::string&&) = delete;
+
+    /// <summary>A null pointer is not text.</summary>
+    explicit StringLabel(std::nullptr_t) = delete;
 };
 
 /// <summary>Same purpose as <see cref="StringLabel"/>, but for a numeric parameter of type
@@ -111,7 +114,7 @@ template <class T, class Tag> struct NumericLabel {
 
     /// <summary>Labels a value.</summary>
     /// <param name="value">The value to label.</param>
-    constexpr NumericLabel(T value) noexcept : Value(value) {}
+    constexpr explicit NumericLabel(T value) noexcept : Value(value) {}
 };
 
 /// <summary>
@@ -150,7 +153,7 @@ class SharedKeySigner {
     /// <exception cref="std::runtime_error">Thrown when the signature cannot be computed.</exception>
     [[nodiscard]] std::string Sign(std::string_view stringToSign) const;
     /// <summary>The full "SharedKey &lt;account&gt;:&lt;signature&gt;" Authorization header     value for
-        /// <paramref name="request"/>.</summary>
+    /// <paramref name="request"/>.</summary>
     /// <param name="request">The request to sign.</param>
     /// <returns>The Authorization header value.</returns>
     /// <exception cref="std::runtime_error">Thrown when the signature cannot be computed.</exception>
@@ -241,14 +244,23 @@ struct BlobTarget {
 /// name.</exception>
 [[nodiscard]] ContainerTarget MakeContainerTarget(std::shared_ptr<const ConnectionState> connection,
                                                   std::string containerName);
+struct ContainerNameTextTag;
+struct BlobNameTextTag;
+/// <summary>A container name on its way to validation; distinct from a blob name so the two cannot be
+/// swapped.</summary>
+using ContainerNameText = StrongString<ContainerNameTextTag>;
+/// <summary>A blob name on its way to validation; distinct from a container name so the two cannot be
+/// swapped.</summary>
+using BlobNameText = StrongString<BlobNameTextTag>;
+
 /// <summary>Addresses a blob of an existing connection.</summary>
 /// <param name="connection">The connection the blob belongs to.</param>
 /// <param name="containerName">The container name, which is validated against the service's naming rules.</param>
 /// <param name="blobName">The blob name, which must not be empty.</param>
 /// <returns>The target, with its encoded resource URL built once.</returns>
 /// <exception cref="std::invalid_argument">Thrown when either name is invalid.</exception>
-[[nodiscard]] BlobTarget MakeBlobTarget(std::shared_ptr<const ConnectionState> connection, std::string containerName,
-                                        std::string blobName);
+[[nodiscard]] BlobTarget MakeBlobTarget(std::shared_ptr<const ConnectionState> connection,
+                                        ContainerNameText containerName, BlobNameText blobName);
 /// <summary>Validates the options, then addresses the container they name.</summary>
 /// <param name="options">The container client's options.</param>
 /// <param name="tokenCredential">Whether the client was also given a token credential.</param>
@@ -331,7 +343,7 @@ template <TokenCredentialLike TCred>
 template <TokenCredentialLike TCred>
 [[nodiscard]] BasicBlobTarget<TCred> MakeBlobTarget(std::shared_ptr<const ConnectionState> connection,
                                                     std::shared_ptr<CachedTokenCredential<TCred>> credential,
-                                                    std::string containerName, std::string blobName) {
+                                                    ContainerNameText containerName, BlobNameText blobName) {
     return {MakeBlobTarget(std::move(connection), std::move(containerName), std::move(blobName)),
             std::move(credential)};
 }
@@ -621,10 +633,11 @@ void UrlEncodeAppend(std::string& out, std::string_view value, std::string_view 
 [[nodiscard]] std::string BuildRangeHeaderValue(const Models::BlobByteRange& range);
 
 /// <summary>Decides whether a request failed, and why.</summary>
-/// <param name="transportError">The transport error of the request, if any.</param>
+/// <param name="transportFailure">Why the request produced no response, if it did not.</param>
 /// <param name="response">The response received; a status of 300 or above is a failure.</param>
 /// <returns>An empty failure on success, otherwise the error code with the details the service reported.</returns>
-[[nodiscard]] RequestFailure DetermineBlobStorageFailure(std::error_code transportError, const HttpResponse& response);
+[[nodiscard]] RequestFailure DetermineBlobStorageFailure(const std::optional<HttpFailure>& transportFailure,
+                                                         const HttpResponse& response);
 /// <summary>A successful response whose content could not be parsed (BlobStorageErrorCode::InvalidResponse).</summary>
 /// <param name="response">The response that could not be parsed.</param>
 /// <param name="message">What was wrong with it.</param>
@@ -718,42 +731,6 @@ struct ParsedContentRange {
 /// <returns>The URL.</returns>
 [[nodiscard]] std::string BuildServiceUrl(const ConnectionState& connection, std::string_view queryString = {});
 
-/// <summary>Convenience overloads that normalise and validate client options first (tests).</summary>
-/// <param name="options">The blob client's options.</param>
-/// <param name="queryString">Query parameters to add; the SAS token is appended to them.</param>
-/// <returns>The URL.</returns>
-/// <exception cref="std::invalid_argument">Thrown when the options are invalid.</exception>
-[[nodiscard]] std::string BuildBlobUrl(const BlobClientOptions& options, std::string_view queryString = {});
-/// <summary>Starts a request for the blob the options name, after validating them.</summary>
-/// <param name="options">The blob client's options.</param>
-/// <param name="method">The HTTP method.</param>
-/// <param name="queryString">Query parameters to add; the SAS token is appended to them.</param>
-/// <returns>The request.</returns>
-/// <exception cref="std::invalid_argument">Thrown when the options are invalid.</exception>
-[[nodiscard]] HttpRequest BuildBlobRequest(const BlobClientOptions& options, HttpMethod method,
-                                           std::string_view queryString = {});
-/// <summary>Builds the URL of the container the options name, after validating them.</summary>
-/// <param name="options">The container client's options.</param>
-/// <param name="queryString">Query parameters to add after restype=container; the SAS token is appended too.</param>
-/// <returns>The URL.</returns>
-/// <exception cref="std::invalid_argument">Thrown when the options are invalid.</exception>
-[[nodiscard]] std::string BuildContainerUrl(const BlobContainerClientOptions& options,
-                                            std::string_view queryString = {});
-/// <summary>Starts a request for the container the options name, after validating them.</summary>
-/// <param name="options">The container client's options.</param>
-/// <param name="method">The HTTP method.</param>
-/// <param name="queryString">Query parameters to add after restype=container; the SAS token is appended too.</param>
-/// <returns>The request.</returns>
-/// <exception cref="std::invalid_argument">Thrown when the options are invalid.</exception>
-[[nodiscard]] HttpRequest BuildContainerRequest(const BlobContainerClientOptions& options, HttpMethod method,
-                                                std::string_view queryString = {});
-/// <summary>Builds the URL of the service endpoint the options name, after validating them.</summary>
-/// <param name="options">The service client's options.</param>
-/// <param name="queryString">Query parameters to add; the SAS token is appended to them.</param>
-/// <returns>The URL.</returns>
-/// <exception cref="std::invalid_argument">Thrown when the options are invalid.</exception>
-[[nodiscard]] std::string BuildServiceUrl(const BlobServiceClientOptions& options, std::string_view queryString = {});
-
 /// <summary>Adds a header, copying its value.</summary>
 /// <param name="request">The request to add to.</param>
 /// <param name="name">The header name.</param>
@@ -786,11 +763,6 @@ void ApplyMetadata(HttpRequest& request, const Models::MetadataMap& metadata);
 /// <param name="name">The metadata name.</param>
 /// <returns>Valid when the name is acceptable.</returns>
 [[nodiscard]] Validity ValidityOfMetadataName(std::string_view name) noexcept;
-/// <summary>One-off Shared Key signing (constructs a temporary signer); clients use ConnectionState::Signer.</summary>
-/// <param name="options">The account name and key to sign with.</param>
-/// <param name="request">The request to add the Authorization header to.</param>
-/// <exception cref="std::invalid_argument">Thrown when the account key is not valid base64.</exception>
-void AuthorizeRequest(const SharedKeyCredentialOptions& options, HttpRequest& request);
 /// <summary>Signs a request with the connection's signer and adds the Authorization header.</summary>
 /// <param name="signer">The signer to use.</param>
 /// <param name="request">The request to add the Authorization header to.</param>
@@ -871,7 +843,7 @@ template <class TModel, class TParser>
 [[nodiscard]] std::expected<Response<TModel>, BlobStorageError>
 ParseOutcome(HttpResult sent, TParser&& parser, std::span<const BlobStorageErrorCode> suppressed = {},
              std::optional<BlobStorageErrorCode> absorbed = std::nullopt) {
-    std::error_code error;
+    std::optional<HttpFailure> error;
     HttpResponse response;
     if (sent) {
         response = std::move(*sent);
@@ -1254,20 +1226,14 @@ void ApplyLeaseRequestConditions(HttpRequest& request, Models::BlobRequestCondit
 /// <param name="target">The blob to lease.</param>
 /// <param name="operationOptions">The duration, the proposed lease id and the conditions.</param>
 /// <param name="requestOptions">The options the request runs with.</param>
-/// <returns>The lease id and blob version, or the failure; a fixed duration outside 15 to 60 seconds fails without a
-/// request.</returns>
+/// <returns>The lease id and blob version, or the failure.</returns>
 template <HttpClientLike THttp, class TTarget>
 boost::asio::awaitable<std::expected<Response<Models::AcquireBlobLeaseResult>, BlobStorageError>>
 AcquireLeaseAsync(THttp& httpClient, const TTarget& target, AcquireLeaseOptions operationOptions,
                   AzureRequestOptions requestOptions) {
-    if (operationOptions.Duration.has_value() &&
-        (*operationOptions.Duration < MinFixedLeaseDuration || *operationOptions.Duration > MaxFixedLeaseDuration)) {
-        co_return InvalidArgument("Lease duration must be between 15 and 60 seconds, or infinite.");
-    }
-
     HttpRequest request = BuildLeaseRequest(target, "acquire");
     AddHeader(request, XMsLeaseDurationHeaderName,
-              operationOptions.Duration.has_value() ? std::to_string(operationOptions.Duration->count())
+              operationOptions.Duration.has_value() ? std::to_string(operationOptions.Duration->Value().count())
                                                     : std::string{"-1"});
     // A server-chosen lease ID would be lost if the response is, and the retry would hit 409 LeaseAlreadyPresent.
     if (operationOptions.ProposedLeaseId.empty()) {
@@ -1350,7 +1316,7 @@ ExistsBlobAsync(THttp& httpClient, const BasicBlobTarget<TCred>& options, AzureR
 
     HttpResult sent =
         co_await SendAuthorizedRequest(httpClient, options, std::move(request), std::move(requestOptions));
-    std::error_code error;
+    std::optional<HttpFailure> error;
     HttpResponse response;
     if (sent) {
         response = std::move(*sent);

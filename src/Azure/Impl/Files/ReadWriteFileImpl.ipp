@@ -13,7 +13,9 @@
 #include <boost/log/trivial.hpp>
 #include <boost/scope/scope_exit.hpp>
 
+#include <cstddef>
 #include <exception>
+#include <iterator>
 #include <numeric>
 #include <span>
 #include <string>
@@ -41,7 +43,7 @@ BasicReadWriteFileImpl<TBlob>::BasicReadWriteFileImpl(
     std::shared_ptr<Core::FileCache> fileCache,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
     : m_w(name, std::move(runtime), std::move(blob), std::move(fileCache), std::move(logger), 0), m_size(0),
-      m_syncSize(0), m_buffer(static_cast<size_t>(Configuration::PageBlob::DefaultBufferSize.Value())) {
+      m_syncSize(0), m_buffer(static_cast<size_t>(Defaults::DataFileBufferSize.Value())) {
     // One GetProperties call yields both the size and the capacity.
     const auto info = BlobOperations::GetInfo(*m_w.H.Blob);
     m_size = info.Size;
@@ -169,7 +171,7 @@ void BasicReadWriteFileImpl<TBlob>::PlanGapReads(Extent& extent, int64_t sizeBef
         if (readEnd > readStart) {
             reads.push_back(GapRead{std::span<char>(extent.Data->data() + (readStart - extent.Start),
                                                     static_cast<size_t>(readEnd - readStart)),
-                                    readStart, readEnd - readStart});
+                                    OffsetFromSigned(readStart), CountFromSigned(readEnd - readStart)});
         }
         readStart = readEnd = 0;
     };
@@ -210,47 +212,39 @@ template <typename TBlob> BlobOperations::Task<void> BasicReadWriteFileImpl<TBlo
         co_await BlobOperations::DownloadAsync(*m_w.H.Blob, read.Target, read.Offset, read.Length));
 }
 
-// Reads the gaps of, then uploads, extents [begin, end). Each stage waits for all of its operations before reporting
+// Reads the gaps of, then uploads, the wave's extents. Each stage waits for all of its operations before reporting
 // the first failure: they write into / read from the extents' buffers, which must not be released while any is still
-// in flight.
+// in flight. The wave's buffers go back to the pool when this frame ends, before the next wave starts.
 template <typename TBlob>
-BlobOperations::Task<void> BasicReadWriteFileImpl<TBlob>::RunWaveAsync(std::vector<Extent>& extents, size_t begin,
-                                                                       size_t end, int64_t sizeBefore) {
-    // Runs on every exit, after the reads and uploads have drained, so the wave's buffers go back to the pool for the
-    // next wave instead of staying owned until the whole flush ends.
-    const boost::scope::scope_exit releaseWave{[&] noexcept {
-        for (auto i = begin; i < end; ++i) {
-            extents[i].Data.reset();
-        }
-    }};
-
+BlobOperations::Task<void> BasicReadWriteFileImpl<TBlob>::RunWaveAsync(std::vector<Extent> wave,
+                                                                       const int64_t sizeBefore) {
     const auto executor = co_await boost::asio::this_coro::executor;
     std::vector<GapRead> gaps;
-    for (auto i = begin; i < end; ++i) {
-        PlanGapReads(extents[i], sizeBefore, gaps);
+    for (auto& extent : wave) {
+        PlanGapReads(extent, sizeBefore, gaps);
     }
     // One extent can hold many separated gaps, so only a window of them is in flight.
-    TaskGroup reads(executor, Configuration::Transfer::MaxConcurrentPageCopies);
+    TaskGroup reads(executor, ConcurrencyLimit{Configuration::Transfer::MaxConcurrentPageCopies});
     co_await reads.Scope([&](TaskGroup& running) -> BlobOperations::Task<void> {
         for (const auto& gap : gaps) {
             co_await running.Spawn(ReadGapAsync(gap));
         }
     });
-    for (auto i = begin; i < end; ++i) {
-        OverlayChunks(extents[i]);
+    for (const auto& extent : wave) {
+        OverlayChunks(extent);
     }
 
-    TaskGroup uploads(executor, end - begin);
+    TaskGroup uploads(executor, ConcurrencyLimit{wave.size()});
     co_await uploads.Scope([&](TaskGroup& running) -> BlobOperations::Task<void> {
-        for (auto i = begin; i < end; ++i) {
-            co_await running.Spawn(
-                BlobOperations::UploadPagesAsync(*m_w.H.Runtime, *m_w.H.Blob, extents[i].Data, extents[i].Start));
+        for (const auto& extent : wave) {
+            co_await running.Spawn(BlobOperations::UploadPagesAsync(m_w.H.Runtime, *m_w.H.Blob, extent.Data,
+                                                                    OffsetFromSigned(extent.Start)));
         }
     });
 
-    for (auto i = begin; i < end; ++i) {
+    for (const auto& extent : wave) {
         BOOST_LOG_SEV(*m_w.H.Logger, boost::log::trivial::debug)
-            << "Flushed " << extents[i].Data->size() << " bytes to read/writeable file '" << m_w.H.Name << "'";
+            << "Flushed " << extent.Data->size() << " bytes to read/writeable file '" << m_w.H.Name << "'";
     }
 }
 
@@ -285,10 +279,12 @@ template <typename TBlob> BlobOperations::Task<void> BasicReadWriteFileImpl<TBlo
     const boost::scope::scope_exit trimOnExit{[this] { TrimExtentPool(); }};
     for (size_t begin = 0; begin < extents.size(); begin += Configuration::Transfer::MaxConcurrentPageCopies) {
         const auto end = std::min(extents.size(), begin + Configuration::Transfer::MaxConcurrentPageCopies);
-        co_await RunWaveAsync(extents, begin, end, m_size);
+        co_await RunWaveAsync({std::make_move_iterator(extents.begin() + static_cast<std::ptrdiff_t>(begin)),
+                               std::make_move_iterator(extents.begin() + static_cast<std::ptrdiff_t>(end))},
+                              m_size);
     }
     // Writes that landed after the lease lapsed must not be reported as flushed.
-    m_w.H.Runtime->ThrowIfWritesFenced();
+    m_w.H.Runtime->Fence().ThrowIfFenced();
 
     m_size = maxSizeNeeded;
     m_bufferStats.clear();
@@ -316,18 +312,20 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::TrimExtentPool() {
 }
 // Buffers a write at its page-aligned slot with room around it, so Flush can merge the existing bytes of partially
 // covered pages and upload whole pages. Flushes early when the buffer is nearly full.
-template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Write(int64_t offset, const char* data, int64_t size) {
-    RangeCheck::ThrowIfInvalid(offset, size, "Write");
+template <typename TBlob>
+void BasicReadWriteFileImpl<TBlob>::Write(const Core::ByteOffset offset, const std::span<const char> data) {
+    RangeCheck::ThrowIfInvalid(offset, Core::ByteCount{data.size()}, "Write");
     // This one is TRICKY. Incomplete pages must track the location within a page
     // along with length information and then fetch the relevant page before committing
     // likely to be lots of room for optimization maybe around allocation
-    auto* dataPos = data;
+    auto size = static_cast<int64_t>(data.size());
+    const auto* dataPos = data.data();
     if (m_writeState == WriteState::Clean) {
         // The cache is invalidated at the first write, not at Sync, because Read serves unsynced bytes from the blob.
         m_w.MarkStale();
         m_writeState = WriteState::Dirty;
     }
-    auto targetOffset = offset;
+    auto targetOffset = static_cast<int64_t>(offset.Value());
     auto bufferOffset =
         m_bufferStats.empty() ? 0LL : m_bufferStats.back().bufferOffset + m_bufferStats.back().ChunkSize();
     while (size > 0) {
@@ -374,38 +372,35 @@ template <typename TBlob> void BasicReadWriteFileImpl<TBlob>::Write(int64_t offs
 }
 
 // Includes the file's own unsynced writes: buffered chunks are flushed first so the blob holds them, and the limit is
-// m_size rather than the published m_syncSize.
+// m_size rather than the published m_syncSize. The file cache is consulted here, on the caller's thread, because its
+// reads block on disk and must never run on the client's executor.
 template <typename TBlob>
-int64_t BasicReadWriteFileImpl<TBlob>::Read(const int64_t offset, const int64_t bytesRequested, char* buffer) {
-    return Block(*m_w.H.Blob, ReadAsync(offset, bytesRequested, buffer));
+Core::ByteCount BasicReadWriteFileImpl<TBlob>::Read(const Core::ByteOffset offset, const std::span<char> buffer) {
+    RangeCheck::ThrowIfInvalid(offset, Core::ByteCount{buffer.size()}, "Read");
+    // Cached pages may predate this file's unsynced writes; a Clean file has no buffered or unsynced bytes either.
+    if (m_w.H.FileCache && m_writeState == WriteState::Clean && static_cast<int64_t>(offset.Value()) < m_size) {
+        if (const auto bytesRead = m_w.H.FileCache->ReadFile(m_w.H.Name, offset, buffer)) {
+            return *bytesRead;
+        }
+    }
+    return Block(*m_w.H.Blob, ReadAsync(offset, buffer));
 }
 
 template <typename TBlob>
-BlobOperations::Task<int64_t> BasicReadWriteFileImpl<TBlob>::ReadAsync(const int64_t offset, int64_t bytesRequested,
-                                                                       char* buffer) {
-    RangeCheck::ThrowIfInvalid(offset, bytesRequested, "Read");
+BlobOperations::Task<Core::ByteCount> BasicReadWriteFileImpl<TBlob>::ReadAsync(const Core::ByteOffset offset,
+                                                                               const std::span<char> buffer) {
     co_await FlushAsync();
 
-    if (offset >= m_size) {
-        co_return 0;
+    const auto start = static_cast<int64_t>(offset.Value());
+    if (start >= m_size) {
+        co_return Core::ByteCount{0};
     }
-
-    // Cached pages may predate this file's unsynced writes.
-    if (m_w.H.FileCache && m_writeState == WriteState::Clean) {
-        const auto bytesRead =
-            m_w.H.FileCache->ReadFile(m_w.H.Name, Core::ByteOffset{static_cast<uint64_t>(offset)},
-                                      Core::ByteCount{static_cast<uint64_t>(bytesRequested)}, buffer);
-        if (bytesRead) {
-            co_return static_cast<int64_t>(bytesRead->Value());
-        }
+    const auto bytesToRead = std::min(static_cast<int64_t>(buffer.size()), m_size - start);
+    if (bytesToRead <= 0) {
+        co_return Core::ByteCount{0};
     }
-
-    bytesRequested = std::min(bytesRequested, m_size - offset);
-    if (bytesRequested <= 0) {
-        co_return 0;
-    }
-    co_return co_await BlobOperations::DownloadAsync(
-        *m_w.H.Blob, std::span<char>(buffer, static_cast<size_t>(bytesRequested)), offset, bytesRequested);
+    co_return co_await BlobOperations::DownloadAsync(*m_w.H.Blob, buffer.first(static_cast<size_t>(bytesToRead)),
+                                                     OffsetFromSigned(start), CountFromSigned(bytesToRead));
 }
 
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

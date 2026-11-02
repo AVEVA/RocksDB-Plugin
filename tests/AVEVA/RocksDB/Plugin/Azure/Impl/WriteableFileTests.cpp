@@ -332,7 +332,7 @@ TEST_F(WriteableFileTests, Sync_WritesFencedWhileAnUploadWasInFlight_FailsEvenTh
     file.RangeSync();
     ASSERT_EQ(1U, m_env.Blob->PendingUploads());
 
-    m_env.Runtime->FenceWrites();
+    m_env.Runtime->Fence().Fence();
     m_env.Blob->CompleteUpload();
 
     EXPECT_THROW(file.Sync(), std::runtime_error);
@@ -520,7 +520,7 @@ TEST_F(WriteableFileTests, Constructor_KnownState_DoesNotQueryBlob) {
                                      nullptr,
                                      m_logger,
                                      Bytes(Configuration::PageBlob::DefaultBufferSize),
-                                     {0, Configuration::PageBlob::DefaultSize}};
+                                     {.Size = Bytes(0), .Capacity = Bytes(Configuration::PageBlob::DefaultSize)}};
 
     EXPECT_EQ(0, file.GetFileSize());
     EXPECT_EQ(0, m_env.Blob->PropertiesRequests.Value());
@@ -541,8 +541,9 @@ TEST_F(WriteableFileTests, Sync_NothingNewSinceLastSync_DoesNotWriteSizeAgain) {
 TEST_F(WriteableFileTests, Constructor_BufferSizeSmallerThanPage_ThrowsException) {
     constexpr size_t invalidBufferSize = Configuration::PageBlob::PageSize - 1;
 
-    EXPECT_THROW([[maybe_unused]] auto file = FakeWriteableFileImpl("test.dat", m_env.Runtime, m_env.Client, nullptr,
-                                                                    m_logger, Bytes(invalidBufferSize), {0, 0}),
+    EXPECT_THROW([[maybe_unused]] auto file =
+                     FakeWriteableFileImpl("test.dat", m_env.Runtime, m_env.Client, nullptr, m_logger,
+                                           Bytes(invalidBufferSize), {.Size = Bytes(0), .Capacity = Bytes(0)}),
                  std::invalid_argument);
 }
 
@@ -718,38 +719,51 @@ TEST_F(WriteableFileTests, Flush_AfterAnEarlierUploadFailed_ReportsTheFailure) {
 }
 
 TEST_F(WriteableFileTests, GetUniqueId_BufferLargerThanName_ReturnsFullName) {
-    const FakeWriteableFileImpl file{"test.dat", m_env.Runtime, m_env.Client,
-                                     nullptr,    m_logger,      Bytes(Configuration::PageBlob::DefaultBufferSize),
-                                     {0, 0}};
+    const FakeWriteableFileImpl file{"test.dat",
+                                     m_env.Runtime,
+                                     m_env.Client,
+                                     nullptr,
+                                     m_logger,
+                                     Bytes(Configuration::PageBlob::DefaultBufferSize),
+                                     {.Size = Bytes(0), .Capacity = Bytes(0)}};
     std::vector<char> id(100, '\0');
 
-    const auto length = file.GetUniqueId(id.data(), static_cast<int64_t>(id.size()));
+    const auto length = file.GetUniqueId(id);
 
-    EXPECT_EQ(8, length);
-    EXPECT_EQ("test.dat", std::string(id.data(), static_cast<size_t>(length)));
+    EXPECT_EQ(8U, length);
+    EXPECT_EQ("test.dat", std::string(id.data(), length));
 }
 
 TEST_F(WriteableFileTests, GetUniqueId_BufferSmallerThanName_ReturnsTruncatedName) {
     static constexpr std::string_view filename = "very_long_filename_for_testing.dat";
-    const FakeWriteableFileImpl file{filename, m_env.Runtime, m_env.Client,
-                                     nullptr,  m_logger,      Bytes(Configuration::PageBlob::DefaultBufferSize),
-                                     {0, 0}};
+    const FakeWriteableFileImpl file{filename,
+                                     m_env.Runtime,
+                                     m_env.Client,
+                                     nullptr,
+                                     m_logger,
+                                     Bytes(Configuration::PageBlob::DefaultBufferSize),
+                                     {.Size = Bytes(0), .Capacity = Bytes(0)}};
     std::vector<char> id(10, '\0');
 
-    const auto length = file.GetUniqueId(id.data(), static_cast<int64_t>(id.size()));
+    const auto length = file.GetUniqueId(id);
 
-    EXPECT_EQ(10, length);
-    EXPECT_EQ(filename.substr(0, 10), std::string(id.data(), static_cast<size_t>(length)));
+    EXPECT_EQ(10U, length);
+    EXPECT_EQ(filename.substr(0, 10), std::string(id.data(), length));
 }
 
 TEST_F(WriteableFileTests, GetUniqueId_EmptyName_ReturnsZero) {
-    const FakeWriteableFileImpl file{
-        "", m_env.Runtime, m_env.Client, nullptr, m_logger, Bytes(Configuration::PageBlob::DefaultBufferSize), {0, 0}};
+    const FakeWriteableFileImpl file{"",
+                                     m_env.Runtime,
+                                     m_env.Client,
+                                     nullptr,
+                                     m_logger,
+                                     Bytes(Configuration::PageBlob::DefaultBufferSize),
+                                     {.Size = Bytes(0), .Capacity = Bytes(0)}};
     std::vector<char> id(100, '\0');
 
-    const auto length = file.GetUniqueId(id.data(), static_cast<int64_t>(id.size()));
+    const auto length = file.GetUniqueId(id);
 
-    EXPECT_EQ(0, length);
+    EXPECT_EQ(0U, length);
 }
 
 TEST_F(WriteableFileTests, MoveConstructor_TransfersState_Correctly) {
@@ -797,26 +811,26 @@ TEST_F(WriteableFileTests, MoveAssignment_IsDeleted) {
 // Invalidation runs from destructors and scope guards, so it must survive allocation failure without letting an
 // older in-flight fetch repopulate the cache.
 TEST(BlobMetadataCacheAllocationTests, InvalidationSurvivesAllocationFailureAndRejectsOlderFetches) {
-    static_assert(
-        noexcept(std::declval<const AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntimeBase&>().InvalidateBlobSize(
+    static_assert(noexcept(
+        std::declval<const AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntimeBase&>().MetadataCache().Invalidate(
             std::string_view{})));
     const std::string longUrl(200, 'u');
     for (const std::string url : {std::string("a-new-url-tombstone-that-is-not-short-sso"), longUrl}) {
         AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntimeBase runtime;
-        runtime.CacheBlobSize(url, 1, runtime.BlobSizeEpoch());
-        const auto staleEpoch = runtime.BlobSizeEpoch();
+        runtime.MetadataCache().StoreSize(url, 1, runtime.MetadataCache().SizeEpoch());
+        const auto staleEpoch = runtime.MetadataCache().SizeEpoch();
 
         g_failAllAllocations = true;
-        runtime.InvalidateBlobSize(url);
+        runtime.MetadataCache().Invalidate(url);
         g_failAllAllocations = false;
 
-        EXPECT_FALSE(runtime.CachedBlobSize(url)) << url.size();
-        runtime.CacheBlobSize(url, 2, staleEpoch);
-        EXPECT_FALSE(runtime.CachedBlobSize(url)) << url.size();
-        runtime.CacheBlobSize("other", 3, staleEpoch);
-        EXPECT_FALSE(runtime.CachedBlobSize("other")) << "watermark fallback rejects older fetches";
-        runtime.CacheBlobSize(url, 4, runtime.BlobSizeEpoch());
-        EXPECT_EQ(4, runtime.CachedBlobSize(url)) << url.size();
+        EXPECT_FALSE(runtime.MetadataCache().Size(url)) << url.size();
+        runtime.MetadataCache().StoreSize(url, 2, staleEpoch);
+        EXPECT_FALSE(runtime.MetadataCache().Size(url)) << url.size();
+        runtime.MetadataCache().StoreSize("other", 3, staleEpoch);
+        EXPECT_FALSE(runtime.MetadataCache().Size("other")) << "watermark fallback rejects older fetches";
+        runtime.MetadataCache().StoreSize(url, 4, runtime.MetadataCache().SizeEpoch());
+        EXPECT_EQ(4, runtime.MetadataCache().Size(url)) << url.size();
     }
 }
 

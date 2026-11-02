@@ -52,6 +52,7 @@ target_sources(aveva-azure-client
         "${base-include-dir}/AVEVA/AzureClient/Detail/BlobBatch.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Detail/BlobDownload.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/Detail/ClientCore.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Detail/RequestPipeline.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Detail/DownloadSinks.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Detail/ProtocolConstants.hpp"
@@ -63,12 +64,36 @@ target_sources(aveva-azure-client
         "${base-include-dir}/AVEVA/AzureClient/ClientForwardDeclarations.hpp"
         "${base-include-dir}/AVEVA/AzureClient/PageBlobClient.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Response.hpp"
+        "${base-include-dir}/AVEVA/AzureClient/Types.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Credentials.hpp"
         "${base-include-dir}/AVEVA/AzureClient/CredentialVariant.hpp"
         "${base-include-dir}/AVEVA/AzureClient/ChainedTokenCredential.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Models/BlobContainerModels.hpp"
         "${base-include-dir}/AVEVA/AzureClient/Models/BlobModels.hpp"
 )
+# Every header under include/ is installed, so a public header can never include one the package lacks: the
+# FILE_SET above must list exactly the headers on disk.
+file(GLOB_RECURSE aveva_azure_client_headers_on_disk CONFIGURE_DEPENDS "${base-include-dir}/*.hpp")
+get_target_property(aveva_azure_client_file_set aveva-azure-client HEADER_SET)
+foreach(header_list aveva_azure_client_headers_on_disk aveva_azure_client_file_set)
+    set(normalized "")
+    foreach(header IN LISTS ${header_list})
+        cmake_path(NORMAL_PATH header)
+        list(APPEND normalized "${header}")
+    endforeach()
+    list(SORT normalized)
+    set(${header_list} "${normalized}")
+endforeach()
+if(NOT aveva_azure_client_headers_on_disk STREQUAL aveva_azure_client_file_set)
+    set(missing ${aveva_azure_client_headers_on_disk})
+    list(REMOVE_ITEM missing ${aveva_azure_client_file_set})
+    set(stale ${aveva_azure_client_file_set})
+    list(REMOVE_ITEM stale ${aveva_azure_client_headers_on_disk})
+    message(FATAL_ERROR
+        "aveva-azure-client FILE_SET HEADERS does not match include/.\n"
+        "Missing from FILE_SET: ${missing}\nListed but not on disk: ${stale}")
+endif()
+
 target_include_directories(aveva-azure-client
     PUBLIC
         "$<BUILD_INTERFACE:${base-include-dir}>"

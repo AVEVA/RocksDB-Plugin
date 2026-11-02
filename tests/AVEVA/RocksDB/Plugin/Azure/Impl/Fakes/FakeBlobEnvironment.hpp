@@ -35,11 +35,10 @@ struct SlowProbeReadableFileImpl : FakeReadableFileImpl {
     using FakeReadableFileImpl::FakeReadableFileImpl;
     std::chrono::milliseconds ProbeDelay{0};
 
-    [[nodiscard]] std::optional<size_t> TryReadFromCompletedPrefetch(const int64_t offset, const int64_t bytesToRead,
-                                                                     char* buffer,
-                                                                     uint64_t* const deferredRetire = nullptr) const {
-        const auto result =
-            FakeReadableFileImpl::TryReadFromCompletedPrefetch(offset, bytesToRead, buffer, deferredRetire);
+    [[nodiscard]] std::optional<ReadableFileDetail::PrefetchHit>
+    TryReadFromCompletedPrefetch(const int64_t offset, const int64_t bytesToRead, char* buffer,
+                                 const ReadableFileDetail::SlotRetirement retirement) const {
+        const auto result = FakeReadableFileImpl::TryReadFromCompletedPrefetch(offset, bytesToRead, buffer, retirement);
         std::this_thread::sleep_for(ProbeDelay);
         return result;
     }
@@ -68,7 +67,7 @@ struct FakeBlobEnvironment {
 
     explicit FakeBlobEnvironment(const std::string& container = "files", const std::string& blob = "test.sst")
         : Blob(std::make_shared<FakeBlobServer>(Http, container, blob)), Client(Blob->Client) {
-        Runtime->SetMetadataClockForTesting(&m_metadataClockNanos);
+        Runtime->MetadataCache().SetClockForTesting(&m_metadataClockNanos);
     }
 
     // The metadata and size caches read a manual clock, so their TTL expires only when a test says so.

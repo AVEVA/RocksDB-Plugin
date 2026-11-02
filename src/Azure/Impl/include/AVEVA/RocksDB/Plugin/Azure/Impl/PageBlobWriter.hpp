@@ -63,7 +63,7 @@ template <typename TBlob> class PageBlobWriter {
         const auto doubled =
             capacity > std::numeric_limits<int64_t>::max() / 2 ? std::numeric_limits<int64_t>::max() : capacity * 2;
         return std::max({required, std::min(doubled, SignedBytes(Configuration::PageBlob::MaxPageBlobSize)),
-                         SignedBytes(Configuration::PageBlob::DefaultSize)});
+                         SignedBytes(Defaults::DataFileInitialSize)});
     }
 
     /// <summary>Records a capacity already known from the service (no request is made).</summary>
@@ -73,7 +73,7 @@ template <typename TBlob> class PageBlobWriter {
     void Resize(const int64_t capacity) { Block(*H.Blob, ResizeAsync(capacity)); }
 
     [[nodiscard]] BlobOperations::Task<void> ResizeAsync(const int64_t capacity) {
-        co_await BlobOperations::SetCapacityAsync(*H.Runtime, *H.Blob, capacity);
+        co_await BlobOperations::SetCapacityAsync(H.Runtime, *H.Blob, CountFromSigned(capacity));
         m_capacity = capacity;
     }
 
@@ -81,10 +81,10 @@ template <typename TBlob> class PageBlobWriter {
     /// Records the logical size in the blob's metadata. The physical length is page-rounded, so this is a separate
     /// write; it changes the ETag, which is why callers skip it when nothing new is to be published.
     /// </summary>
-    void PublishSize(const int64_t size) { BlobOperations::SetSize(*H.Runtime, *H.Blob, size); }
+    void PublishSize(const int64_t size) { BlobOperations::SetSize(H.Runtime, *H.Blob, CountFromSigned(size)); }
 
     [[nodiscard]] BlobOperations::Task<void> PublishSizeAsync(const int64_t size) {
-        co_await BlobOperations::SetSizeAsync(*H.Runtime, *H.Blob, size);
+        co_await BlobOperations::SetSizeAsync(H.Runtime, *H.Blob, CountFromSigned(size));
     }
 
     /// <summary>Marks the cached copy stale before the blob changes, so a reader never serves the old bytes.</summary>

@@ -45,10 +45,9 @@ Validity CheckToken(const std::string& value);
 /// Checks that a header can be sent: a token name, a value without control characters, and sizes within
 /// what Beast accepts (longer fields make fields::insert throw).
 /// </summary>
-/// <param name="name">The field name.</param>
-/// <param name="value">The field value.</param>
+/// <param name="header">The header to check.</param>
 /// <returns>Valid if the header can be sent.</returns>
-Validity CheckHeader(const std::string& name, const std::string& value);
+Validity CheckHeader(const HttpHeader& header);
 
 /// <summary>
 /// Checks that a parsed URL is one a request may be sent to: http(s), a non-empty host without control,
@@ -59,16 +58,14 @@ Validity CheckHeader(const std::string& name, const std::string& value);
 Validity CheckRequestUrl(const boost::urls::url_view& url);
 
 /// <summary>
-/// The single definition of what may be sent: the URL, method, per-request timeout and every header. Used both to
+/// The single definition of what may be sent: the URL, method and every header. Used both to
 /// decide pool eligibility and to build the wire request, so the two can never disagree. Called from Route::Of, which
 /// is where validation actually happens.
 /// </summary>
 /// <param name="request">The request to check.</param>
-/// <param name="options">The options it would be sent with.</param>
 /// <param name="url">The request's URL, already parsed by the caller (which needs it afterwards).</param>
 /// <returns>An empty error code if the request may be sent; otherwise InvalidUrl or InvalidRequest.</returns>
-std::error_code ValidateRequest(const HttpRequest& request, const HttpRequestOptions& options,
-                                const boost::urls::url_view& url);
+std::error_code ValidateRequest(const HttpRequest& request, const boost::urls::url_view& url);
 
 /// <summary>
 /// Maps an exception thrown while building the wire request to the error reported to the caller. Only the

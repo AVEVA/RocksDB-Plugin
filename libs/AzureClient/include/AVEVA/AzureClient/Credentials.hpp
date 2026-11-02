@@ -40,11 +40,11 @@
 
 // Microsoft Entra ID token credentials that request tokens through an HTTP client (any HttpClientLike).
 //
-// Lifetime: each credential keeps a non-owning reference to the HTTP client, which must outlive the credential and
-// every in-flight GetTokenAsync coroutine. The credential itself must also outlive every in-flight GetTokenAsync:
-// the coroutines use `this`, so destroying a credential while a call is pending is undefined behaviour. Each
-// GetTokenAsync is a coroutine that runs on the executor of its awaiting coroutine; cancelling it cancels the
-// token request.
+// Lifetime: a credential built from a THttp& borrows the HTTP client, which must outlive the credential and every
+// in-flight GetTokenAsync coroutine; one built from a shared_ptr shares ownership of it with those coroutines. A
+// pending GetTokenAsync owns a share of the credential's configuration, so the credential itself may be destroyed
+// while a call is in flight. Each GetTokenAsync is a coroutine that runs on the executor of its awaiting coroutine;
+// cancelling it cancels the token request.
 //
 // Every GetTokenAsync sends a token request; wrap the credential in CachingTokenCredential to reuse tokens until
 // they approach expiry.
@@ -262,7 +262,7 @@ boost::asio::awaitable<TokenResult> SendTokenRequest(THttp& httpClient, HttpRequ
         co_await Private::SendWithRetry(httpClient, Private::RequestAuth{}, std::shared_ptr<NoTokenCredential>{}, retry,
                                         std::move(request), std::move(requestOptions), notFoundRetry);
     if (!result.has_value()) {
-        co_return std::unexpected(result.error());
+        co_return std::unexpected(result.error().Error());
     }
     co_return ParseTokenResponse(std::error_code{}, *result);
 }
@@ -366,9 +366,15 @@ void ValidateOidcRequestUri(std::string_view uri);
 /// <typeparam name="THttp">The HTTP client type.</typeparam>
 template <HttpClientLike THttp> class BasicClientSecretCredential final {
   public:
-    BasicClientSecretCredential(THttp& httpClient, ClientSecretCredentialOptions options)
-        : m_httpClient(&httpClient), m_options(std::move(options)) {
-        static_cast<void>(Private::NormalizeAuthorityHost(m_options.AuthorityHost));
+    /// <summary>
+    /// Uses a client the credential does not own, which must outlive it.
+    /// </summary>
+    /// <param name="httpClient">The client to send token requests with.</param>
+    /// <param name="options">The credential's configuration.</param>
+    /// <exception cref="std::invalid_argument">Thrown when the authority host is rejected.</exception>
+    BasicClientSecretCredential(THttp& httpClient, ClientSecretCredentialOptions options) : m_httpClient(&httpClient) {
+        static_cast<void>(Private::NormalizeAuthorityHost(options.AuthorityHost));
+        m_options = std::make_shared<const ClientSecretCredentialOptions>(std::move(options));
     }
     /// <summary>
     /// Shares ownership of the HTTP client, so the credential keeps it alive.
@@ -389,23 +395,34 @@ template <HttpClientLike THttp> class BasicClientSecretCredential final {
     /// <returns>The token; <c>std::errc::invalid_argument</c> when the configuration or scopes are unusable (nothing
     /// is sent); otherwise the failure of the token request.</returns>
     [[nodiscard]] boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> scopes) {
-        if (Private::ValidityOfTenantId(m_options.TenantId) == Validity::Invalid || m_options.ClientId.empty() ||
-            m_options.ClientSecret.empty() || scopes.empty()) {
-            co_return Private::InvalidArgument();
-        }
-        std::string body = "grant_type=client_credentials&client_id=" + Private::FormEncode(m_options.ClientId) +
-                           "&client_secret=" + Private::FormEncode(m_options.ClientSecret) +
-                           "&scope=" + Private::FormEncode(Private::JoinScopes(scopes));
-        co_return co_await Private::SendTokenRequest(
-            *m_httpClient,
-            Private::BuildEntraTokenRequest(m_options.AuthorityHost, m_options.TenantId, std::move(body)),
-            m_options.RequestOptions, m_options.Retry, NotFoundRetry::Fail);
+        return GetTokenImpl(m_httpClient, m_httpOwner, m_options, std::move(scopes));
     }
 
   private:
+    /// <summary>
+    /// The body of <c>GetTokenAsync</c>; its by-value parameters keep the configuration (and a shared HTTP client)
+    /// alive while the request is pending, independent of the credential.
+    /// </summary>
+    static boost::asio::awaitable<TokenResult>
+    GetTokenImpl(gsl::not_null<THttp*> httpClient, std::shared_ptr<THttp> /*owner*/,
+                 std::shared_ptr<const ClientSecretCredentialOptions> options, std::vector<std::string> scopes) {
+        if (Private::ValidityOfTenantId(options->TenantId) == Validity::Invalid || options->ClientId.empty() ||
+            options->ClientSecret.empty() || scopes.empty()) {
+            co_return Private::InvalidArgument();
+        }
+        std::string body = "grant_type=client_credentials&client_id=" + Private::FormEncode(options->ClientId) +
+                           "&client_secret=" + Private::FormEncode(options->ClientSecret) +
+                           "&scope=" + Private::FormEncode(Private::JoinScopes(scopes));
+        co_return co_await Private::SendTokenRequest(
+            *httpClient,
+            Private::BuildEntraTokenRequest(options->AuthorityHost, Private::TenantIdLabel{options->TenantId},
+                                            std::move(body)),
+            options->RequestOptions, options->Retry, NotFoundRetry::Fail);
+    }
+
     gsl::not_null<THttp*> m_httpClient;
     std::shared_ptr<THttp> m_httpOwner;
-    ClientSecretCredentialOptions m_options;
+    std::shared_ptr<const ClientSecretCredentialOptions> m_options;
 };
 
 /// <summary>
@@ -426,8 +443,9 @@ template <HttpClientLike THttp> class BasicWorkloadIdentityCredential final {
     /// <param name="options">The credential's configuration.</param>
     /// <exception cref="std::invalid_argument">Thrown when the authority host is rejected.</exception>
     BasicWorkloadIdentityCredential(THttp& httpClient, WorkloadIdentityCredentialOptions options)
-        : m_httpClient(&httpClient), m_options(std::move(options)) {
-        static_cast<void>(Private::NormalizeAuthorityHost(m_options.AuthorityHost));
+        : m_httpClient(&httpClient) {
+        static_cast<void>(Private::NormalizeAuthorityHost(options.AuthorityHost));
+        m_options = std::make_shared<const WorkloadIdentityCredentialOptions>(std::move(options));
     }
     /// <summary>
     /// Shares ownership of the HTTP client, so the credential keeps it alive.
@@ -449,29 +467,40 @@ template <HttpClientLike THttp> class BasicWorkloadIdentityCredential final {
     /// is sent); <c>std::errc::no_such_file_or_directory</c> when the file cannot be read; otherwise the failure of
     /// the token request.</returns>
     [[nodiscard]] boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> scopes) {
-        if (Private::ValidityOfTenantId(m_options.TenantId) == Validity::Invalid || m_options.ClientId.empty() ||
-            m_options.TokenFilePath.empty() || scopes.empty()) {
+        return GetTokenImpl(m_httpClient, m_httpOwner, m_options, std::move(scopes));
+    }
+
+  private:
+    /// <summary>
+    /// The body of <c>GetTokenAsync</c>; its by-value parameters keep the configuration (and a shared HTTP client)
+    /// alive while the request is pending, independent of the credential.
+    /// </summary>
+    static boost::asio::awaitable<TokenResult>
+    GetTokenImpl(gsl::not_null<THttp*> httpClient, std::shared_ptr<THttp> /*owner*/,
+                 std::shared_ptr<const WorkloadIdentityCredentialOptions> options, std::vector<std::string> scopes) {
+        if (Private::ValidityOfTenantId(options->TenantId) == Validity::Invalid || options->ClientId.empty() ||
+            options->TokenFilePath.empty() || scopes.empty()) {
             co_return Private::InvalidArgument();
         }
         // Deliberately read inline: the file is a few hundred bytes (a projected service-account token) and the
         // credential sits behind CachingTokenCredential, so this runs about once per token lifetime. Moving it
         // off the io thread would need a client-owned thread or a new executor option, which costs more than the
         // microseconds this blocks for. Revisit if TokenFilePath may point at a slow or network filesystem.
-        const std::optional<std::string> assertion = Private::ReadTokenFile(m_options.TokenFilePath);
+        const std::optional<std::string> assertion = Private::ReadTokenFile(options->TokenFilePath);
         if (!assertion.has_value()) {
             co_return std::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
         }
-        std::string body = Private::BuildClientAssertionBody(m_options.ClientId, *assertion, scopes);
+        std::string body = Private::BuildClientAssertionBody(options->ClientId, *assertion, scopes);
         co_return co_await Private::SendTokenRequest(
-            *m_httpClient,
-            Private::BuildEntraTokenRequest(m_options.AuthorityHost, m_options.TenantId, std::move(body)),
-            m_options.RequestOptions, m_options.Retry, NotFoundRetry::Fail);
+            *httpClient,
+            Private::BuildEntraTokenRequest(options->AuthorityHost, Private::TenantIdLabel{options->TenantId},
+                                            std::move(body)),
+            options->RequestOptions, options->Retry, NotFoundRetry::Fail);
     }
 
-  private:
     gsl::not_null<THttp*> m_httpClient;
     std::shared_ptr<THttp> m_httpOwner;
-    WorkloadIdentityCredentialOptions m_options;
+    std::shared_ptr<const WorkloadIdentityCredentialOptions> m_options;
 };
 
 /// <summary>
@@ -517,9 +546,17 @@ template <HttpClientLike THttp> class BasicClientAssertionCredential final {
     /// (no token request is sent); the provider's error when it fails; otherwise the failure of the token
     /// request.</returns>
     [[nodiscard]] boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> scopes) {
-        // The coroutine frame keeps the shared options (and the HTTP client) alive for the whole call.
-        const auto options = m_options;
-        const auto owner = m_httpOwner;
+        return GetTokenImpl(m_httpClient, m_httpOwner, m_options, std::move(scopes));
+    }
+
+  private:
+    /// <summary>
+    /// The body of <c>GetTokenAsync</c>; its by-value parameters keep the configuration (and a shared HTTP client)
+    /// alive while the request is pending, independent of the credential.
+    /// </summary>
+    static boost::asio::awaitable<TokenResult>
+    GetTokenImpl(gsl::not_null<THttp*> httpClient, std::shared_ptr<THttp> /*owner*/,
+                 std::shared_ptr<const ClientAssertionCredentialOptions> options, std::vector<std::string> scopes) {
         if (Private::ValidityOfTenantId(options->TenantId) == Validity::Invalid || options->ClientId.empty() ||
             !options->AssertionProvider || scopes.empty()) {
             co_return Private::InvalidArgument();
@@ -533,11 +570,12 @@ template <HttpClientLike THttp> class BasicClientAssertionCredential final {
         }
         std::string body = Private::BuildClientAssertionBody(options->ClientId, *assertion, scopes);
         co_return co_await Private::SendTokenRequest(
-            *m_httpClient, Private::BuildEntraTokenRequest(options->AuthorityHost, options->TenantId, std::move(body)),
+            *httpClient,
+            Private::BuildEntraTokenRequest(options->AuthorityHost, Private::TenantIdLabel{options->TenantId},
+                                            std::move(body)),
             options->RequestOptions, options->Retry, NotFoundRetry::Fail);
     }
 
-  private:
     gsl::not_null<THttp*> m_httpClient;
     std::shared_ptr<THttp> m_httpOwner;
     std::shared_ptr<const ClientAssertionCredentialOptions> m_options;
@@ -561,7 +599,8 @@ template <HttpClientLike THttp> class BasicManagedIdentityCredential final {
     /// <param name="httpClient">The client to send token requests with.</param>
     /// <param name="options">The credential's configuration.</param>
     BasicManagedIdentityCredential(THttp& httpClient, ManagedIdentityCredentialOptions options)
-        : m_httpClient(&httpClient), m_options(std::move(options)) {}
+        : m_httpClient(&httpClient),
+          m_options(std::make_shared<const ManagedIdentityCredentialOptions>(std::move(options))) {}
     /// <summary>
     /// Shares ownership of the HTTP client, so the credential keeps it alive.
     /// </summary>
@@ -580,15 +619,26 @@ template <HttpClientLike THttp> class BasicManagedIdentityCredential final {
     /// <returns>The token; <c>std::errc::invalid_argument</c> when the configuration or scopes are unusable (nothing
     /// is sent); otherwise the failure of the token request.</returns>
     [[nodiscard]] boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> scopes) {
+        return GetTokenImpl(m_httpClient, m_httpOwner, m_options, std::move(scopes));
+    }
+
+  private:
+    /// <summary>
+    /// The body of <c>GetTokenAsync</c>; its by-value parameters keep the configuration (and a shared HTTP client)
+    /// alive while the request is pending, independent of the credential.
+    /// </summary>
+    static boost::asio::awaitable<TokenResult>
+    GetTokenImpl(gsl::not_null<THttp*> httpClient, std::shared_ptr<THttp> /*owner*/,
+                 std::shared_ptr<const ManagedIdentityCredentialOptions> options, std::vector<std::string> scopes) {
         enum class IdentitySource : std::uint8_t { Imds, AppService };
-        const auto source = m_options.IdentityEndpoint.empty() ? IdentitySource::Imds : IdentitySource::AppService;
+        const auto source = options->IdentityEndpoint.empty() ? IdentitySource::Imds : IdentitySource::AppService;
         if (scopes.size() != 1U || scopes.front().empty() ||
-            (!m_options.ClientId.empty() && !m_options.ResourceId.empty()) ||
-            (source == IdentitySource::AppService && m_options.IdentityHeader.empty()) ||
-            (source == IdentitySource::Imds && m_options.ImdsEndpoint.empty()) ||
+            (!options->ClientId.empty() && !options->ResourceId.empty()) ||
+            (source == IdentitySource::AppService && options->IdentityHeader.empty()) ||
+            (source == IdentitySource::Imds && options->ImdsEndpoint.empty()) ||
             Private::ValidityOfIdentityEndpoint(source == IdentitySource::AppService
-                                                    ? m_options.IdentityEndpoint
-                                                    : m_options.ImdsEndpoint) == Validity::Invalid) {
+                                                    ? options->IdentityEndpoint
+                                                    : options->ImdsEndpoint) == Validity::Invalid) {
             co_return Private::InvalidArgument();
         }
         std::string_view resource = scopes.front();
@@ -599,31 +649,31 @@ template <HttpClientLike THttp> class BasicManagedIdentityCredential final {
         std::vector<std::pair<std::string, std::string>> query{
             {"api-version", source == IdentitySource::AppService ? "2019-08-01" : "2018-02-01"},
             {"resource", std::string{resource}}};
-        if (!m_options.ClientId.empty()) {
-            query.emplace_back("client_id", m_options.ClientId);
+        if (!options->ClientId.empty()) {
+            query.emplace_back("client_id", options->ClientId);
         }
-        if (!m_options.ResourceId.empty()) {
-            query.emplace_back(source == IdentitySource::AppService ? "mi_res_id" : "msi_res_id", m_options.ResourceId);
+        if (!options->ResourceId.empty()) {
+            query.emplace_back(source == IdentitySource::AppService ? "mi_res_id" : "msi_res_id", options->ResourceId);
         }
         const std::string& endpoint =
-            source == IdentitySource::AppService ? m_options.IdentityEndpoint : m_options.ImdsEndpoint;
+            source == IdentitySource::AppService ? options->IdentityEndpoint : options->ImdsEndpoint;
 
         HttpRequest request;
         request.SetMethod(HttpMethod::Get);
-        request.SetUrl(endpoint + (!endpoint.contains('?') ? "?" : "&") + Private::BuildQueryString(query));
+        request.SetUrl(
+            AVEVA::HttpUrl{endpoint + (!endpoint.contains('?') ? "?" : "&") + Private::BuildQueryString(query)});
         if (source == IdentitySource::AppService) {
-            request.AddHeader(HttpHeader{"X-IDENTITY-HEADER", m_options.IdentityHeader});
+            request.AddHeader(HttpHeader(HeaderName{"X-IDENTITY-HEADER"}, HeaderValue{options->IdentityHeader}));
         } else {
-            request.AddHeader(HttpHeader{"Metadata", "true"});
+            request.AddHeader(HttpHeader(HeaderName{"Metadata"}, HeaderValue{"true"}));
         }
-        co_return co_await Private::SendTokenRequest(*m_httpClient, std::move(request), m_options.RequestOptions,
-                                                     m_options.Retry, NotFoundRetry::Retry);
+        co_return co_await Private::SendTokenRequest(*httpClient, std::move(request), options->RequestOptions,
+                                                     options->Retry, NotFoundRetry::Retry);
     }
 
-  private:
     gsl::not_null<THttp*> m_httpClient;
     std::shared_ptr<THttp> m_httpOwner;
-    ManagedIdentityCredentialOptions m_options;
+    std::shared_ptr<const ManagedIdentityCredentialOptions> m_options;
 };
 
 /// <summary>
@@ -694,7 +744,8 @@ template <HttpClientLike THttp> class BasicAzurePipelinesCredential final {
     /// <param name="scopes">The scopes to request; must not be empty.</param>
     /// <returns>The token, or the failure of the OIDC token request or of the exchange.</returns>
     [[nodiscard]] boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> scopes) {
-        co_return co_await m_exchange.GetTokenAsync(std::move(scopes));
+        // Returned rather than awaited: the exchange's awaitable owns what it needs, while this frame would not.
+        return m_exchange.GetTokenAsync(std::move(scopes));
     }
 
   private:
@@ -707,11 +758,11 @@ template <HttpClientLike THttp> class BasicAzurePipelinesCredential final {
         const auto separator = options.OidcRequestUri.find('?') == std::string::npos ? '?' : '&';
         HttpRequest request;
         request.SetMethod(HttpMethod::Post);
-        request.SetUrl(options.OidcRequestUri + separator +
-                       "api-version=7.1&serviceConnectionId=" + Private::FormEncode(options.ServiceConnectionId));
-        request.AddHeader(HttpHeader{"Content-Type", "application/json"});
-        request.AddHeader(HttpHeader{"Authorization", "Bearer " + options.SystemAccessToken});
-        request.SetBody(std::string{});
+        request.SetUrl(AVEVA::HttpUrl{options.OidcRequestUri + separator + "api-version=7.1&serviceConnectionId=" +
+                                      Private::FormEncode(options.ServiceConnectionId)});
+        request.AddHeader(HttpHeader(HeaderName{"Content-Type"}, HeaderValue{"application/json"}));
+        request.AddHeader(HttpHeader(HeaderName{"Authorization"}, HeaderValue{"Bearer " + options.SystemAccessToken}));
+        request.SetBody(AVEVA::HttpBody{std::string{}});
         return request;
     }
 
@@ -771,7 +822,7 @@ template <HttpClientLike THttp> class BasicAzurePipelinesCredential final {
             httpClient, Private::RequestAuth{}, std::shared_ptr<NoTokenCredential>{}, options->Retry,
             BuildOidcRequest(*options), options->RequestOptions, NotFoundRetry::Fail);
         if (!result.has_value()) {
-            co_return std::unexpected(result.error());
+            co_return std::unexpected(result.error().Error());
         }
         const HttpResponse& response = *result;
         if (response.GetStatus().Class() != HttpStatusClass::Success) {

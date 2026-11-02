@@ -17,8 +17,7 @@
 
 #include <gtest/gtest.h>
 
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
-
+#include <stdexcept>
 #include <type_traits>
 
 #ifdef BOOST_ASIO_VERSION
@@ -28,17 +27,21 @@
 #error "The public headers must not include the Azure client."
 #endif
 
-TEST(PublicHeadersTests, Defaults_AreThePublicHeaderAndTheImplConfigurationAgrees) {
+TEST(PublicHeadersTests, Defaults_AreValidDataFileAndPrefetchSizes) {
     using AVEVA::RocksDB::Plugin::Azure::Defaults;
-    using AVEVA::RocksDB::Plugin::Azure::Impl::Configuration;
-    static_assert(Defaults::DataFileBufferSize == Configuration::PageBlob::DefaultBufferSize);
-    static_assert(Defaults::DataFileInitialSize == Configuration::PageBlob::DefaultSize);
-    static_assert(Defaults::MaxPrefetchBytes == Configuration::DefaultPrefetchBudgetBytes);
+    using AVEVA::RocksDB::Plugin::Azure::SignedByteCount;
     static_assert(Defaults::DataFileBufferSize.Value() > 0 && Defaults::DataFileBufferSize.Value() % 512 == 0);
     static_assert(Defaults::DataFileInitialSize.Value() > 0 && Defaults::DataFileInitialSize.Value() % 512 == 0);
+    static_assert(Defaults::MaxPrefetchBytes.Bytes() <= SignedByteCount::Max);
     SUCCEED();
 }
 
+TEST(PublicHeadersTests, SignedByteCount_AboveInt64Max_IsRefused) {
+    using AVEVA::RocksDB::Plugin::Azure::SignedByteCount;
+    using AVEVA::RocksDB::Plugin::Core::ByteCount;
+    EXPECT_EQ(SignedByteCount::Max, SignedByteCount{SignedByteCount::Max}.Bytes());
+    EXPECT_THROW((void)SignedByteCount{ByteCount{SignedByteCount::Max.Value() + 1}}, std::out_of_range);
+}
 TEST(PublicHeadersTests, ReadableFile_IsANonTemplateRandomAccessFile) {
     static_assert(std::is_base_of_v<rocksdb::FSRandomAccessFile, AVEVA::RocksDB::Plugin::Azure::ReadableFile>);
     SUCCEED();

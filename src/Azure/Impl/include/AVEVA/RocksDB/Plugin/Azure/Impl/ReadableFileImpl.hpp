@@ -46,7 +46,6 @@ namespace ReadableFileDetail {
 enum class DeadlineStatus : std::uint8_t { Live, Expired };
 enum class StaleVerdict : std::uint8_t { Fresh, Stale };
 enum class RefreshBudget : uint8_t { Exhausted, Spent };
-enum class ReadClamp : std::uint8_t { NothingToRead, Readable };
 enum class PrefetchProgress : std::uint8_t { Settled, Downloading };
 enum class PartialRead : std::uint8_t { Reject, Allow };
 enum class MetadataRefreshProgress : std::uint8_t { Idle, InFlight };
@@ -56,19 +55,27 @@ enum class PrefetchChain : std::uint8_t { Declined, Chained };
 enum class ETagMatch : std::uint8_t { Differs, Matches };
 enum class ETagChange : std::uint8_t { Unchanged, Changed };
 enum class SlotEnd : std::uint8_t { NotReached, Reached };
+// Whether a prefetch hit that reaches its slot's end drops the slot now, or leaves that to the caller.
+enum class SlotRetirement : std::uint8_t { Immediate, Deferred };
+// A read served from a completed prefetch. With SlotRetirement::Deferred, a hit that reached its slot's end names
+// the slot in ExhaustedSlot; the caller drops it with RetirePrefetch once its whole batch has been served.
+struct PrefetchHit {
+    std::size_t Bytes = 0;
+    std::optional<std::uint64_t> ExhaustedSlot;
+};
 enum class WaiterRegistration : std::uint8_t { None, Registered };
 // Translates to a retryable TimedOut status, like a transport timeout.
 inline std::exception_ptr ReadTimedOutError() {
-    return std::make_exception_ptr(RequestFailedException(HttpStatus::NoResponse, "ReadTimedOut",
-                                                          "The read deadline was exceeded", "",
-                                                          std::make_error_code(std::errc::timed_out)));
+    return std::make_exception_ptr(RequestFailedException(
+        HttpStatus::NoResponse, ServiceErrorCode{"ReadTimedOut"}, ErrorMessage{"The read deadline was exceeded"},
+        ServiceRequestId{""}, std::make_error_code(std::errc::timed_out)));
 }
 
 // The read's owner went away; translates to an aborted status.
 inline std::exception_ptr ReadAbandonedError() {
-    return std::make_exception_ptr(RequestFailedException(HttpStatus::NoResponse, "ReadAbandoned",
-                                                          "Read abandoned before it completed", "",
-                                                          std::make_error_code(std::errc::operation_canceled)));
+    return std::make_exception_ptr(RequestFailedException(
+        HttpStatus::NoResponse, ServiceErrorCode{"ReadAbandoned"}, ErrorMessage{"Read abandoned before it completed"},
+        ServiceRequestId{""}, std::make_error_code(std::errc::operation_canceled)));
 }
 
 inline ReadDeadline DeadlineAfter(const std::chrono::milliseconds timeout) {
@@ -86,7 +93,8 @@ inline DeadlineStatus StatusOf(const ReadDeadline& deadline) {
 } // namespace ReadableFileDetail
 
 // Neither copyable nor movable: it is built once, in place, by make_shared, and in-flight reads hold it by shared_ptr.
-template <typename TBlob> class BasicReadableFileImpl {
+template <typename TBlob>
+class BasicReadableFileImpl : public std::enable_shared_from_this<BasicReadableFileImpl<TBlob>> {
     BlobFileHandles<TBlob> m_h;
     // Random (and async) reads may run concurrently on one file, so the cached blob metadata is guarded.
     mutable std::mutex m_metadataMutex;
@@ -185,22 +193,27 @@ template <typename TBlob> class BasicReadableFileImpl {
     // Serves from a completed prefetch only; a pending one is skipped, so this never blocks.
     // With `allowPartial`, a range that only starts inside a slot is served up to the slot's end and the caller
     // fetches the remainder; the result is then the number of bytes copied, which may be less than requested.
-    [[nodiscard]] std::optional<size_t>
-    TryReadFromPrefetch(int64_t offset, int64_t bytesToRead, char* buffer,
-                        ReadableFileDetail::PartialRead partial = ReadableFileDetail::PartialRead::Reject,
-                        uint64_t* deferredRetire = nullptr) const;
+    [[nodiscard]] std::optional<ReadableFileDetail::PrefetchHit>
+    TryReadFromPrefetch(int64_t offset, int64_t bytesToRead, char* buffer, ReadableFileDetail::PartialRead partial,
+                        ReadableFileDetail::SlotRetirement retirement) const;
     // One-shot signal a read waits on until the prefetch it needs settles.
     using PrefetchSettledChannel = boost::asio::experimental::concurrent_channel<void(boost::system::error_code)>;
     // Waits (bounded by PrefetchWaitTimeout) for the pending prefetch covering `offset`, if there is one.
     [[nodiscard]] BlobOperations::Task<void> WaitForPrefetchAsync(int64_t offset) const;
     void ClearPrefetch() const;
-    // Trims a read to the addressable range; NothingToRead when nothing is left to read.
-    [[nodiscard]] static ReadableFileDetail::ReadClamp ClampRead(int64_t offset, int64_t& bytesToRead);
-    [[nodiscard]] BlobOperations::Task<int64_t> DownloadWithRetryAsync(int64_t offset, int64_t bytesToRead,
-                                                                       char* buffer, int& refreshesLeft) const;
-    // The body of RandomRead/RandomReadAsync. Borrows `file`, which must outlive the returned coroutine.
-    [[nodiscard]] static BlobOperations::Task<int64_t> RandomReadFrom(const BasicReadableFileImpl& file, int64_t offset,
-                                                                      int64_t bytesToRead, char* buffer);
+    // The length of the read trimmed to the addressable range; 0 when nothing is left to read.
+    [[nodiscard]] static int64_t ClampedLength(int64_t offset, int64_t bytesToRead);
+    // What one DownloadWithRetryAsync call achieved, and the stale-read refreshes it left for the rest of the read.
+    struct RetriedDownload {
+        int64_t BytesRead = 0;
+        int RefreshesLeft = 0;
+    };
+    [[nodiscard]] BlobOperations::Task<RetriedDownload> DownloadWithRetryAsync(int64_t offset, int64_t bytesToRead,
+                                                                               char* buffer, int refreshesLeft) const;
+    // The body of RandomRead/RandomReadAsync. Holds `file`, so it outlives the coroutine however it is run.
+    [[nodiscard]] static BlobOperations::Task<int64_t> RandomReadFrom(std::shared_ptr<const BasicReadableFileImpl> file,
+                                                                      int64_t offset, int64_t bytesToRead,
+                                                                      char* buffer);
     [[nodiscard]] BlobOperations::Task<void> RefreshBlobMetadataAsync() const;
     [[nodiscard]] std::pair<int64_t, std::string> GetMetadata() const;
     void SetMetadata(int64_t size, std::string etag) const;
@@ -219,10 +232,11 @@ template <typename TBlob> class BasicReadableFileImpl {
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
         std::shared_ptr<AsyncReadTracker> asyncReads = nullptr,
         std::shared_ptr<std::atomic<int64_t>> prefetchBudget = nullptr,
-        Core::ByteCount maxPrefetchBytes = Configuration::DefaultPrefetchBudgetBytes);
+        Core::ByteCount maxPrefetchBytes = Defaults::MaxPrefetchBytes.Bytes());
 
     // Reads at an explicit offset; carries no read position of its own. Blocks the calling thread (never run it on the
-    // client's executor); RandomReadAsync is the awaitable form.
+    // client's executor); RandomReadAsync is the awaitable form. The file must be owned by a shared_ptr (as every
+    // file handle holds it), which the read shares for its duration; otherwise it throws std::bad_weak_ptr.
     [[nodiscard]] int64_t RandomRead(int64_t offset, int64_t bytesToRead, char* buffer) const;
 
     // Awaitable random read into `buffer`: serves from a prefetch (waiting, bounded, for one in flight), then downloads
@@ -236,10 +250,10 @@ template <typename TBlob> class BasicReadableFileImpl {
     [[nodiscard]] std::optional<size_t> TryReadFromCache(int64_t offset, int64_t bytesToRead, char* buffer) const;
     // Serves a read from a completed in-memory prefetch only; never waits and never touches the file cache, so it is
     // safe on a host io_context thread (FileCache reads are blocking disk I/O).
-    // With deferredRetire, a hit that reaches the slot's end does not drop it: the slot's id is stored there instead
-    // (left untouched otherwise) and the caller drops it with RetirePrefetch once its whole batch has been served.
-    [[nodiscard]] std::optional<size_t> TryReadFromCompletedPrefetch(int64_t offset, int64_t bytesToRead, char* buffer,
-                                                                     uint64_t* deferredRetire = nullptr) const;
+    // See PrefetchHit for what SlotRetirement::Deferred hands back.
+    [[nodiscard]] std::optional<ReadableFileDetail::PrefetchHit>
+    TryReadFromCompletedPrefetch(int64_t offset, int64_t bytesToRead, char* buffer,
+                                 ReadableFileDetail::SlotRetirement retirement) const;
     // Drops the slot with this id if it is still present; a replaced or already dropped slot is left alone.
     void RetirePrefetch(uint64_t id) const;
     // Covered when a still-downloading prefetch fully covers the range. Advisory: the answer may change before the
@@ -261,10 +275,12 @@ template <typename TBlob> class BasicReadableFileImpl {
     // outlives the read. Run it with StartTracked (or StartOperation) on the client's executor.
     // A stop request on `stopToken` cancels this read's own wait or download (including its transport retries), starts
     // no restart or further download, and fails the read with a cancelled error. It never touches a shared metadata
-    // refresh or prefetch that the read may be waiting on. Callers enforce a deadline by requesting a stop when it passes.
-    [[nodiscard]] static BlobOperations::Task<ReadResult>
-    ReadAsync(std::shared_ptr<const BasicReadableFileImpl> self, int64_t offset, int64_t bytesToRead,
-              int attemptsLeft = kMaxStaleReadRetries, std::stop_token stopToken = {});
+    // refresh or prefetch that the read may be waiting on. Callers enforce a deadline by requesting a stop when it
+    // passes.
+    [[nodiscard]] static BlobOperations::Task<ReadResult> ReadAsync(std::shared_ptr<const BasicReadableFileImpl> self,
+                                                                    int64_t offset, int64_t bytesToRead,
+                                                                    int attemptsLeft = kMaxStaleReadRetries,
+                                                                    std::stop_token stopToken = {});
 
     // Starts `operation` like StartOperation, additionally counting it as in flight for the AsyncReadTracker (if any)
     // until `done` has run and been released.
@@ -285,7 +301,7 @@ template <typename TBlob> class BasicReadableFileImpl {
                                                                     int64_t offset, int64_t n);
 
     // Default process-wide cap on prefetched bytes across all files sharing a budget.
-    static constexpr Core::ByteCount kDefaultPrefetchBudgetBytes = Configuration::DefaultPrefetchBudgetBytes;
+    static constexpr Core::ByteCount kDefaultPrefetchBudgetBytes = Defaults::MaxPrefetchBytes.Bytes();
 
     // The executor the blob client's completions run on; blocking waits for those completions must not run on it.
     [[nodiscard]] typename TBlob::executor_type ClientExecutor() const { return m_h.Blob->get_executor(); }

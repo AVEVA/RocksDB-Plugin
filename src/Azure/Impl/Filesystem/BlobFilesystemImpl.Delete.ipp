@@ -20,7 +20,7 @@ AzureClient::PriorState BasicBlobFilesystemImpl<THttp>::DeleteFile(const std::st
         }
     }};
     // A suppressed (not found) error means there was nothing to delete.
-    return BlobOperations::Delete(*m_runtime, client);
+    return BlobOperations::Delete(m_runtime, client);
 }
 
 // Removes every blob under the directory prefix. Object storage has no real directories, so the blobs are listed
@@ -37,7 +37,7 @@ template <typename THttp>
 DirectoryContents BasicBlobFilesystemImpl<THttp>::DeleteDirIn(BlobContainerClientOn<THttp>& container,
                                                               const std::string_view prefix,
                                                               const std::string_view realPath) const {
-    const boost::scope::scope_exit invalidateSizes{[this] { m_runtime->InvalidateAllBlobSizes(); }};
+    const boost::scope::scope_exit invalidateSizes{[this] { m_runtime->MetadataCache().InvalidateAll(); }};
 
     AzureClient::ListBlobsOptions options;
     options.Prefix = BlobFilesystemDetail::DirectoryPrefix(realPath);
@@ -48,7 +48,7 @@ DirectoryContents BasicBlobFilesystemImpl<THttp>::DeleteDirIn(BlobContainerClien
     // for success. A chunk-level failure (or a listing failure) propagates immediately: pages already deleted stay
     // deleted and later pages are not attempted, where before a listing failure deleted nothing.
     AzureClient::DeleteBlobsOptions deleteOptions;
-    deleteOptions.MaxConcurrentRequests = Configuration::Transfer::MaxConcurrentDeleteBatches;
+    deleteOptions.MaxConcurrentRequests = AzureClient::Concurrency{Configuration::Transfer::MaxConcurrentDeleteBatches};
     std::optional<AzureClient::BlobStorageError> firstFailure;
 
     BlobFilesystemDetail::ForEachBlobPage(
@@ -72,7 +72,7 @@ DirectoryContents BasicBlobFilesystemImpl<THttp>::DeleteDirIn(BlobContainerClien
                 }
             }};
 
-            const auto result = BlobOperations::DeleteBatch(*m_runtime, container, names, deleteOptions);
+            const auto result = BlobOperations::DeleteBatch(m_runtime, container, names, deleteOptions);
             for (const auto& item : result.Items) {
                 if (item.Error) {
                     BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
@@ -129,7 +129,7 @@ void BasicBlobFilesystemImpl<THttp>::Truncate(const std::string& filePath, int64
         }
     }};
     const auto [partialPage, alignedSize] = BlobHelpers::RoundToEndOfNearestPage(size);
-    BlobOperations::SetCapacity(*m_runtime, client, alignedSize);
+    BlobOperations::SetCapacity(m_runtime, client, CountFromSigned(alignedSize));
     {
         boost::scope::scope_fail warn{[&] {
             BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
@@ -137,7 +137,7 @@ void BasicBlobFilesystemImpl<THttp>::Truncate(const std::string& filePath, int64
                 << " bytes but its logical size could not be set to " << size
                 << "; its recorded size may exceed its capacity until the truncate is retried";
         }};
-        BlobOperations::SetSize(*m_runtime, client, size);
+        BlobOperations::SetSize(m_runtime, client, CountFromSigned(size));
     }
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

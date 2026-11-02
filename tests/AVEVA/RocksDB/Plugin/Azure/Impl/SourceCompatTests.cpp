@@ -19,7 +19,7 @@ TEST(SourceCompatTests, Registration_CompilesAndReachesTheSingleRegisterEntryPoi
     rocksdb::ConfigOptions configOptions;
     rocksdb::Env* env = nullptr;
     std::shared_ptr<rocksdb::Env> guard;
-    const auto ioContext = std::make_shared<boost::asio::io_context>();
+    boost::asio::io_context ioContext;
 
     const auto servicePrincipal = RegisterServicePrincipalLikeMain(configOptions, &env, &guard, ioContext, "");
     const auto chained = RegisterChainedCredentialLikeMain(configOptions, &env, &guard, ioContext, "");
@@ -27,6 +27,7 @@ TEST(SourceCompatTests, Registration_CompilesAndReachesTheSingleRegisterEntryPoi
     EXPECT_TRUE(servicePrincipal.IsInvalidArgument()) << servicePrincipal.ToString();
     EXPECT_TRUE(chained.IsInvalidArgument()) << chained.ToString();
     guard.reset();
+    UnregisterLikeMain("");
 }
 
 // Instantiates the file-usage fixture so a signature change in the RocksDB-facing interface fails to compile.

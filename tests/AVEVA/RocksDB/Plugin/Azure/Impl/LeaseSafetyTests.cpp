@@ -30,6 +30,7 @@ using AVEVA::RocksDB::Plugin::Azure::Impl::AsyncReadTracker;
 using AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntime;
 using AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntimeBase;
 using AVEVA::RocksDB::Plugin::Azure::Impl::DrainResult;
+using AVEVA::RocksDB::Plugin::Azure::Impl::LeaseOwnerId;
 using AVEVA::RocksDB::Plugin::Azure::Impl::WriteFenceState;
 // The lock over the library's page blob client on the fake transport.
 using LockFileImpl = AVEVA::RocksDB::Plugin::Azure::Impl::BasicLockFileImpl<AVEVA::AzureClient::Tests::PageBlobClient>;
@@ -40,23 +41,25 @@ using namespace std::chrono_literals;
 namespace {
 // Publishes a deadline `remaining` from now, standing in for a held lease.
 void SetDeadlineIn(ClientRuntimeBase& runtime, const std::chrono::steady_clock::duration remaining) {
-    runtime.SetLeaseDeadline(&runtime, std::chrono::steady_clock::now() + remaining);
+    runtime.Fence().SetLeaseDeadline(LeaseOwnerId{&runtime}, std::chrono::steady_clock::now() + remaining);
 }
 
-void ClearDeadline(ClientRuntimeBase& runtime) { runtime.SetLeaseDeadline(&runtime, std::nullopt); }
+void ClearDeadline(ClientRuntimeBase& runtime) {
+    runtime.Fence().SetLeaseDeadline(LeaseOwnerId{&runtime}, std::nullopt);
+}
 } // namespace
 
 TEST(WriteFenceTests, WritesAreAllowedUntilFenced) {
     boost::asio::io_context context;
     ClientRuntime runtime(context);
 
-    EXPECT_EQ(runtime.FenceState(), WriteFenceState::Open);
-    EXPECT_NO_THROW(runtime.ThrowIfWritesFenced());
+    EXPECT_EQ(runtime.Fence().State(), WriteFenceState::Open);
+    EXPECT_NO_THROW(runtime.Fence().ThrowIfFenced());
 
-    runtime.FenceWrites();
+    runtime.Fence().Fence();
 
-    EXPECT_EQ(runtime.FenceState(), WriteFenceState::Fenced);
-    EXPECT_THROW(runtime.ThrowIfWritesFenced(), std::runtime_error);
+    EXPECT_EQ(runtime.Fence().State(), WriteFenceState::Fenced);
+    EXPECT_THROW(runtime.Fence().ThrowIfFenced(), std::runtime_error);
 }
 
 TEST(AsyncReadTrackerDrainTests, DrainForTimesOutWhileAReadIsInFlight) {
@@ -88,6 +91,34 @@ TEST(AsyncReadTrackerDrainTests, TokenReleasedOnTheIoThreadEndsFromAFreshTask) {
 
     EXPECT_EQ(inFlightRightAfterRelease, 1U);
     EXPECT_EQ(tracker->InFlight(), 0U);
+}
+
+// An owner that gives up waiting hands its state over; the last read to end, not the owner, releases it.
+TEST(AsyncReadTrackerDrainTests, RetainedStateIsReleasedOnlyWhenTheLastReadEnds) {
+    boost::asio::io_context context;
+    auto tracker = std::make_shared<AsyncReadTracker>(context.get_executor());
+    auto first = tracker->Begin();
+    auto second = tracker->Begin();
+    auto state = std::make_shared<int>(0);
+    const std::weak_ptr<int> watch = state;
+
+    tracker->RetainUntilIdle(std::move(state));
+    first.reset();
+    EXPECT_FALSE(watch.expired());
+
+    second.reset();
+    EXPECT_TRUE(watch.expired());
+}
+
+TEST(AsyncReadTrackerDrainTests, RetainedStateIsReleasedAtOnceWhenIdle) {
+    boost::asio::io_context context;
+    auto tracker = std::make_shared<AsyncReadTracker>(context.get_executor());
+    auto state = std::make_shared<int>(0);
+    const std::weak_ptr<int> watch = state;
+
+    tracker->RetainUntilIdle(std::move(state));
+
+    EXPECT_TRUE(watch.expired());
 }
 
 TEST(AsyncReadTrackerDrainTests, DrainForReturnsImmediatelyWhenIdle) {
@@ -131,54 +162,61 @@ TEST_F(LeaseDeadlineTests, NotOverdueBeforeLockedOrRightAfterAcquiring) {
 TEST(WriteDeadlineTests, WithoutASourceNothingIsBounded) {
     ClientRuntimeBase runtime;
 
-    EXPECT_FALSE(runtime.WriteTimeRemaining().has_value());
-    EXPECT_NO_THROW(runtime.ThrowIfWritesFenced());
+    EXPECT_FALSE(runtime.Fence().TimeRemaining().has_value());
+    EXPECT_NO_THROW(runtime.Fence().ThrowIfFenced());
     AVEVA::HttpRequestOptions options;
-    options.SetTimeout(30s);
-    EXPECT_EQ(30s, AVEVA::RocksDB::Plugin::Azure::Impl::BoundByWriteDeadline(runtime, options).GetTimeout());
+    options.SetTimeout(AVEVA::Timeout{30s});
+    EXPECT_EQ(30s, AVEVA::RocksDB::Plugin::Azure::Impl::BoundByWriteDeadline(
+                       runtime, AVEVA::AzureClient::AzureRequestOptions{options})
+                       .GetTimeout()
+                       .Value());
 }
 
 TEST(WriteDeadlineTests, MutationsAreRejectedOncetheDeadlineHasPassed) {
     ClientRuntimeBase runtime;
     SetDeadlineIn(runtime, 5s);
 
-    EXPECT_NO_THROW(runtime.ThrowIfWritesFenced());
+    EXPECT_NO_THROW(runtime.Fence().ThrowIfFenced());
     SetDeadlineIn(runtime, 0s);
-    EXPECT_THROW(runtime.ThrowIfWritesFenced(), std::runtime_error);
+    EXPECT_THROW(runtime.Fence().ThrowIfFenced(), std::runtime_error);
 
     ClearDeadline(runtime);
-    EXPECT_NO_THROW(runtime.ThrowIfWritesFenced());
+    EXPECT_NO_THROW(runtime.Fence().ThrowIfFenced());
 }
 
 TEST(WriteDeadlineTests, RequestTimeoutIsCappedAtTheTimeLeft) {
     ClientRuntimeBase runtime;
     SetDeadlineIn(runtime, 2s);
     AVEVA::AzureClient::AzureRequestOptions options;
-    options.SetTimeout(60s);
+    options.SetTimeout(AVEVA::Timeout{60s});
     options.SetTotalDeadline(120s);
 
-    const auto bounded = AVEVA::RocksDB::Plugin::Azure::Impl::BoundByWriteDeadline(runtime, options);
+    const auto bounded = AVEVA::RocksDB::Plugin::Azure::Impl::BoundByWriteDeadline(
+        runtime, AVEVA::AzureClient::AzureRequestOptions{options});
 
-    EXPECT_LE(bounded.GetTimeout(), 2s);
-    EXPECT_GT(bounded.GetTimeout(), 1s);
+    EXPECT_LE(bounded.GetTimeout().Value(), 2s);
+    EXPECT_GT(bounded.GetTimeout().Value(), 1s);
     EXPECT_LE(*bounded.GetTotalDeadline(), 2s);
     EXPECT_GT(*bounded.GetTotalDeadline(), 1s);
     // A transfer that is already shorter than the time left is untouched.
-    options.SetTimeout(1s);
-    EXPECT_EQ(1s, AVEVA::RocksDB::Plugin::Azure::Impl::BoundByWriteDeadline(runtime, options).GetTimeout());
+    options.SetTimeout(AVEVA::Timeout{1s});
+    EXPECT_EQ(1s, AVEVA::RocksDB::Plugin::Azure::Impl::BoundByWriteDeadline(
+                      runtime, AVEVA::AzureClient::AzureRequestOptions{options})
+                      .GetTimeout()
+                      .Value());
 }
 
 TEST_F(LeaseDeadlineTests, DeleteIssuedAfterTheRenewalDeadlineIsRejectedWithoutSendingARequest) {
     AVEVA::AzureClient::Tests::PageBlobClient blob(m_httpClient, MakeBlobClientOptions("data", "000001.sst"));
     SetDeadlineIn(*m_runtime, 0s);
 
-    EXPECT_THROW(AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations::Delete(*m_runtime, blob),
+    EXPECT_THROW(AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations::Delete(m_runtime, blob),
                  AVEVA::RocksDB::Plugin::Azure::WritesFencedException);
     EXPECT_EQ(0U, m_httpClient.RequestCount());
 
-    m_runtime->FenceWrites();
+    m_runtime->Fence().Fence();
     ClearDeadline(*m_runtime);
-    EXPECT_THROW(AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations::Delete(*m_runtime, blob),
+    EXPECT_THROW(AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations::Delete(m_runtime, blob),
                  AVEVA::RocksDB::Plugin::Azure::WritesFencedException);
     EXPECT_EQ(0U, m_httpClient.RequestCount());
 }
@@ -188,12 +226,12 @@ TEST_F(LeaseDeadlineTests, DeleteIsBoundedByTheTimeLeftOnTheWriteDeadline) {
     SetDeadlineIn(*m_runtime, 2s);
     m_httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatusCode{202}, MakeCanonicalSuccessHeaders({}), ""});
 
-    EXPECT_EQ(AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations::Delete(*m_runtime, blob),
+    EXPECT_EQ(AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations::Delete(m_runtime, blob),
               AVEVA::AzureClient::PriorState::Existed);
 
     const auto requests = m_httpClient.Requests();
     ASSERT_EQ(1U, requests.size());
-    EXPECT_LE(requests.front().Options.GetTimeout(), 2s);
+    EXPECT_LE(requests.front().Options.GetTimeout().Value(), 2s);
 }
 
 TEST_F(LeaseDeadlineTests, HeldLeasePublishesItsDeadlineAndReleaseWithdrawsIt) {
@@ -204,14 +242,14 @@ TEST_F(LeaseDeadlineTests, HeldLeasePublishesItsDeadlineAndReleaseWithdrawsIt) {
         HttpResponse{::AVEVA::HttpStatusCode{201}, MakeCanonicalSuccessHeaders({{"x-ms-lease-id", "lease"}}), ""});
     ASSERT_EQ(lock.Lock(), LockResult::Acquired);
 
-    const auto remaining = m_runtime->ThrowIfWritesFenced();
+    const auto remaining = m_runtime->Fence().ThrowIfFenced();
     ASSERT_TRUE(remaining.has_value());
     EXPECT_GT(*remaining, 10s);
     EXPECT_LT(*remaining, 20s);
 
     m_httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::Ok, MakeCanonicalSuccessHeaders({}), ""});
     lock.Unlock();
-    EXPECT_FALSE(m_runtime->WriteTimeRemaining().has_value());
+    EXPECT_FALSE(m_runtime->Fence().TimeRemaining().has_value());
 }
 
 TEST_F(LeaseDeadlineTests, AppendIssuedAfterTheRenewalDeadlineIsRejectedWithoutSendingARequest) {
@@ -228,8 +266,9 @@ TEST_F(LeaseDeadlineTests, AppendIssuedAfterTheRenewalDeadlineIsRejectedWithoutS
 
     // Renewal is stalled: the lease's published deadline passes while the lease is still nominally held. The lock's
     // own clock cannot be moved after it publishes, so the deadline is published directly.
-    m_runtime->SetLeaseDeadline(&lock, std::chrono::steady_clock::now() - 1s);
-    EXPECT_THROW(AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations::UploadPages(*m_runtime, blob, page, 0),
+    m_runtime->Fence().SetLeaseDeadline(LeaseOwnerId{&lock}, std::chrono::steady_clock::now() - 1s);
+    EXPECT_THROW(AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations::UploadPages(
+                     m_runtime, blob, page, AVEVA::RocksDB::Plugin::Core::ByteOffset{}),
                  std::runtime_error);
     EXPECT_EQ(requestsBefore, m_httpClient.RequestCount());
 }

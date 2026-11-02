@@ -238,7 +238,10 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
             if (lookup.Role == RefreshRole::Leader) {
                 co_return co_await Refresh(self, scopes, std::move(lookup.State));
             }
-            co_await WaitFor(lookup.State);
+            if (const auto waitError = co_await WaitFor(lookup.State)) {
+                // Failures are returned, never thrown: a cancelled wait reports operation_canceled.
+                co_return std::unexpected(std::make_error_code(std::errc::operation_canceled));
+            }
             // A cancelled leader tells nothing about the credential, so ask again.
             if (lookup.State->Result.has_value() ||
                 lookup.State->Result.error() != std::make_error_code(std::errc::operation_canceled)) {
@@ -384,13 +387,13 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
     /// <summary>
     /// Suspends until <paramref name="state"/> is done; resumes inline-free through post. Cancellable: a connected
     /// cancellation slot removes this waiter from <paramref name="state"/> (if Finish has not already claimed it)
-    /// and completes it with operation_aborted, which is rethrown as a boost::system::system_error. Without
+    /// and completes it with operation_aborted, which is returned to the caller. Without
     /// this a follower bounded by <c>GetTokenForScopes(...) || Expire(limit)</c> would stay blocked until the
     /// leader's own refresh finished, past its own timeout.
     /// </summary>
     /// <param name="state">The refresh to wait for.</param>
-    /// <exception cref="boost::system::system_error">Thrown when the wait is cancelled.</exception>
-    static boost::asio::awaitable<void> WaitFor(std::shared_ptr<RefreshState> state) {
+    /// <returns>Empty when the refresh finished; operation_aborted when the wait was cancelled.</returns>
+    static boost::asio::awaitable<boost::system::error_code> WaitFor(std::shared_ptr<RefreshState> state) {
         auto token = boost::asio::as_tuple(boost::asio::use_awaitable);
         auto [ec] = co_await boost::asio::async_initiate<decltype(token), void(boost::system::error_code)>(
             [](auto handler, std::shared_ptr<RefreshState> st) {
@@ -433,9 +436,7 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
                 st->Waiters.emplace_back(std::move(id), std::move(waiter));
             },
             token, std::move(state));
-        if (ec) {
-            throw boost::system::system_error(ec);
-        }
+        co_return ec;
     }
 
     /// <summary>
@@ -543,24 +544,6 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
     std::error_code m_lastFailure;
     ScopeList m_failedScopes;
 };
-
-/// <summary>
-/// Deduces the inner credential and clock types.
-/// </summary>
-/// <typeparam name="TInner">The credential whose tokens are cached.</typeparam>
-/// <typeparam name="TClock">The clock used for expiry and backoff decisions.</typeparam>
-/// <param name="inner">The credential to cache.</param>
-/// <param name="refreshWindow">How long before expiry a refresh starts.</param>
-/// <param name="clock">The clock to read the time from.</param>
-/// <returns>The new cache.</returns>
-/// <exception cref="std::invalid_argument">Thrown when <paramref name="refreshWindow"/> is negative.</exception>
-template <TokenCredentialLike TInner, TokenClockLike TClock = SystemTokenClock>
-[[nodiscard]] std::shared_ptr<CachingTokenCredential<TInner, TClock>>
-MakeCachingTokenCredential(std::shared_ptr<TInner> inner,
-                           std::chrono::seconds refreshWindow = DefaultTokenCredentialRefreshWindow,
-                           TClock clock = {}) {
-    return CachingTokenCredential<TInner, TClock>::Create(std::move(inner), refreshWindow, std::move(clock));
-}
 
 /// <summary>
 /// Whether a type is already a <c>CachingTokenCredential</c>.

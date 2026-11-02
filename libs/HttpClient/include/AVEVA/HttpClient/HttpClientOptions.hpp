@@ -3,14 +3,17 @@
 
 #pragma once
 
-#include <AVEVA/HttpClient/Detail/Lifetime.hpp>
 #include <AVEVA/HttpClient/Units.hpp>
 
 #include <chrono>
+#include <concepts>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
-#include <string>
+#include <optional>
 #include <system_error>
+#include <type_traits>
+#include <utility>
 
 namespace AVEVA {
 /// <summary>
@@ -71,18 +74,38 @@ struct HttpDiagnostic {
     /// <summary>The stage the request was in; meaningful for Timeout and retries, Queued otherwise.</summary>
     HttpRequestPhase Phase = HttpRequestPhase::Queued;
     /// <summary>The "host:port" (no IPv6 brackets) the event concerns; empty when none applies.</summary>
-    std::string Origin;
+    DiagnosticOrigin Origin;
     /// <summary>The underlying error, when there is one.</summary>
     std::error_code Error;
-    /// <summary>A short human-readable description.</summary>
-    std::string Message;
+    /// <summary>A short human-readable description; empty if describing the event ran out of memory.</summary>
+    DiagnosticMessage Message;
 };
 
 /// <summary>
-/// Receives diagnostic events. Must be cheap, thread-safe and must not call back into the client; an exception it
-/// throws is discarded.
+/// Receives diagnostic events. Only a callable that cannot throw is accepted, and the client never runs two calls at
+/// once, so the receiver needs no locking of its own. It runs on whichever thread observed the event, so it should
+/// be cheap and must not call back into the client.
 /// </summary>
-using HttpDiagnosticsCallback = std::function<void(const HttpDiagnostic&)>;
+class HttpDiagnosticsCallback {
+  public:
+    /// <summary>
+    /// Wraps a receiver.
+    /// </summary>
+    /// <param name="receiver">A callable taking <c>const HttpDiagnostic&amp;</c> that is declared not to throw.</param>
+    template <typename Receiver>
+        requires(!std::same_as<std::remove_cvref_t<Receiver>, HttpDiagnosticsCallback> &&
+                 std::is_nothrow_invocable_v<std::remove_cvref_t<Receiver>&, const HttpDiagnostic&>)
+    explicit HttpDiagnosticsCallback(Receiver&& receiver) : m_receiver(std::forward<Receiver>(receiver)) {}
+
+    /// <summary>
+    /// Delivers one event to the receiver.
+    /// </summary>
+    /// <param name="event">The event.</param>
+    void operator()(const HttpDiagnostic& event) const noexcept { m_receiver(event); }
+
+  private:
+    std::function<void(const HttpDiagnostic&)> m_receiver;
+};
 
 /// <summary>
 /// Client-wide settings fixed when the client is created: how TLS is negotiated and verified, how idle
@@ -113,19 +136,19 @@ class HttpClientOptions {
     /// Path to a PEM file of trusted CA certificates.
     /// </summary>
     /// <returns>The path, empty when none was set.</returns>
-    [[nodiscard]] const std::string& GetCaFile() const noexcept AVEVA_LIFETIMEBOUND;
+    [[nodiscard]] std::filesystem::path GetCaFile() const;
 
     /// <summary>
     /// Path to an OpenSSL-style hashed directory of trusted CA certificates.
     /// </summary>
     /// <returns>The path, empty when none was set.</returns>
-    [[nodiscard]] const std::string& GetCaDirectory() const noexcept AVEVA_LIFETIMEBOUND;
+    [[nodiscard]] std::filesystem::path GetCaDirectory() const;
 
     /// <summary>
     /// Trusted CA certificates held in memory as PEM text.
     /// </summary>
     /// <returns>The PEM text, empty when none was set.</returns>
-    [[nodiscard]] const std::string& GetCaPem() const noexcept AVEVA_LIFETIMEBOUND;
+    [[nodiscard]] PemText GetCaPem() const;
 
     /// <summary>
     /// How many idle keep-alive connections may be kept per origin.
@@ -137,7 +160,7 @@ class HttpClientOptions {
     /// How long a pooled connection may sit idle before it is closed.
     /// </summary>
     /// <returns>The idle timeout; 30 seconds unless set otherwise.</returns>
-    [[nodiscard]] std::chrono::seconds GetIdleConnectionTimeout() const noexcept;
+    [[nodiscard]] Timeout GetIdleConnectionTimeout() const noexcept;
 
     /// <summary>
     /// How long a pooled connection must have sat idle before it is checked for a peer-side close when it is
@@ -169,14 +192,14 @@ class HttpClientOptions {
     /// Trusted CA certificates from a PEM file.
     /// </summary>
     /// <param name="caFile">Path to a PEM file; empty to set none.</param>
-    void SetCaFile(std::string caFile);
+    void SetCaFile(std::filesystem::path caFile);
 
     /// <summary>
     /// Trusted CA certificates from an OpenSSL-style hashed directory, used in addition to
     /// <see cref="SetCaFile"/> and <see cref="SetCaPem"/>.
     /// </summary>
     /// <param name="caDirectory">Path to a hashed certificate directory; empty to set none.</param>
-    void SetCaDirectory(std::string caDirectory);
+    void SetCaDirectory(std::filesystem::path caDirectory);
 
     /// <summary>
     /// Trusted CA certificates as concatenated PEM text, used in addition to <see cref="SetCaFile"/> and
@@ -185,7 +208,7 @@ class HttpClientOptions {
     /// <see cref="SetCaFile"/>) when connecting to servers that are not covered by another trust source.
     /// </summary>
     /// <param name="caPem">Concatenated PEM certificates; empty to set none.</param>
-    void SetCaPem(std::string caPem);
+    void SetCaPem(PemText caPem);
 
     /// <summary>
     /// Caps how many idle keep-alive connections are kept per origin.
@@ -199,8 +222,7 @@ class HttpClientOptions {
     /// an idle socket can linger for up to about twice this timeout.
     /// </summary>
     /// <param name="idleConnectionTimeout">The idle timeout.</param>
-    /// <exception cref="std::invalid_argument">Thrown when the timeout is negative.</exception>
-    void SetIdleConnectionTimeout(std::chrono::seconds idleConnectionTimeout);
+    void SetIdleConnectionTimeout(Timeout idleConnectionTimeout) noexcept;
 
     /// <summary>
     /// Connections idle for less than this are reused without a liveness check (one cheap system call), because
@@ -224,25 +246,25 @@ class HttpClientOptions {
     /// Reports events the client otherwise handles silently: stale-connection retries, connections not returned
     /// to the pool, swallowed exceptions, DNS cache invalidations and the stage a timeout happened in.
     /// </summary>
-    /// <param name="callback">The receiver; empty (the default) disables reporting.</param>
+    /// <param name="callback">The receiver. Without one (the default) nothing is reported.</param>
     void SetDiagnosticsCallback(HttpDiagnosticsCallback callback);
 
     /// <summary>
     /// The diagnostics receiver.
     /// </summary>
-    /// <returns>The callback; empty when none was set.</returns>
-    [[nodiscard]] const HttpDiagnosticsCallback& GetDiagnosticsCallback() const noexcept AVEVA_LIFETIMEBOUND;
+    /// <returns>A copy of the callback; none when none was set.</returns>
+    [[nodiscard]] std::optional<HttpDiagnosticsCallback> GetDiagnosticsCallback() const;
 
   private:
     TlsVersion m_tlsVersion = TlsVersion::Tls12OrLater;
     PeerVerification m_peerVerification = PeerVerification::Verify;
-    std::string m_caFile;
-    std::string m_caDirectory;
-    std::string m_caPem;
+    std::filesystem::path m_caFile;
+    std::filesystem::path m_caDirectory;
+    PemText m_caPem;
     ConnectionCount m_maxIdleConnectionsPerHost{6};
-    std::chrono::seconds m_idleConnectionTimeout{30};
+    Timeout m_idleConnectionTimeout{std::chrono::seconds{30}};
     std::chrono::milliseconds m_idleProbeThreshold{50};
     ConnectionCount m_maxConnectionsPerHost{};
-    HttpDiagnosticsCallback m_diagnosticsCallback;
+    std::optional<HttpDiagnosticsCallback> m_diagnosticsCallback;
 };
 } // namespace AVEVA

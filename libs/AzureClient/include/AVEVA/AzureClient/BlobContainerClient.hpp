@@ -94,8 +94,8 @@ class BasicBlobContainerClient : Private::ClientCore<THttp, Private::BasicContai
 
     /// <summary>
     /// Creates a client that shares ownership of the HTTP client for as long as this client or any client made from
-    /// it exists. Operations already in flight borrow the HTTP client without owning it, so keep a client (or the
-    /// shared_ptr) alive until they complete.
+    /// it exists. Operations already in flight share that ownership too, so the client may be destroyed while they
+    /// run.
     /// </summary>
     /// <param name="httpClient">The HTTP client to send requests with.</param>
     /// <param name="options">The container, endpoint and authentication settings.</param>
@@ -134,7 +134,8 @@ class BasicBlobContainerClient : Private::ClientCore<THttp, Private::BasicContai
     /// <returns>The page of blobs, or the error that failed the request.</returns>
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::ListBlobsResult>>
     ListBlobsAsync(ListBlobsOptions options = {}, std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return ListBlobsImpl(*m_httpClient, m_target, std::move(options), Core::Resolve(std::move(requestOptions)));
+        return ListBlobsImpl(*m_httpClient, m_target, m_httpOwner, std::move(options),
+                             Core::Resolve(std::move(requestOptions)));
     }
 
     /// <summary>
@@ -149,13 +150,13 @@ class BasicBlobContainerClient : Private::ClientCore<THttp, Private::BasicContai
     /// find the container this very call created and report it as already existing, so an engaged Error() means
     /// "it exists", not "another caller created it".
     /// </remarks>
-    /// <param name="options">The metadata and request conditions of the new container.</param>
+    /// <param name="options">The metadata of the new container.</param>
     /// <param name="requestOptions">Per-request options; the client's defaults apply when empty.</param>
     /// <returns>The ETag and last-modified time of the container, or the error that failed the request.</returns>
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::CreateBlobContainerResult>>
     CreateIfNotExistsAsync(CreateBlobContainerOptions options = {},
                            std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return CreateIfNotExistsImpl(*m_httpClient, m_target, std::move(options),
+        return CreateIfNotExistsImpl(*m_httpClient, m_target, m_httpOwner, std::move(options),
                                      Core::Resolve(std::move(requestOptions)));
     }
 
@@ -204,8 +205,10 @@ class BasicBlobContainerClient : Private::ClientCore<THttp, Private::BasicContai
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::DeleteBlobsResult>>
     DeleteBlobsAsync(std::vector<std::string> blobNames, DeleteBlobsOptions options = {},
                      std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return Private::DeleteBlobsAsync(*m_httpClient, m_target, std::move(blobNames), std::move(options),
-                                         Core::Resolve(std::move(requestOptions)));
+        return Private::DeleteBlobsAsync(
+            *m_httpClient, m_httpOwner,
+            gsl::not_null<std::shared_ptr<const Private::BasicContainerTarget<TCred>>>(m_target), std::move(blobNames),
+            std::move(options), Core::Resolve(std::move(requestOptions)));
     }
 
   private:
@@ -242,7 +245,8 @@ class BasicBlobContainerClient : Private::ClientCore<THttp, Private::BasicContai
     /// <exception cref="std::invalid_argument">Thrown when <paramref name="blobName"/> is empty.</exception>
     [[nodiscard]] std::shared_ptr<const Private::BasicBlobTarget<TCred>> MakeBlobTarget(std::string blobName) const {
         return std::make_shared<const Private::BasicBlobTarget<TCred>>(Private::MakeBlobTarget<TCred>(
-            m_target->Connection, m_target->Credential, m_target->ContainerName, std::move(blobName)));
+            m_target->Connection, m_target->Credential, Private::ContainerNameText{m_target->ContainerName},
+            Private::BlobNameText{std::move(blobName)}));
     }
 
     /// <summary>The body of ListBlobsAsync; a static coroutine so that its frame owns what the operation
@@ -254,7 +258,7 @@ class BasicBlobContainerClient : Private::ClientCore<THttp, Private::BasicContai
     /// <returns>The page of blobs, or the error that failed the request.</returns>
     static boost::asio::awaitable<BlobResult<Models::ListBlobsResult>>
     ListBlobsImpl(THttp& httpClient, std::shared_ptr<const Private::BasicContainerTarget<TCred>> target,
-                  ListBlobsOptions options, AzureRequestOptions requestOptions) {
+                  std::shared_ptr<THttp> /*owner*/, ListBlobsOptions options, AzureRequestOptions requestOptions) {
         std::vector<std::pair<std::string, std::string>> queryParameters{{"comp", "list"}};
         if (!options.Prefix.empty()) {
             queryParameters.emplace_back("prefix", options.Prefix);
@@ -286,12 +290,12 @@ class BasicBlobContainerClient : Private::ClientCore<THttp, Private::BasicContai
     /// <returns>The ETag and last-modified time of the container, or the error that failed the request.</returns>
     static boost::asio::awaitable<BlobResult<Models::CreateBlobContainerResult>>
     CreateIfNotExistsImpl(THttp& httpClient, std::shared_ptr<const Private::BasicContainerTarget<TCred>> target,
-                          CreateBlobContainerOptions options, AzureRequestOptions requestOptions) {
+                          std::shared_ptr<THttp> /*owner*/, CreateBlobContainerOptions options,
+                          AzureRequestOptions requestOptions) {
         co_return co_await Private::SendAndParse<Models::CreateBlobContainerResult>(
             httpClient, *target, Private::BuildCreateContainerRequest(*target, options),
             Private::ParseETagAndLastModified<Models::CreateBlobContainerResult>, std::move(requestOptions),
-            ReplaySafety::Unsafe,
-            {BlobStorageErrorCode::ContainerAlreadyExists, BlobStorageErrorCode::ConditionNotMet});
+            ReplaySafety::Unsafe, {BlobStorageErrorCode::ContainerAlreadyExists});
     }
 
     using Core::m_httpClient;

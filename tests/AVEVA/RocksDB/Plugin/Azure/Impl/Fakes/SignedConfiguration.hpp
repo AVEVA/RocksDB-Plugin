@@ -12,8 +12,9 @@
 namespace AVEVA::RocksDB::Plugin::Azure::Impl::Tests::SignedConfiguration {
 namespace PageBlob {
 inline constexpr std::int64_t PageSize = SignedBytes(Configuration::PageBlob::PageSize);
-inline constexpr std::int64_t DefaultSize = SignedBytes(Configuration::PageBlob::DefaultSize);
-inline constexpr std::int64_t DefaultBufferSize = SignedBytes(Configuration::PageBlob::DefaultBufferSize);
+inline constexpr std::int64_t DefaultSize = SignedBytes(::AVEVA::RocksDB::Plugin::Azure::Defaults::DataFileInitialSize);
+inline constexpr std::int64_t DefaultBufferSize =
+    SignedBytes(::AVEVA::RocksDB::Plugin::Azure::Defaults::DataFileBufferSize);
 inline constexpr std::int64_t MaxPageBlobSize = SignedBytes(Configuration::PageBlob::MaxPageBlobSize);
 } // namespace PageBlob
 

@@ -42,24 +42,21 @@ struct ValidationCase {
 std::vector<ValidationCase> MakeCases() {
     std::vector<ValidationCase> cases;
 
-    cases.push_back({"PageUploadUnalignedOffset",
-                     [](FakeHttpClient& http) {
-                         PageBlobClient client{http, MakeBlobClientOptions()};
-                         const auto result = RunAwaitable(http, client.UploadPagesAsync(1, std::string(512, 'x')));
-                         return result.has_value() ? std::error_code{} : result.error().Code;
-                     },
-                     std::errc::invalid_argument});
     cases.push_back({"PageUploadUnalignedLength",
                      [](FakeHttpClient& http) {
                          PageBlobClient client{http, MakeBlobClientOptions()};
-                         const auto result = RunAwaitable(http, client.UploadPagesAsync(0, std::string(100, 'x')));
+                         const auto result =
+                             RunAwaitable(http, client.UploadPagesAsync(AVEVA::AzureClient::PageOffset{0U},
+                                                                        AVEVA::HttpBody{std::string(100, 'x')}));
                          return result.has_value() ? std::error_code{} : result.error().Code;
                      },
                      std::errc::invalid_argument});
     cases.push_back({"PageUploadEmptyContent",
                      [](FakeHttpClient& http) {
                          PageBlobClient client{http, MakeBlobClientOptions()};
-                         const auto result = RunAwaitable(http, client.UploadPagesAsync(0, std::string{}));
+                         const auto result =
+                             RunAwaitable(http, client.UploadPagesAsync(AVEVA::AzureClient::PageOffset{0U},
+                                                                        AVEVA::HttpBody{std::string{}}));
                          return result.has_value() ? std::error_code{} : result.error().Code;
                      },
                      std::errc::invalid_argument});

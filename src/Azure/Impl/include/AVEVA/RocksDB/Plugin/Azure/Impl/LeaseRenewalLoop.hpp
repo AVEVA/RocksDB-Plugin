@@ -3,11 +3,14 @@
 
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ErrorTransience.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/TaskGroup.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
+
+#include "AVEVA/RocksDB/Plugin/Core/Units.hpp"
 
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/awaitable.hpp>
@@ -40,11 +43,34 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// <summary>Whether the renewal loop is still scheduling rounds.</summary>
 enum class LoopState : std::uint8_t { Running, Stopped };
 
+/// <summary>A duration with a meaning of its own, so the renewal interval and the retry delay cannot be
+/// swapped.</summary>
+template <typename Tag> class TaggedDuration {
+  public:
+    explicit constexpr TaggedDuration(const std::chrono::milliseconds value) noexcept : m_value(value) {}
+    [[nodiscard]] constexpr std::chrono::milliseconds Value() const noexcept { return m_value; }
+
+  private:
+    std::chrono::milliseconds m_value;
+};
+
+struct RenewalIntervalTag;
+struct RetryBaseDelayTag;
+struct RetryAttemptsTag;
+/// <summary>How long the loop sleeps between regular renewal rounds.</summary>
+using RenewalInterval = TaggedDuration<RenewalIntervalTag>;
+/// <summary>The first retry delay after a failed renewal; later retries back off exponentially from it.</summary>
+using RetryBaseDelay = TaggedDuration<RetryBaseDelayTag>;
+/// <summary>How many rounds (the first included) a failing lease gets before the loop stops retrying it.</summary>
+using RetryAttempts = Core::StrongInteger<RetryAttemptsTag, size_t>;
+
 /// <summary>
 /// Keeps leases alive from the host io_context, with no thread of its own. One coroutine sleeps for `interval`, then
 /// renews every lease returned by the snapshot side by side through `co_await lock.RenewAsync()`. Failed renewals are
 /// retried with exponential backoff and jitter starting at `retryDelay` (never later than the earliest renewal
-/// deadline, and not sooner than a Retry-After hint from the service allows).
+/// deadline of any held lease, and not sooner than a Retry-After hint from the service allows). While failed leases
+/// are retried, the healthy ones are still renewed every `interval`: each retry round that comes due merges in a
+/// fresh snapshot, so one transient failure cannot starve the other leases into fencing the filesystem.
 ///
 /// A conflict or other lease-lost failure (by status or BlobStorageErrorCode), any other permanent failure (a status
 /// that is not 408, 429 or 5xx, e.g. 401/403/404), a non-service exception, or a lease
@@ -71,10 +97,12 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
     /// </summary>
     static std::shared_ptr<BasicLeaseRenewalLoop>
     Start(boost::asio::io_context::executor_type executor, std::shared_ptr<Logger> logger, TSnapshot snapshot,
-          TOnFatal onFatal, std::chrono::milliseconds interval,
-          std::chrono::milliseconds retryDelay = std::chrono::milliseconds(100), size_t maxAttempts = 5) {
-        std::shared_ptr<BasicLeaseRenewalLoop> loop(new BasicLeaseRenewalLoop(
-            executor, std::move(logger), std::move(snapshot), std::move(onFatal), interval, retryDelay, maxAttempts));
+          TOnFatal onFatal, const RenewalInterval interval,
+          const RetryBaseDelay retryDelay = RetryBaseDelay{std::chrono::milliseconds(100)},
+          const RetryAttempts maxAttempts = RetryAttempts{5}) {
+        std::shared_ptr<BasicLeaseRenewalLoop> loop(
+            new BasicLeaseRenewalLoop(executor, std::move(logger), std::move(snapshot), std::move(onFatal),
+                                      interval.Value(), retryDelay.Value(), maxAttempts.Value()));
         BOOST_LOG_SEV(*loop->m_logger, boost::log::trivial::info) << "Starting blob lease renewal";
         boost::asio::co_spawn(executor, Run(loop), boost::asio::detached);
         return loop;
@@ -124,12 +152,12 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
     // These failures can never succeed on retry: the service no longer recognises our lease. The code is checked in
     // because 400/412 lease failures carry the same meaning as a 409 (which a transient failure never is).
     static AzureClient::Transience FailureKind(const RequestFailedException& e) {
-        return AzureErrorTranslator::LeaseLossOf(e.Code) == LeaseLoss::Lost
+        return AzureErrorTranslator::LeaseLossOf(e.Code()) == LeaseLoss::Lost
                    ? AzureClient::Transience::Permanent
                    // Only what the client's own retry policy would retry can plausibly succeed. Anything else (400,
                    // 401, 403, 404, 501, permanent transport errors, ...) is permanent for a renewal, and retrying it
                    // would only delay fencing until the lease is overdue.
-                   : AzureErrorTranslator::TransienceOf(e);
+                   : TransienceOf(e);
     }
 
     // The leases that failed a round and the attempt that comes next.
@@ -204,11 +232,18 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
                 co_return std::nullopt;
             }
             try {
+                const auto now = std::chrono::steady_clock::now();
                 if (retry) {
                     locks = std::move(retry->Locks);
                     attempt = retry->Attempt;
+                    // The healthy leases are due as well: renew them with this retry rather than let them lapse.
+                    if (now - m_lastFullRound >= m_interval) {
+                        MergeSnapshotInto(locks);
+                        m_lastFullRound = now;
+                    }
                 } else {
                     locks = m_snapshot();
+                    m_lastFullRound = now;
                     BOOST_LOG_SEV(*m_logger, boost::log::trivial::debug)
                         << "Attempting to renew " << locks.size() << " leases";
                 }
@@ -225,10 +260,10 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
             ++m_activeRounds;
         }
 
-        std::vector<std::exception_ptr> errors(locks.size());
+        std::vector<std::exception_ptr> errors;
         {
             const boost::scope::scope_exit release{[this]() noexcept { ReleaseRound(); }};
-            co_await RenewAll(locks, errors);
+            errors = co_await RenewAll(locks);
         }
 
         // If classifying or scheduling throws (for example on allocation), renewal could no longer continue, so fence
@@ -252,24 +287,50 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
         co_return std::nullopt;
     }
 
-    // Renews every lease concurrently; a failure, including a throw while starting the renewal, is recorded in the
-    // lease's slot of `errors` rather than thrown, so the siblings are always awaited.
-    static boost::asio::awaitable<void> RenewAll(const std::vector<std::shared_ptr<TLock>>& locks,
-                                                 std::vector<std::exception_ptr>& errors) {
-        TaskGroup group(co_await boost::asio::this_coro::executor, locks.size());
+    // Renews every lease concurrently and returns each lease's failure (null on success) in the same order. A
+    // failure, including a throw while starting the renewal, is recorded rather than thrown, so the siblings are
+    // always awaited.
+    static boost::asio::awaitable<std::vector<std::exception_ptr>> RenewAll(std::vector<std::shared_ptr<TLock>> locks) {
+        auto errors = std::make_shared<std::vector<std::exception_ptr>>(locks.size());
+        TaskGroup group(co_await boost::asio::this_coro::executor, ConcurrencyLimit{locks.size()});
         co_await group.Scope([&](TaskGroup& running) -> boost::asio::awaitable<void> {
             for (size_t i = 0; i < locks.size(); ++i) {
-                co_await running.Spawn(RenewOne(locks[i], errors[i]));
+                co_await running.Spawn(RecordRenewal(locks[i], errors, i));
             }
         });
+        co_return std::move(*errors);
     }
 
-    static boost::asio::awaitable<void> RenewOne(std::shared_ptr<TLock> lock, std::exception_ptr& error) {
+    static boost::asio::awaitable<void> RecordRenewal(std::shared_ptr<TLock> lock,
+                                                      std::shared_ptr<std::vector<std::exception_ptr>> errors,
+                                                      const size_t slot) {
+        (*errors)[slot] = co_await RenewOne(std::move(lock));
+    }
+
+    // The renewal's failure, or null when it succeeded.
+    static boost::asio::awaitable<std::exception_ptr> RenewOne(std::shared_ptr<TLock> lock) {
         try {
             (void)co_await lock->RenewAsync();
         } catch (...) {
-            error = std::current_exception();
+            co_return std::current_exception();
         }
+        co_return nullptr;
+    }
+
+    // Requires m_mutex. Adds every lease of a fresh snapshot that `locks` does not already hold.
+    void MergeSnapshotInto(std::vector<std::shared_ptr<TLock>>& locks) {
+        for (auto& held : m_snapshot()) {
+            if (std::ranges::find(locks, held) == locks.end()) {
+                locks.push_back(std::move(held));
+            }
+        }
+    }
+
+    // Requires m_mutex. Every lease that bounds the next wake-up: the failed ones and all the healthy ones held.
+    std::vector<std::shared_ptr<TLock>> DeadlineBound(const std::vector<std::shared_ptr<TLock>>& pending) {
+        auto bound = pending;
+        MergeSnapshotInto(bound);
+        return bound;
     }
 
     void ReleaseRound() noexcept {
@@ -303,7 +364,7 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
                 } else {
                     BOOST_LOG_SEV(*m_logger, boost::log::trivial::error) << "Failed to renew lease: " << e.what();
                     stillPending.push_back(locks[i]);
-                    serverHint = std::max(serverHint, e.RetryAfter.value_or(std::chrono::milliseconds{0}));
+                    serverHint = std::max(serverHint, e.RetryAfter().value_or(std::chrono::milliseconds{0}));
                 }
             } catch (const std::exception& e) {
                 fatal = e.what();
@@ -319,7 +380,7 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
 
         const size_t nextAttempt = attempt + 1;
         if (!stillPending.empty() && nextAttempt < m_maxAttempts) {
-            const auto delay = NextRetryDelay(stillPending, attempt, serverHint);
+            const auto delay = NextRetryDelay(DeadlineBound(stillPending), attempt, serverHint);
             return Next{delay, Retry{std::move(stillPending), nextAttempt}};
         }
 
@@ -334,7 +395,7 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
 
         // Out of retries but not yet overdue: the next regular wake-up must not land after the renewal deadline, or
         // the lease could lapse while writes continue.
-        return Next{ClampToEarliestDeadline(m_interval, stillPending), std::nullopt};
+        return Next{ClampToEarliestDeadline(m_interval, DeadlineBound(stillPending)), std::nullopt};
     }
 
     // Shortens `delay` so a wake-up never fires after the earliest renewal deadline of `pending`.
@@ -394,6 +455,8 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
     std::condition_variable m_roundsIdle;
     boost::asio::steady_timer m_timer;
     size_t m_activeRounds = 0;
+    // When the last round that renewed every held lease started. Guarded by m_mutex.
+    std::chrono::steady_clock::time_point m_lastFullRound = std::chrono::steady_clock::now();
     LoopState m_state = LoopState::Running;
     std::mt19937 m_random;
 };

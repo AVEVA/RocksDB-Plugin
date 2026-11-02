@@ -27,7 +27,9 @@ Validity CheckToken(const std::string& value) {
     return isToken ? Validity::Valid : Validity::Invalid;
 }
 
-Validity CheckHeader(const std::string& name, const std::string& value) {
+Validity CheckHeader(const HttpHeader& header) {
+    const auto& name = header.GetName();
+    const auto& value = header.GetValue();
     const auto valid =
         CheckToken(name) == Validity::Valid && name.size() <= boost::beast::http::fields::max_name_size &&
         value.size() <= boost::beast::http::fields::max_value_size &&
@@ -73,20 +75,18 @@ Validity CheckRequestUrl(const boost::urls::url_view& url) {
     return Validity::Valid;
 }
 
-std::error_code ValidateRequest(const HttpRequest& request, const HttpRequestOptions& options,
-                                const boost::urls::url_view& url) {
+std::error_code ValidateRequest(const HttpRequest& request, const boost::urls::url_view& url) {
     if (CheckRequestUrl(url) == Validity::Invalid) {
         return HttpClientError::InvalidUrl;
     }
     const HttpMethod method = request.GetMethod();
     if (ToBeastVerb(method) == boost::beast::http::verb::unknown || method == HttpMethod::Connect ||
-        (method == HttpMethod::Trace && request.GetBodySize() != 0) || options.GetTimeout().count() <= 0) {
+        (method == HttpMethod::Trace && request.GetBody().Size() != ByteCount{0})) {
         return HttpClientError::InvalidRequest;
     }
     const auto& headers = request.GetHeaders();
-    if (std::any_of(headers.begin(), headers.end(), [](const HttpHeader& header) {
-            return CheckHeader(header.GetName(), header.GetValue()) == Validity::Invalid;
-        })) {
+    if (std::any_of(headers.begin(), headers.end(),
+                    [](const HttpHeader& header) { return CheckHeader(header) == Validity::Invalid; })) {
         return HttpClientError::InvalidRequest;
     }
     return {};

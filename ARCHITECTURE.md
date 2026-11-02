@@ -49,7 +49,7 @@ container by setting `RegisterOptions::Cache` in `Plugin::Register`.
   the entry becomes active. This stops a startup scan from downloading every SST once.
 - **LRU.** Entries sit in a list ordered by last access. Before a download is admitted, entries are evicted from the
   least recently used end until the new file fits; entries that are downloading or queued are skipped, and a file
-  larger than `maxCacheSize` is not cached.
+  larger than `Plugin::CacheOptions::MaxSize` is not cached.
 - **Invalidation.** Writing to or replacing a blob marks its entry stale and bumps a generation counter, so a
   download that raced with the change is discarded rather than activated.
 - **Background deletes.** Evicted or removed entries leave the accounting immediately, but their read handles are

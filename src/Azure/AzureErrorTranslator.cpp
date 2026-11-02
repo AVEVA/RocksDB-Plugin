@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ErrorTransience.hpp"
 #include <AVEVA/AzureClient/BlobStorageError.hpp>
 #include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
 #include <AVEVA/HttpClient/HttpClientError.hpp>
@@ -41,6 +42,10 @@ template <class TLog> rocksdb::IOStatus ClassifyCurrentException(TLog&& log, std
         // string-to-sign, so it is deliberately never logged.
         log("failed", ex.what());
         return AzureErrorTranslator::IOStatusFromError(ex);
+    } catch (const BlockingOnIoThreadException& ex) {
+        // The caller broke the threading contract; nothing was started, so this is not a storage failure.
+        log("rejected", ex.what());
+        return rocksdb::IOStatus::InvalidArgument(ex.what());
     } catch (const WritesFencedException& ex) {
         log("failed", ex.what());
         return rocksdb::IOStatus::IOFenced(ex.what());
@@ -100,7 +105,7 @@ rocksdb::IOStatus AzureErrorTranslator::IOStatusFromError(const RequestFailedExc
 
     // what() carries the status, Azure error code, message and request id so that logs identify the failure.
     const std::string text = error.what();
-    const std::error_code& code = error.Code;
+    const std::error_code code = error.Code();
 
     // The library's portable conditions are more precise than the HTTP status alone (e.g. a 409 can mean a lost lease).
     if (code == std::errc::no_such_file_or_directory) {
@@ -135,7 +140,7 @@ rocksdb::IOStatus AzureErrorTranslator::IOStatusFromError(const RequestFailedExc
         return Retryable(IOStatus::TimedOut(text));
     }
 
-    switch (error.StatusCode.Value()) {
+    switch (error.StatusCode().Value()) {
     case HttpStatus::NoResponse.Value():
         // Raised by AbortIO or shutdown, so retrying would only fight the cancellation.
         if (code == std::errc::operation_canceled) {
@@ -147,7 +152,7 @@ rocksdb::IOStatus AzureErrorTranslator::IOStatusFromError(const RequestFailedExc
         if (code == std::errc::permission_denied) {
             return IOStatus::IOError("Authentication failed: " + text);
         }
-        if (TransienceOf(error) == AzureClient::Transience::Permanent) {
+        if (Impl::TransienceOf(error) == AzureClient::Transience::Permanent) {
             return IOStatus::IOError("Request failed: " + text);
         }
         return Retryable(IOStatus::IOError("Connection failure: " + text));
@@ -159,7 +164,7 @@ rocksdb::IOStatus AzureErrorTranslator::IOStatusFromError(const RequestFailedExc
     case HttpStatus::PreconditionFailed.Value():
         return IOStatus::IOError(text);
     default:
-        return IOStatusFromError(text, error.StatusCode);
+        return IOStatusFromError(text, error.StatusCode());
     }
 }
 
@@ -181,42 +186,48 @@ LeaseLoss AzureErrorTranslator::LeaseLossOf(const std::error_code& code) {
     return lost ? LeaseLoss::Lost : LeaseLoss::NotLost;
 }
 
-AzureClient::Transience AzureErrorTranslator::TransienceOf(const RequestFailedException& error) {
-    // The client's own retry policy is the single definition of "transient", so the plugin never disagrees with it.
-    AzureClient::BlobStorageError clientError;
-    clientError.StatusCode = AVEVA::HttpStatusCode{error.StatusCode.Value()};
-    clientError.Code = error.Code;
-    return AzureClient::TransienceOf(clientError);
-}
-
-rocksdb::IOStatus AzureErrorTranslator::FromException(const std::exception_ptr& error) {
-    try {
-        std::rethrow_exception(error);
-    } catch (...) {
-        return ClassifyCurrentException([](std::string_view, std::string_view) {}, {});
-    }
-}
-
-rocksdb::IOStatus AzureErrorTranslator::FromCurrentException(
-    boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>& logger, std::string_view operation) {
-    return ClassifyCurrentException(
-        [&](std::string_view kind, std::string_view detail) {
-            if (detail.empty()) {
-                BOOST_LOG_SEV(logger, boost::log::trivial::error) << operation << ' ' << kind;
-            } else {
-                BOOST_LOG_SEV(logger, boost::log::trivial::error) << operation << ' ' << kind << ": " << detail;
-            }
-        },
-        operation);
-}
-
 rocksdb::IOStatus AzureErrorTranslator::FromException(
     boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>& logger,
-    const std::exception_ptr& error, std::string_view operation) {
+    const std::exception_ptr& error, std::string_view operation) noexcept {
+    if (!error) {
+        return rocksdb::IOStatus::IOError();
+    }
+    // Logging and message building can throw (allocation, a failing log sink). The status is what matters, so a
+    // second, silent classification and finally a fixed status keep this from ever escaping.
     try {
-        std::rethrow_exception(error);
+        try {
+            std::rethrow_exception(error);
+        } catch (...) {
+            return ClassifyCurrentException(
+                [&](std::string_view kind, std::string_view detail) {
+                    if (detail.empty()) {
+                        BOOST_LOG_SEV(logger, boost::log::trivial::error) << operation << ' ' << kind;
+                    } else {
+                        BOOST_LOG_SEV(logger, boost::log::trivial::error) << operation << ' ' << kind << ": " << detail;
+                    }
+                },
+                operation);
+        }
     } catch (...) {
-        return FromCurrentException(logger, operation);
+    }
+    try {
+        try {
+            std::rethrow_exception(error);
+        } catch (...) {
+            return ClassifyCurrentException([](std::string_view, std::string_view) {}, operation);
+        }
+    } catch (...) {
+        return rocksdb::IOStatus::IOError();
     }
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure
+
+namespace AVEVA::RocksDB::Plugin::Azure::Impl {
+AzureClient::Transience TransienceOf(const RequestFailedException& error) {
+    // The client's own retry policy is the single definition of "transient", so the plugin never disagrees with it.
+    AzureClient::BlobStorageError clientError;
+    clientError.StatusCode = AVEVA::HttpStatusCode{error.StatusCode().Value()};
+    clientError.Code = error.Code();
+    return AzureClient::TransienceOf(clientError);
+}
+} // namespace AVEVA::RocksDB::Plugin::Azure::Impl

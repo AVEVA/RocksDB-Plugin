@@ -19,8 +19,10 @@
 #include <boost/asio/experimental/concurrent_channel.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ssl/context.hpp>
+#include <boost/beast/http/span_body.hpp>
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <memory>
@@ -30,7 +32,8 @@
 
 namespace AVEVA::Private {
 using ArenaFields = boost::beast::http::basic_fields<ArenaAllocator<char>>;
-using RequestMessage = boost::beast::http::message<true, boost::beast::http::buffer_body, ArenaFields>;
+using RequestBody = boost::beast::http::span_body<const std::byte>;
+using RequestMessage = boost::beast::http::message<true, RequestBody, ArenaFields>;
 
 /// <summary>
 /// Carries the outcome of a DNS lookup led by another request to the request waiting on it. The channel holds one
@@ -40,23 +43,31 @@ using ResolveChannel =
     boost::asio::experimental::concurrent_channel<void(boost::system::error_code, Tcp::resolver::results_type)>;
 
 /// <summary>
-/// The DNS cache's waiter: forwards the leader's outcome into the joining request's channel.
+/// The DNS cache's waiter: forwards a lookup's outcome into a waiting request's channel.
 /// </summary>
 class ResolveWaiter {
   public:
-    explicit ResolveWaiter(std::shared_ptr<ResolveChannel> channel) noexcept : m_channel(std::move(channel)) {}
+    ResolveWaiter(std::shared_ptr<ResolveChannel> channel, std::shared_ptr<const DiagnosticsSink> diagnostics) noexcept
+        : m_channel(std::move(channel)), m_diagnostics(std::move(diagnostics)) {}
 
-    void operator()(boost::system::error_code error, ResolveResults results) const noexcept {
+    /// <summary>
+    /// Delivers the outcome. If that fails (out of memory), the failure is reported and the channel is closed, which
+    /// wakes the request with an error instead of leaving it to its deadline.
+    /// </summary>
+    void operator()(boost::system::error_code error, const ResolveResults& results) const noexcept {
         try {
-            m_channel->try_send(error, std::move(results));
-        } catch (...) {
-            // The joiner is woken with a closed-channel error instead of waiting for its deadline.
-            m_channel->close();
+            m_channel->try_send(error, results);
+            return;
+        } catch (const std::exception& failure) {
+            DiagnosticsSink::Report(m_diagnostics, HttpDiagnosticKind::SwallowedException, HttpRequestPhase::Resolve,
+                                    {}, {}, {}, failure.what());
         }
+        m_channel->close();
     }
 
   private:
     std::shared_ptr<ResolveChannel> m_channel;
+    std::shared_ptr<const DiagnosticsSink> m_diagnostics;
 };
 
 /// <summary>
@@ -87,12 +98,10 @@ template <typename Stream> class Exchange {
     };
 
     /// <param name="environment">The client's shared state.</param>
-    /// <param name="route">The request's validated destination; must outlive the exchange.</param>
-    /// <param name="request">The request to send; its owned body is moved out when the message is built.</param>
+    /// <param name="route">The request's validated destination.</param>
+    /// <param name="request">The request to send.</param>
     /// <param name="options">The response limits and TLS truncation policy for this request.</param>
-    /// <param name="phase">Updated as the exchange progresses, so the caller can say where a timeout hit.</param>
-    Exchange(Environment environment, const Route& route, HttpRequest request, HttpRequestOptions options,
-             HttpRequestPhase& phase);
+    Exchange(Environment environment, Route route, HttpRequest request, HttpRequestOptions options);
 
     Exchange(const Exchange&) = delete;
     Exchange& operator=(const Exchange&) = delete;
@@ -102,6 +111,11 @@ template <typename Stream> class Exchange {
     /// </summary>
     /// <returns>The response, or the reason it could not be obtained.</returns>
     boost::asio::awaitable<HttpResult> Run();
+
+    /// <summary>
+    /// How far the exchange got, so a caller whose deadline cut <see cref="Run"/> short can say where it hit.
+    /// </summary>
+    [[nodiscard]] HttpRequestPhase Phase() const noexcept { return m_phase; }
 
   private:
     // Whether sending the request again on a fresh connection is safe.
@@ -115,7 +129,7 @@ template <typename Stream> class Exchange {
     enum class InterimResponse : std::uint8_t { None, Seen };
 
     struct Failure {
-        std::error_code error;
+        HttpFailure failure;
         // Nothing of a response has been seen, and either no request bytes could have reached the server or the
         // method is idempotent.
         Replay replay = Replay::Unsafe;
@@ -143,11 +157,11 @@ template <typename Stream> class Exchange {
     /// <summary>
     /// Resolves the origin, sharing the lookup and its cached answer with concurrent requests.
     /// </summary>
-    boost::asio::awaitable<std::expected<ResolveResults, std::error_code>> Resolve();
+    boost::asio::awaitable<std::expected<ResolveResults, HttpFailure>> Resolve();
     /// <summary>
     /// Resolves, connects and, for TLS, handshakes a new stream.
     /// </summary>
-    boost::asio::awaitable<std::error_code> Connect();
+    boost::asio::awaitable<std::optional<HttpFailure>> Connect();
     /// <summary>
     /// Writes the request and reads the final response, skipping interim 1xx ones.
     /// </summary>
@@ -174,11 +188,11 @@ template <typename Stream> class Exchange {
     void Close() noexcept;
 
     Environment m_env;
-    const Route& m_route;
+    Route m_route;
     ConnectionKey<Stream> m_key;
     HttpRequest m_stagedRequest;
     HttpRequestOptions m_options;
-    HttpRequestPhase& m_phase;
+    HttpRequestPhase m_phase = HttpRequestPhase::Queued;
     std::unique_ptr<Stream> m_stream;
     beast::flat_buffer m_buffer;
     Connection m_connection = Connection::Fresh;
@@ -191,10 +205,9 @@ template <typename Stream> class Exchange {
     HeaderArena m_responseArena;
     std::optional<RequestMessage> m_request;
     // Held as a member so async_write uses the non-stable write_op instead of heap-allocating a serializer.
-    std::optional<http::request_serializer<http::buffer_body, ArenaFields>> m_serializer;
-    // Backing storage for an owned (SetBody()) request body; for a SetBodyView() body the caller owns it.
-    std::string m_ownedBodyStorage;
-    std::shared_ptr<const void> m_bodyKeepAlive;
+    std::optional<http::request_serializer<RequestBody, ArenaFields>> m_serializer;
+    // Keeps the bytes the message's span refers to alive until the exchange ends.
+    HttpBody m_body;
     std::optional<http::response_parser<http::string_body, ArenaAllocator<char>>> m_parser;
 };
 

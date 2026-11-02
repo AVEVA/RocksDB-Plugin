@@ -24,7 +24,8 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl::Testing {
 /// <summary>
 /// Loads Azure credentials from environment variables and creates a ServicePrincipalStorageInfo. Live tests are
 /// Opt-in: nothing is returned unless AVEVA_RUN_AZURE_INTEGRATION_TESTS=1; without it every live test is skipped
-/// (GTEST_SKIP). A rejected credential, by contrast, fails the test.
+/// (GTEST_SKIP). Once opted in, a missing required variable throws std::runtime_error naming it, and a rejected
+/// credential fails the test.
 /// Required: AVEVA_RUN_AZURE_INTEGRATION_TESTS=1, AZURE_SERVICE_PRINCIPAL_ID, AZURE_SERVICE_PRINCIPAL_SECRET,
 /// AZURE_STORAGE_ACCOUNT_NAME, AZURE_TEST_CONTAINER
 /// Optional: AZURE_TENANT_ID
@@ -60,8 +61,6 @@ class TestIoContext {
     TestIoContext& operator=(TestIoContext&&) = delete;
 
     [[nodiscard]] boost::asio::io_context& Get() noexcept { return *m_context; }
-    // For Plugin::Register, whose registration shares ownership of the context.
-    [[nodiscard]] std::shared_ptr<boost::asio::io_context> Share() const noexcept { return m_context; }
 };
 
 /// <summary>

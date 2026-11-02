@@ -64,10 +64,10 @@ class AsyncReadRequest {
                      std::optional<Executor> completionExecutor = std::nullopt);
 
     /// <summary>
-    /// Debug-asserts that the request is not still in flight while the calling thread runs the executor that would
-    /// complete it: waiting there can never finish, and that is a contract violation.
+    /// Throws BlockingOnIoThreadException when the request is still in flight and the calling thread runs the
+    /// executor that would complete it: waiting there could never finish.
     /// </summary>
-    void AssertWaitCannotDeadlock();
+    void ThrowIfWaitWouldDeadlock();
 
     [[nodiscard]] uint64_t Offset() const noexcept { return m_offset; }
     [[nodiscard]] size_t Length() const noexcept { return m_length; }

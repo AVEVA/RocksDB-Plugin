@@ -14,9 +14,9 @@ class FileMock : public File {
     // Tests set expectations on this plain-number method; the typed override adapts to it.
     MOCK_METHOD(int64_t, Read, (char* buffer, int64_t offset, int64_t length));
 
-    ByteCount Read(char* buffer, ByteOffset offset, ByteCount length) override {
+    ByteCount Read(std::span<char> buffer, ByteOffset offset) override {
         return ByteCount{static_cast<std::uint64_t>(
-            Read(buffer, static_cast<int64_t>(offset.Value()), static_cast<int64_t>(length.Value())))};
+            Read(buffer.data(), static_cast<int64_t>(offset.Value()), static_cast<int64_t>(buffer.size())))};
     }
 };
 } // namespace AVEVA::RocksDB::Plugin::Core::Mocks

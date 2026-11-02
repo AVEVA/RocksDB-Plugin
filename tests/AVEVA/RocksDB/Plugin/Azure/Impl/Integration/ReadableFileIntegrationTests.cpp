@@ -86,16 +86,16 @@ TEST_F(ReadableFileIntegrationTests, RandomRead_DifferentOffsets_ReadsCorrectly)
     }
 
     auto blobClient = CreateBlobWithData(testData);
-    ReadableFileImpl file(m_blobName, m_runtime, blobClient, nullptr, m_logger);
+    const auto file = std::make_shared<ReadableFileImpl>(m_blobName, m_runtime, blobClient, nullptr, m_logger);
 
     // Act - Random reads at different offsets
     std::vector<char> buffer1(100);
     std::vector<char> buffer2(200);
     std::vector<char> buffer3(512);
 
-    int64_t read1 = file.RandomRead(0, 100, buffer1.data());
-    int64_t read2 = file.RandomRead(500, 200, buffer2.data());
-    int64_t read3 = file.RandomRead(Configuration::PageBlob::PageSize, 512, buffer3.data());
+    int64_t read1 = file->RandomRead(0, 100, buffer1.data());
+    int64_t read2 = file->RandomRead(500, 200, buffer2.data());
+    int64_t read3 = file->RandomRead(Configuration::PageBlob::PageSize, 512, buffer3.data());
 
     // Assert
     EXPECT_EQ(100, read1);
@@ -133,10 +133,10 @@ TEST_F(ReadableFileIntegrationTests, GetSize_ReturnsCorrectSize) {
     // Arrange
     std::vector<char> testData(12345);
     auto blobClient = CreateBlobWithData(testData);
-    ReadableFileImpl file(m_blobName, m_runtime, blobClient, nullptr, m_logger);
+    const auto file = std::make_shared<ReadableFileImpl>(m_blobName, m_runtime, blobClient, nullptr, m_logger);
 
     // Act
-    int64_t size = file.GetSize();
+    int64_t size = file->GetSize();
 
     // Assert
     EXPECT_EQ(testData.size(), size);

@@ -19,6 +19,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <stdexcept>
+#include <string>
 #include <string_view>
 using namespace boost::log::trivial;
 
@@ -46,22 +48,31 @@ std::optional<Models::ServicePrincipalStorageInfo> LoadAzureCredentialsFromEnvir
         return std::nullopt;
     }
 
-    const char* spId = std::getenv("AZURE_SERVICE_PRINCIPAL_ID");
-    const char* spSecret = std::getenv("AZURE_SERVICE_PRINCIPAL_SECRET");
-    const char* tenant = std::getenv("AZURE_TENANT_ID");
-    const char* storageAccountName = std::getenv("AZURE_STORAGE_ACCOUNT_NAME");
-    const char* container = std::getenv("AZURE_TEST_CONTAINER");
-
-    if (!spId || !spSecret || !storageAccountName || !container || std::string_view(container).empty()) {
-        return std::nullopt;
+    // Once opted in, a missing variable is a broken setup, not a reason to skip every test silently.
+    std::string missing;
+    const auto required = [&missing](const char* name) {
+        const char* value = std::getenv(name);
+        if (value == nullptr || *value == '\0') {
+            missing += missing.empty() ? name : std::string(", ") + name;
+            return std::string();
+        }
+        return std::string(value);
+    };
+    auto spId = required("AZURE_SERVICE_PRINCIPAL_ID");
+    auto spSecret = required("AZURE_SERVICE_PRINCIPAL_SECRET");
+    const auto storageAccountName = required("AZURE_STORAGE_ACCOUNT_NAME");
+    auto container = required("AZURE_TEST_CONTAINER");
+    if (!missing.empty()) {
+        throw std::runtime_error("AVEVA_RUN_AZURE_INTEGRATION_TESTS=1 but these variables are not set: " + missing);
     }
+    const char* tenant = std::getenv("AZURE_TENANT_ID");
 
-    std::string tenantId = tenant ? tenant : "";
-    std::string storageAccountUrl = "https://" + std::string(storageAccountName) + ".blob.core.windows.net/";
-    std::string containerName = container;
-
-    return Models::ServicePrincipalStorageInfo(containerName, // Using container name as dbName
-                                               storageAccountUrl, spId, spSecret, tenantId);
+    // The container name doubles as the database name.
+    return Models::ServicePrincipalStorageInfo(
+        Models::DbName{std::move(container)},
+        Models::AccountUrl{"https://" + storageAccountName + ".blob.core.windows.net/"},
+        Models::ClientId{std::move(spId)}, Models::ClientSecret{std::move(spSecret)},
+        Models::TenantId{tenant != nullptr ? tenant : ""});
 }
 
 std::string GenerateRandomBlobName(const std::string& prefix) {
@@ -75,7 +86,11 @@ bool IsAuthenticationError(const std::exception& e) {
 }
 
 void AzureIntegrationTestBase::SetUp() {
-    m_credentials = LoadAzureCredentialsFromEnvironment();
+    try {
+        m_credentials = LoadAzureCredentialsFromEnvironment();
+    } catch (const std::runtime_error& e) {
+        FAIL() << e.what();
+    }
     if (!m_credentials) {
         GTEST_SKIP() << "Live Azure tests are opt-in. Set AVEVA_RUN_AZURE_INTEGRATION_TESTS=1, "
                      << "AZURE_SERVICE_PRINCIPAL_ID, AZURE_SERVICE_PRINCIPAL_SECRET, AZURE_STORAGE_ACCOUNT_NAME and "
@@ -84,8 +99,9 @@ void AzureIntegrationTestBase::SetUp() {
 
     m_blobName = GenerateRandomBlobName(GetBlobNamePrefix());
     m_root = "it-" + boost::uuids::to_string(boost::uuids::random_generator()());
-    m_containerPrefix =
-        StorageAccount::UniquePrefix(m_credentials->GetStorageAccountUrl(), m_credentials->GetDbName()) + "/" + m_root;
+    const auto accountUrl = m_credentials->GetStorageAccountUrl();
+    const auto dbName = m_credentials->GetDbName();
+    m_containerPrefix = StorageAccount::UniquePrefix(accountUrl, dbName) + "/" + m_root;
     m_logger = AVEVA::RocksDB::Plugin::Tests::MakeTestLogger();
 
     CreateContainerClient();
@@ -98,8 +114,9 @@ void AzureIntegrationTestBase::CreateContainerClient() {
         m_runtime = std::make_shared<ClientRuntime>(m_ioContext.Get());
         const auto serviceClient = ClientFactory::CreateServiceClient(m_runtime, *m_credentials);
 
+        const auto dbName = m_credentials->GetDbName();
         m_containerClient = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::BlobContainerClient>(
-            serviceClient.GetBlobContainerClient(m_credentials->GetDbName()));
+            serviceClient.GetBlobContainerClient(dbName.Value()));
 
         // Create container if it doesn't exist - this will test authentication
         TryCreateContainer();
@@ -126,19 +143,23 @@ void AzureIntegrationTestBase::TryCreateContainer() {
         if (HasFatalFailure()) {
             return;
         }
-        // Container might already exist or other non-auth error, continue
+        // Another run creating the container concurrently is the only failure the tests can carry on from.
+        if (e.Code() == AzureClient::make_error_code(AzureClient::BlobStorageErrorCode::ContainerAlreadyExists)) {
+            return;
+        }
+        FAIL() << "Failed to create the test container: " << e.what();
     } catch (const std::exception& e) {
         if (IsAuthenticationError(e)) {
             FAIL() << "Azure authentication failed: " << e.what()
                    << ". Please check your service principal credentials are valid and not expired.";
         }
-        // Otherwise, continue - might be a transient error
+        FAIL() << "Failed to create the test container: " << e.what();
     }
 }
 
 void AzureIntegrationTestBase::HandleAuthenticationError(const RequestFailedException& e) {
-    if (e.StatusCode == HttpStatus::Unauthorized || e.StatusCode == HttpStatus::Forbidden ||
-        e.Code == AzureClient::make_error_code(AzureClient::BlobStorageErrorCode::AuthenticationFailed)) {
+    if (e.StatusCode() == HttpStatus::Unauthorized || e.StatusCode() == HttpStatus::Forbidden ||
+        e.Code() == AzureClient::make_error_code(AzureClient::BlobStorageErrorCode::AuthenticationFailed)) {
         FAIL() << "Azure authentication failed: " << e.what()
                << ". Please check your service principal credentials are valid and not expired.";
     }
@@ -175,9 +196,9 @@ void AzureIntegrationTestBase::CleanupBlob() {
 std::shared_ptr<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient> AzureIntegrationTestBase::CreateEmptyBlob() {
     const auto pageBlobClientPtr = std::make_shared<AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobClient>(
         m_containerClient->GetPageBlobClient(BlobPath()));
-    Call(*pageBlobClientPtr,
-         pageBlobClientPtr->CreateAsync(static_cast<uint64_t>(Configuration::PageBlob::DefaultSize)));
-    BlobOperations::SetSize(*m_runtime, *pageBlobClientPtr, 0);
+    Call(*pageBlobClientPtr, pageBlobClientPtr->CreateAsync(AVEVA::AzureClient::PageBlobSize{
+                                 static_cast<uint64_t>(Configuration::PageBlob::DefaultSize)}));
+    BlobOperations::SetSize(m_runtime, *pageBlobClientPtr, AVEVA::RocksDB::Plugin::Core::ByteCount{});
     return pageBlobClientPtr;
 }
 
@@ -193,7 +214,7 @@ AzureIntegrationTestBase::CreateBlobWithData(const std::vector<char>& data) {
         capacity = ((capacity / Configuration::PageBlob::PageSize) + 1) * Configuration::PageBlob::PageSize;
     }
 
-    Call(pageBlobClient, pageBlobClient.CreateAsync(static_cast<uint64_t>(capacity)));
+    Call(pageBlobClient, pageBlobClient.CreateAsync(AVEVA::AzureClient::PageBlobSize{static_cast<uint64_t>(capacity)}));
 
     if (!data.empty()) {
         std::vector<char> paddedData = data;
@@ -205,9 +226,9 @@ AzureIntegrationTestBase::CreateBlobWithData(const std::vector<char>& data) {
 
         Call(pageBlobClient,
              pageBlobClient.UploadPagesAsync(
-                 0, std::as_bytes(std::span<const char>(paddedData)), {},
-                 RequestOptionsForTransfer(pageBlobClient.GetDefaultRequestOptions(), paddedData.size())));
-        BlobOperations::SetSize(*m_runtime, pageBlobClient, static_cast<int64_t>(data.size()));
+                 AVEVA::AzureClient::PageOffset{0U}, AVEVA::HttpBody{std::string(paddedData.begin(), paddedData.end())},
+                 {}, RequestOptionsForTransfer(pageBlobClient.GetDefaultRequestOptions(), paddedData.size())));
+        BlobOperations::SetSize(m_runtime, pageBlobClient, AVEVA::RocksDB::Plugin::Core::ByteCount{data.size()});
     }
 
     return pageBlobClientPtr;

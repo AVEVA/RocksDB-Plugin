@@ -28,12 +28,9 @@ using AVEVA::AzureClient::Tests::MakeBlobServiceClientOptions;
 
 void ExpectSignedAuthorization(const FakeHttpClient::RequestRecord& record) {
     AVEVA::HttpRequest unsignedRequest = record.Request;
-    std::erase_if(unsignedRequest.GetHeaders(),
-                  [](const AVEVA::HttpHeader& header) { return header.GetName() == "Authorization"; });
+    unsignedRequest.RemoveHeaders(AVEVA::HeaderName{"Authorization"});
     AVEVA::AzureClient::Private::AuthorizeRequest(
-        AVEVA::AzureClient::SharedKeyCredentialOptions{.AccountName = "storageaccount",
-                                                       .AccountKey = "MDEyMzQ1Njc4OWFiY2RlZg=="},
-        unsignedRequest);
+        AVEVA::AzureClient::Private::SharedKeySigner{"storageaccount", "MDEyMzQ1Njc4OWFiY2RlZg=="}, unsignedRequest);
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(record.Request, "Authorization"),
               FakeHttpClient::FindHeaderValue(unsignedRequest, "Authorization"))
         << record.Request.GetUrl();

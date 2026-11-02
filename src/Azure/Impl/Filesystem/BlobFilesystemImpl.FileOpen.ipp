@@ -44,13 +44,16 @@ BasicBlobFilesystemImpl<THttp>::CreateWriteableFile(const std::string& filePath)
                 cache->RemoveFile(realPath);
             }
         }};
-        BlobOperations::CreateOrReplace(*m_runtime, blob, SignedBytes(initialSize));
+        BlobOperations::CreateOrReplace(m_runtime, blob, initialSize);
     }
-    const int64_t capacity = SignedBytes(initialSize);
-
     return WriteableFileType{
-        realPath, m_runtime,  std::make_shared<PageBlobClientOn<THttp>>(std::move(blob)), std::move(cache),
-        m_logger, bufferSize, typename WriteableFileType::BlobState{0, capacity}};
+        realPath,
+        m_runtime,
+        std::make_shared<PageBlobClientOn<THttp>>(std::move(blob)),
+        std::move(cache),
+        m_logger,
+        bufferSize,
+        typename WriteableFileType::BlobState{.Size = Core::ByteCount{0}, .Capacity = initialSize}};
 }
 
 template <typename THttp>
@@ -60,7 +63,7 @@ BasicBlobFilesystemImpl<THttp>::CreateReadWriteFile(const std::string& filePath)
 
     auto [prefix, realPath, blob] = ResolveBlob(filePath);
 
-    BlobOperations::CreateIfNotExists(*m_runtime, blob, SignedBytes(Configuration::PageBlob::DefaultSize));
+    BlobOperations::CreateIfNotExists(m_runtime, blob, Defaults::DataFileInitialSize);
 
     return ReadWriteFileType{realPath, m_runtime, std::make_shared<PageBlobClientOn<THttp>>(std::move(blob)),
                              BlobFilesystemDetail::FindCache(m_fileCaches, prefix), m_logger};
@@ -76,37 +79,38 @@ BasicBlobFilesystemImpl<THttp>::ReopenWriteableFile(const std::string& filePath)
         BlobFilesystemDetail::SizingFor(filePath, m_dataFileInitialSize, m_dataFileBufferSize);
 
     // RocksDB expects reopening to create a missing file, as the POSIX Env does.
-    const auto created = BlobOperations::CreateIfNotExists(*m_runtime, blob, SignedBytes(initialSize));
+    const auto created = BlobOperations::CreateIfNotExists(m_runtime, blob, initialSize);
 
     auto client = std::make_shared<PageBlobClientOn<THttp>>(std::move(blob));
     auto cache = BlobFilesystemDetail::FindCache(m_fileCaches, prefix);
     if (created == BlobOperations::CreateOutcome::Created) {
         // A blob this call just created is empty with a known capacity, so there is nothing to look up.
-        return WriteableFileType{realPath,
-                                 m_runtime,
-                                 std::move(client),
-                                 std::move(cache),
-                                 m_logger,
-                                 bufferSize,
-                                 typename WriteableFileType::BlobState{0, SignedBytes(initialSize)}};
+        return WriteableFileType{
+            realPath,
+            m_runtime,
+            std::move(client),
+            std::move(cache),
+            m_logger,
+            bufferSize,
+            typename WriteableFileType::BlobState{.Size = Core::ByteCount{0}, .Capacity = initialSize}};
     }
     return WriteableFileType{realPath, m_runtime, std::move(client), std::move(cache), m_logger, bufferSize};
 }
 
 template <typename THttp>
-LoggerImpl BasicBlobFilesystemImpl<THttp>::CreateLogger(const std::string& filePath, const int logLevel,
+LoggerImpl BasicBlobFilesystemImpl<THttp>::CreateLogger(const std::string& filePath,
                                                         const std::chrono::seconds cooldown) {
     EnsureLiveness();
 
     auto [prefix, realPath, blob] = ResolveBlob(filePath);
 
-    BlobOperations::CreateIfNotExists(*m_runtime, blob, SignedBytes(Configuration::PageBlob::DefaultSize));
+    BlobOperations::CreateIfNotExists(m_runtime, blob, Defaults::DataFileInitialSize);
 
     auto impl = std::make_unique<FileLogSink<WriteableFileType>>(std::make_unique<WriteableFileType>(
         realPath, m_runtime, std::make_shared<PageBlobClientOn<THttp>>(std::move(blob)), nullptr, m_logger,
-        Configuration::PageBlob::DefaultBufferSize));
+        Defaults::DataFileBufferSize));
     return LoggerImpl{
-        std::move(impl), logLevel,
+        std::move(impl),
         std::make_unique<LogRateLimiter>(
             std::vector<std::string>{"Stalling writes because we have", "Stopping writes because we have"}, cooldown)};
 }

@@ -60,14 +60,30 @@ DrainResult AsyncReadTracker::DrainFor(std::chrono::nanoseconds timeout) {
 
 size_t AsyncReadTracker::InFlight() const { return m_inFlight.load(std::memory_order_acquire); }
 
+// Checked under the mutex End also takes once the count reaches zero, so the state is either released here or taken
+// by the End that drops the last read; it can never be stranded.
+void AsyncReadTracker::RetainUntilIdle(std::shared_ptr<const void> state) {
+    std::unique_lock lock(m_mutex);
+    if (m_inFlight.load(std::memory_order_acquire) == 0) {
+        lock.unlock();
+        state.reset();
+        return;
+    }
+    m_retained = std::move(state);
+}
+
 void AsyncReadTracker::End() noexcept {
     if (m_inFlight.fetch_sub(1, std::memory_order_acq_rel) != 1) {
         return;
     }
     // Taking the mutex orders the notify after a waiter's predicate check, so the wakeup cannot be lost.
+    std::shared_ptr<const void> retained;
     {
         std::scoped_lock lock(m_mutex);
+        retained = std::move(m_retained);
     }
     m_idle.notify_all();
+    // Destroyed outside the lock: releasing it may tear down clients and caches.
+    retained.reset();
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

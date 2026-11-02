@@ -18,6 +18,6 @@ class LocalFile final : public File {
     ~LocalFile() override;
     LocalFile(const LocalFile&) = delete;
     LocalFile& operator=(const LocalFile&) = delete;
-    ByteCount Read(char* buffer, ByteOffset offset, ByteCount length) override;
+    ByteCount Read(std::span<char> buffer, ByteOffset offset) override;
 };
 } // namespace AVEVA::RocksDB::Plugin::Core

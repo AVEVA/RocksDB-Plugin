@@ -59,7 +59,7 @@ DirectoryContents BasicBlobFilesystemImpl<THttp>::HasChildren(const std::string&
 
 template <typename THttp>
 std::vector<std::string> BasicBlobFilesystemImpl<THttp>::GetChildren(const std::string& directoryPath,
-                                                                     int32_t sizeHint) {
+                                                                     const ListPageSize pageSize) {
     EnsureLiveness();
 
     const auto [prefix, realPath] = StorageAccount::StripPrefix(directoryPath);
@@ -68,7 +68,8 @@ std::vector<std::string> BasicBlobFilesystemImpl<THttp>::GetChildren(const std::
     const auto dirPrefix = BlobFilesystemDetail::DirectoryPrefix(realPath);
     AzureClient::ListBlobsOptions opts;
     opts.Prefix = dirPrefix;
-    opts.MaxResults = BlobFilesystemDetail::ToListPageSize(sizeHint);
+    opts.MaxResults = std::clamp(pageSize.Value(), std::uint32_t{1},
+                                 static_cast<std::uint32_t>(Configuration::Transfer::MaxListPageSize));
 
     // Process all pages of results
     WithContainer(prefix, [&](auto& container) {

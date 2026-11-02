@@ -33,8 +33,8 @@ class ReadableFileTests : public ::testing::Test {
     std::shared_ptr<severity_logger_mt<severity_level>> m_logger =
         std::make_shared<severity_logger_mt<severity_level>>();
 
-    FakeReadableFileImpl MakeFile() {
-        return FakeReadableFileImpl{"test.sst", m_env.Runtime, m_env.Client, nullptr, m_logger};
+    std::shared_ptr<FakeReadableFileImpl> MakeFile() {
+        return std::make_shared<FakeReadableFileImpl>("test.sst", m_env.Runtime, m_env.Client, nullptr, m_logger);
     }
 };
 
@@ -44,7 +44,7 @@ TEST_F(ReadableFileTests, Constructor_InitializesWithBlobSize) {
 
     const auto file = MakeFile();
 
-    EXPECT_EQ(expectedSize, file.GetSize());
+    EXPECT_EQ(expectedSize, file->GetSize());
 }
 
 TEST_F(ReadableFileTests, RandomRead_WithoutCache_ReadsFromBlob) {
@@ -54,7 +54,7 @@ TEST_F(ReadableFileTests, RandomRead_WithoutCache_ReadsFromBlob) {
     std::vector<char> buffer(bytesToRead);
     const auto file = MakeFile();
 
-    const auto bytesRead = file.RandomRead(offset, bytesToRead, buffer.data());
+    const auto bytesRead = file->RandomRead(offset, bytesToRead, buffer.data());
 
     EXPECT_EQ(bytesToRead, bytesRead);
     EXPECT_EQ(std::vector<char>(bytesToRead, 'B'), buffer);
@@ -72,7 +72,7 @@ TEST_F(ReadableFileTests, RandomRead_RequestMoreThanAvailable_ReadsOnlyAvailable
     std::vector<char> buffer(bytesToRead);
     const auto file = MakeFile();
 
-    const auto bytesRead = file.RandomRead(offset, bytesToRead, buffer.data());
+    const auto bytesRead = file->RandomRead(offset, bytesToRead, buffer.data());
 
     EXPECT_EQ(expectedBytes, bytesRead);
     ASSERT_EQ(1U, m_env.Blob->Downloads.size());
@@ -85,7 +85,7 @@ TEST_F(ReadableFileTests, RandomRead_AtEndOfFile_ReturnsZero) {
     std::vector<char> buffer(50);
     const auto file = MakeFile();
 
-    const auto bytesRead = file.RandomRead(blobSize, 50, buffer.data());
+    const auto bytesRead = file->RandomRead(blobSize, 50, buffer.data());
 
     EXPECT_EQ(0, bytesRead);
     EXPECT_TRUE(m_env.Blob->Downloads.empty());
@@ -132,7 +132,7 @@ TEST_F(ReadableFileTests, GetSize_ReturnsCorrectSize) {
 
     const auto file = MakeFile();
 
-    EXPECT_EQ(expectedSize, file.GetSize());
+    EXPECT_EQ(expectedSize, file->GetSize());
 }
 
 TEST_F(ReadableFileTests, RandomRead_DownloadFails_PropagatesTheError) {
@@ -147,7 +147,7 @@ TEST_F(ReadableFileTests, RandomRead_DownloadFails_PropagatesTheError) {
     const auto file = MakeFile();
     std::vector<char> buffer(100);
 
-    EXPECT_THROW([[maybe_unused]] auto n = file.RandomRead(50, 100, buffer.data()), RequestFailedException);
+    EXPECT_THROW([[maybe_unused]] auto n = file->RandomRead(50, 100, buffer.data()), RequestFailedException);
 }
 
 TEST_F(ReadableFileTests, RandomRead_EmptyBlob_ReturnsZero) {
@@ -155,7 +155,7 @@ TEST_F(ReadableFileTests, RandomRead_EmptyBlob_ReturnsZero) {
     std::vector<char> buffer(100);
     const auto file = MakeFile();
 
-    const auto bytesRead = file.RandomRead(0, 100, buffer.data());
+    const auto bytesRead = file->RandomRead(0, 100, buffer.data());
 
     EXPECT_EQ(0, bytesRead);
     EXPECT_TRUE(m_env.Blob->Downloads.empty());
@@ -167,7 +167,7 @@ TEST_F(ReadableFileTests, Constructor_FetchesSizeAndEtagWithOneMetadataCall) {
     const auto file = MakeFile();
 
     EXPECT_EQ(1, m_env.Blob->PropertiesRequests.Value());
-    EXPECT_EQ(file.HasETag(m_env.Blob->ETag()), ETagMatch::Matches);
+    EXPECT_EQ(file->HasETag(m_env.Blob->ETag()), ETagMatch::Matches);
 }
 
 TEST_F(ReadableFileTests, RandomRead_AtStaleEndOfBlob_RefreshesWithExactlyOnePropertiesCall) {
@@ -178,7 +178,7 @@ TEST_F(ReadableFileTests, RandomRead_AtStaleEndOfBlob_RefreshesWithExactlyOnePro
     const int before = m_env.Blob->PropertiesRequests.Value();
     std::vector<char> buffer(100);
 
-    const auto bytesRead = file.RandomRead(1024, 100, buffer.data());
+    const auto bytesRead = file->RandomRead(1024, 100, buffer.data());
 
     EXPECT_EQ(100, bytesRead);
     EXPECT_EQ(std::vector<char>(100, 'N'), buffer);
@@ -190,7 +190,7 @@ TEST_F(ReadableFileTests, GetSize_RefreshesWithOneMetadataCallOnceTheCachedMetad
     m_env.Blob->SetSize(2048);
     m_env.AdvanceMetadataClock(Configuration::MetadataCacheTtl);
 
-    EXPECT_EQ(2048, file.GetSize());
+    EXPECT_EQ(2048, file->GetSize());
     EXPECT_EQ(2, m_env.Blob->PropertiesRequests.Value());
 }
 
@@ -200,7 +200,7 @@ TEST_F(ReadableFileTests, GetSize_OneTickBeforeTheTtlElapses_IsStillServedFromCa
     m_env.Blob->SetSize(2048);
     m_env.AdvanceMetadataClock(Configuration::MetadataCacheTtl - std::chrono::milliseconds(1));
 
-    EXPECT_EQ(1024, file.GetSize());
+    EXPECT_EQ(1024, file->GetSize());
     EXPECT_EQ(1, m_env.Blob->PropertiesRequests.Value());
 }
 
@@ -209,8 +209,8 @@ TEST_F(ReadableFileTests, GetSize_WithinTheTtl_IsServedFromCachedMetadata) {
     const auto file = MakeFile();
     m_env.Blob->SetSize(2048);
 
-    EXPECT_EQ(1024, file.GetSize());
-    EXPECT_EQ(1024, file.GetSize());
+    EXPECT_EQ(1024, file->GetSize());
+    EXPECT_EQ(1024, file->GetSize());
     EXPECT_EQ(1, m_env.Blob->PropertiesRequests.Value());
 }
 
@@ -226,7 +226,7 @@ TEST_F(ReadableFileTests, RandomRead_GivesUpWhenBlobKeepsChanging) {
     const auto file = MakeFile();
     std::vector<char> buffer(16);
 
-    EXPECT_THROW([[maybe_unused]] auto n = file.RandomRead(0, 16, buffer.data()), RequestFailedException);
+    EXPECT_THROW([[maybe_unused]] auto n = file->RandomRead(0, 16, buffer.data()), RequestFailedException);
 }
 
 TEST(ReadDeadlineTests, DeadlineAfter_SaturatesExtremeTimeoutsInsteadOfOverflowingTheClock) {

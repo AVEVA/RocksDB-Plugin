@@ -83,7 +83,8 @@ Result FakeBlobServer::FailureResult(const AzureClient::BlobStorageError& error)
     }
     result.Response =
         MakeResponse(error.StatusCode,
-                     {HttpHeader("x-ms-error-code", error.ErrorCode), HttpHeader("Content-Type", "application/xml")},
+                     {HttpHeader(AVEVA::HeaderName{"x-ms-error-code"}, AVEVA::HeaderValue{error.ErrorCode}),
+                      HttpHeader(AVEVA::HeaderName{"Content-Type"}, AVEVA::HeaderValue{"application/xml"})},
                      "<?xml version=\"1.0\" encoding=\"utf-8\"?><Error><Code>" + error.ErrorCode + "</Code><Message>" +
                          error.Message + "</Message></Error>");
     return result;
@@ -112,10 +113,12 @@ std::optional<std::pair<int64_t, int64_t>> FakeBlobServer::ParseRange(const std:
 }
 
 std::vector<HttpHeader> FakeBlobServer::BlobHeaders(const StoredBlob& blob) {
-    std::vector<HttpHeader> headers{HttpHeader("ETag", blob.ETag), HttpHeader("x-ms-blob-type", "PageBlob"),
-                                    HttpHeader("x-ms-meta-filesize", std::to_string(blob.Size))};
+    std::vector<HttpHeader> headers{
+        HttpHeader(AVEVA::HeaderName{"ETag"}, AVEVA::HeaderValue{blob.ETag}),
+        HttpHeader(AVEVA::HeaderName{"x-ms-blob-type"}, AVEVA::HeaderValue{"PageBlob"}),
+        HttpHeader(AVEVA::HeaderName{"x-ms-meta-filesize"}, AVEVA::HeaderValue{std::to_string(blob.Size)})};
     for (const auto& [key, value] : blob.Metadata) {
-        headers.emplace_back("x-ms-meta-" + key, value);
+        headers.emplace_back(AVEVA::HeaderName{"x-ms-meta-" + key}, AVEVA::HeaderValue{value});
     }
     return headers;
 }
@@ -123,11 +126,13 @@ std::vector<HttpHeader> FakeBlobServer::BlobHeaders(const StoredBlob& blob) {
 HttpResponse FakeBlobServer::RangeResponse(std::size_t offset, std::string content, std::size_t total,
                                            const std::string& etag) {
     std::vector<HttpHeader> headers{
-        HttpHeader("ETag", etag), HttpHeader("x-ms-blob-type", "PageBlob"),
-        HttpHeader("Content-Length", std::to_string(content.size())),
-        HttpHeader("Content-Range", "bytes " + std::to_string(offset) + "-" +
-                                        std::to_string(offset + (content.empty() ? 0 : content.size() - 1)) + "/" +
-                                        std::to_string(total))};
+        HttpHeader(AVEVA::HeaderName{"ETag"}, AVEVA::HeaderValue{etag}),
+        HttpHeader(AVEVA::HeaderName{"x-ms-blob-type"}, AVEVA::HeaderValue{"PageBlob"}),
+        HttpHeader(AVEVA::HeaderName{"Content-Length"}, AVEVA::HeaderValue{std::to_string(content.size())}),
+        HttpHeader(AVEVA::HeaderName{"Content-Range"},
+                   AVEVA::HeaderValue{"bytes " + std::to_string(offset) + "-" +
+                                      std::to_string(offset + (content.empty() ? 0 : content.size() - 1)) + "/" +
+                                      std::to_string(total)})};
     return MakeResponse(HttpStatus::PartialContent, std::move(headers), std::move(content));
 }
 
@@ -206,7 +211,8 @@ Result FakeBlobServer::Create(const HttpRequest& request, const std::string& pat
     blob.Size = 0;
     blob.Metadata.clear();
     ApplyMetadata(request, blob);
-    return Success(MakeResponse(HttpStatus::Created, {HttpHeader("ETag", NextETag(blob))}));
+    return Success(
+        MakeResponse(HttpStatus::Created, {HttpHeader(AVEVA::HeaderName{"ETag"}, AVEVA::HeaderValue{NextETag(blob)})}));
 }
 
 void FakeBlobServer::ApplyMetadata(const HttpRequest& request, StoredBlob& blob) {
@@ -272,8 +278,9 @@ Result FakeBlobServer::Lease(const HttpRequest& request, StoredBlob& blob) {
         ++LeaseAcquisitions;
         blob.LeaseId = proposed;
         ExtendLease(request, blob);
-        return Success(MakeResponse(HttpStatus::Created,
-                                    {HttpHeader("ETag", blob.ETag), HttpHeader("x-ms-lease-id", blob.LeaseId)}));
+        return Success(MakeResponse(
+            HttpStatus::Created, {HttpHeader(AVEVA::HeaderName{"ETag"}, AVEVA::HeaderValue{blob.ETag}),
+                                  HttpHeader(AVEVA::HeaderName{"x-ms-lease-id"}, AVEVA::HeaderValue{blob.LeaseId})}));
     }
     const auto leaseId = Header(request, "x-ms-lease-id");
     if (action == "renew") {
@@ -285,8 +292,9 @@ Result FakeBlobServer::Lease(const HttpRequest& request, StoredBlob& blob) {
         }
         ++LeaseRenewals;
         ExtendLease(request, blob);
-        return Success(
-            MakeResponse(HttpStatus::Ok, {HttpHeader("ETag", blob.ETag), HttpHeader("x-ms-lease-id", blob.LeaseId)}));
+        return Success(MakeResponse(
+            HttpStatus::Ok, {HttpHeader(AVEVA::HeaderName{"ETag"}, AVEVA::HeaderValue{blob.ETag}),
+                             HttpHeader(AVEVA::HeaderName{"x-ms-lease-id"}, AVEVA::HeaderValue{blob.LeaseId})}));
     }
     if (action == "release") {
         if (const auto fault = FaultFor(Operation::ReleaseLease)) {
@@ -299,7 +307,8 @@ Result FakeBlobServer::Lease(const HttpRequest& request, StoredBlob& blob) {
         blob.LeaseId.clear();
         blob.LeaseSeconds = 0;
         blob.LeaseExpiry = {};
-        return Success(MakeResponse(HttpStatus::Ok, {HttpHeader("ETag", blob.ETag)}));
+        return Success(
+            MakeResponse(HttpStatus::Ok, {HttpHeader(AVEVA::HeaderName{"ETag"}, AVEVA::HeaderValue{blob.ETag})}));
     }
     if (action == "break") {
         if (blob.LeaseId.empty()) {
@@ -308,8 +317,9 @@ Result FakeBlobServer::Lease(const HttpRequest& request, StoredBlob& blob) {
         ++LeaseBreaks;
         // The fake only models immediate breaks, so the lease is over as soon as the call completes.
         blob.LeaseExpiry = {};
-        return Success(
-            MakeResponse(HttpStatus::Accepted, {HttpHeader("ETag", blob.ETag), HttpHeader("x-ms-lease-time", "0")}));
+        return Success(MakeResponse(HttpStatus::Accepted,
+                                    {HttpHeader(AVEVA::HeaderName{"ETag"}, AVEVA::HeaderValue{blob.ETag}),
+                                     HttpHeader(AVEVA::HeaderName{"x-ms-lease-time"}, AVEVA::HeaderValue{"0"})}));
     }
     return Failure(HttpStatus::BadRequest, "InvalidHeaderValue");
 }
@@ -355,7 +365,8 @@ Result FakeBlobServer::ContainerRequest(const HttpMethod method, const std::stri
         if (!m_containers.insert(container).second) {
             return Failure(HttpStatus::Conflict, "ContainerAlreadyExists");
         }
-        return Success(MakeResponse(HttpStatus::Created, {HttpHeader("ETag", "\"container\"")}));
+        return Success(MakeResponse(HttpStatus::Created,
+                                    {HttpHeader(AVEVA::HeaderName{"ETag"}, AVEVA::HeaderValue{"\"container\""})}));
     }
     if (method == HttpMethod::Get && comp == "list") {
         return ListBlobs(url, container);
@@ -403,9 +414,10 @@ Result FakeBlobServer::BatchDelete(const std::string& body) {
         }
     }
     reply += "--fakeresponse--\r\n";
-    return Success(MakeResponse(HttpStatus::Accepted,
-                                {HttpHeader("Content-Type", "multipart/mixed; boundary=fakeresponse")},
-                                std::move(reply)));
+    return Success(MakeResponse(
+        HttpStatus::Accepted,
+        {HttpHeader(AVEVA::HeaderName{"Content-Type"}, AVEVA::HeaderValue{"multipart/mixed; boundary=fakeresponse"})},
+        std::move(reply)));
 }
 
 Result FakeBlobServer::ListBlobs(const std::string& url, const std::string& container) {
@@ -454,7 +466,9 @@ Result FakeBlobServer::ListBlobs(const std::string& url, const std::string& cont
                        XmlEscape(container) + "\"><Prefix>" + XmlEscape(prefix) + "</Prefix><Marker>" +
                        XmlEscape(marker) + "</Marker><Blobs>" + blobs + "</Blobs><NextMarker>" + XmlEscape(nextMarker) +
                        "</NextMarker></EnumerationResults>";
-    return Success(MakeResponse(HttpStatus::Ok, {HttpHeader("Content-Type", "application/xml")}, std::move(body)));
+    return Success(MakeResponse(HttpStatus::Ok,
+                                {HttpHeader(AVEVA::HeaderName{"Content-Type"}, AVEVA::HeaderValue{"application/xml"})},
+                                std::move(body)));
 }
 
 Result FakeBlobServer::GetProperties(const StoredBlob& blob, const std::size_t requestIndex) {
@@ -463,10 +477,10 @@ Result FakeBlobServer::GetProperties(const StoredBlob& blob, const std::size_t r
     }
     ++PropertiesRequests;
     auto headers = BlobHeaders(blob);
-    headers.emplace_back("Content-Length", std::to_string(blob.Data.size()));
+    headers.emplace_back(AVEVA::HeaderName{"Content-Length"}, AVEVA::HeaderValue{std::to_string(blob.Data.size())});
     Result result = Success(MakeResponse(HttpStatus::Ok, std::move(headers)));
     if (DeferProperties.Get()) {
-        result.Deferred = true;
+        result.Delivery = AVEVA::AzureClient::Tests::Delivery::Deferred;
         m_heldProperties.Add(requestIndex);
     }
     return result;
@@ -481,7 +495,8 @@ Result FakeBlobServer::SetMetadata(const HttpRequest& request, StoredBlob& blob)
     }
     ApplyMetadata(request, blob);
     SizeWrites.push_back(blob.Size);
-    return Success(MakeResponse(HttpStatus::Ok, {HttpHeader("ETag", NextETag(blob))}));
+    return Success(
+        MakeResponse(HttpStatus::Ok, {HttpHeader(AVEVA::HeaderName{"ETag"}, AVEVA::HeaderValue{NextETag(blob)})}));
 }
 
 Result FakeBlobServer::Resize(const HttpRequest& request, StoredBlob& blob) {
@@ -502,7 +517,8 @@ Result FakeBlobServer::Resize(const HttpRequest& request, StoredBlob& blob) {
     blob.Data.resize(static_cast<size_t>(capacity), '\0');
     blob.WrittenPages.resize(PageCount(static_cast<size_t>(capacity)));
     CapacityWrites.push_back(capacity);
-    return Success(MakeResponse(HttpStatus::Ok, {HttpHeader("ETag", NextETag(blob))}));
+    return Success(
+        MakeResponse(HttpStatus::Ok, {HttpHeader(AVEVA::HeaderName{"ETag"}, AVEVA::HeaderValue{NextETag(blob)})}));
 }
 
 Result FakeBlobServer::GetPageRanges(const HttpRequest& request, const StoredBlob& blob) {
@@ -539,9 +555,10 @@ Result FakeBlobServer::GetPageRanges(const HttpRequest& request, const StoredBlo
     }
     body += "</PageList>";
     return Success(MakeResponse(HttpStatus::Ok,
-                                {HttpHeader("ETag", blob.ETag),
-                                 HttpHeader("x-ms-blob-content-length", std::to_string(blob.Data.size())),
-                                 HttpHeader("Content-Type", "application/xml")},
+                                {HttpHeader(AVEVA::HeaderName{"ETag"}, AVEVA::HeaderValue{blob.ETag}),
+                                 HttpHeader(AVEVA::HeaderName{"x-ms-blob-content-length"},
+                                            AVEVA::HeaderValue{std::to_string(blob.Data.size())}),
+                                 HttpHeader(AVEVA::HeaderName{"Content-Type"}, AVEVA::HeaderValue{"application/xml"})},
                                 std::move(body)));
 }
 
@@ -558,7 +575,7 @@ Result FakeBlobServer::PageCopyFromUrl(const FakeHttpClient::RequestRecord& reco
                   sourceRange->first,
                   Header(request, "x-ms-source-if-match"),
                   Header(request, "x-ms-copy-source-authorization"),
-                  record.Options.GetTimeout()};
+                  record.Options.GetTimeout().Value()};
     PageCopies.push_back(copy);
 
     if (const auto fault = FaultFor(Operation::UploadPagesFromUrl)) {
@@ -588,11 +605,12 @@ Result FakeBlobServer::PageCopyFromUrl(const FakeHttpClient::RequestRecord& reco
     }
     const std::string payload(source->second.Data.begin() + copy.SourceOffset,
                               source->second.Data.begin() + copy.SourceOffset + copy.Length);
-    const auto etag = Apply(blob, copy.Offset, payload);
+    const auto etag = Apply(blob, copy.Offset, payload, PageWriteMode::Update);
     if (!etag) {
         return Failure(HttpStatus::RangeNotSatisfiable, "InvalidPageRange");
     }
-    return Success(MakeResponse(HttpStatus::Created, {HttpHeader("ETag", *etag)}));
+    return Success(
+        MakeResponse(HttpStatus::Created, {HttpHeader(AVEVA::HeaderName{"ETag"}, AVEVA::HeaderValue{*etag})}));
 }
 
 Result FakeBlobServer::PageWrite(const FakeHttpClient::RequestRecord& record, const std::string& path,
@@ -606,14 +624,12 @@ Result FakeBlobServer::PageWrite(const FakeHttpClient::RequestRecord& record, co
         return Failure(HttpStatus::BadRequest, "InvalidHeaderValue");
     }
     const auto [offset, length] = *range;
-    const bool clear = Header(request, "x-ms-page-write") == "clear";
+    const auto mode = Header(request, "x-ms-page-write") == "clear" ? PageWriteMode::Clear : PageWriteMode::Update;
+    const bool clear = mode == PageWriteMode::Clear;
     const auto capacity = static_cast<int64_t>(blob.Data.size());
 
     if (!clear) {
         Uploads.push_back({offset, std::vector<char>(record.Body.begin(), record.Body.end())});
-        if (request.GetBodyStorage() == BodyStorage::View) {
-            SharedUploadPayloadAddresses.push_back(reinterpret_cast<const char*>(request.GetBodyView().data()));
-        }
         if (const auto fault = FaultFor(Operation::UploadPages)) {
             return FailureResult(*fault);
         }
@@ -632,12 +648,13 @@ Result FakeBlobServer::PageWrite(const FakeHttpClient::RequestRecord& record, co
     const std::string payload = clear ? std::string(static_cast<size_t>(length), '\0') : record.Body;
     if (!clear && DeferUploads.Get()) {
         Result deferred = Success(MakeResponse(HttpStatus::Created));
-        deferred.Deferred = true;
+        deferred.Delivery = AVEVA::AzureClient::Tests::Delivery::Deferred;
         deferred.OnComplete = [this, path, offset, payload](HttpResponse& response) {
             std::scoped_lock completionLock(m_mutex);
-            const auto etag = Apply(m_blobs.at(path), offset, payload);
+            const auto etag = Apply(m_blobs.at(path), offset, payload, PageWriteMode::Update);
             if (etag) {
-                response = MakeResponse(HttpStatus::Created, {HttpHeader("ETag", *etag)});
+                response = MakeResponse(HttpStatus::Created,
+                                        {HttpHeader(AVEVA::HeaderName{"ETag"}, AVEVA::HeaderValue{*etag})});
             } else {
                 response = Failure(HttpStatus::RangeNotSatisfiable, "InvalidPageRange").Response;
             }
@@ -646,15 +663,16 @@ Result FakeBlobServer::PageWrite(const FakeHttpClient::RequestRecord& record, co
         m_requestHeld.notify_all();
         return deferred;
     }
-    const auto etag = Apply(blob, offset, payload, clear);
+    const auto etag = Apply(blob, offset, payload, mode);
     if (!etag) {
         return Failure(HttpStatus::RangeNotSatisfiable, "InvalidPageRange");
     }
-    return Success(MakeResponse(HttpStatus::Created, {HttpHeader("ETag", *etag)}));
+    return Success(
+        MakeResponse(HttpStatus::Created, {HttpHeader(AVEVA::HeaderName{"ETag"}, AVEVA::HeaderValue{*etag})}));
 }
 
 std::optional<std::string> FakeBlobServer::Apply(StoredBlob& blob, const int64_t offset, const std::string& payload,
-                                                 const bool clear) {
+                                                 const PageWriteMode mode) {
     const auto end = static_cast<size_t>(offset) + payload.size();
     if (end > blob.Data.size()) {
         return std::nullopt;
@@ -664,7 +682,7 @@ std::optional<std::string> FakeBlobServer::Apply(StoredBlob& blob, const int64_t
         blob.WrittenPages.resize(PageCount(blob.Data.size()));
     }
     for (size_t page = static_cast<size_t>(offset) / PageSize; page * PageSize < end; ++page) {
-        blob.WrittenPages[page] = !clear;
+        blob.WrittenPages[page] = mode == PageWriteMode::Update;
     }
     return NextETag(blob);
 }
@@ -683,7 +701,7 @@ Result FakeBlobServer::Download(const FakeHttpClient::RequestRecord& record, Sto
         download.Length = range->second;
     }
     download.IfMatch = Header(request, "If-Match");
-    download.Timeout = record.Options.GetTimeout();
+    download.Timeout = record.Options.GetTimeout().Value();
 
     if (const auto fault = FaultFor(Operation::DownloadToBuffer)) {
         return FailureResult(*fault);
@@ -694,7 +712,7 @@ Result FakeBlobServer::Download(const FakeHttpClient::RequestRecord& record, Sto
     Downloads.push_back(download);
     if (DeferDownloads.Get()) {
         Result deferred = Success(MakeResponse(HttpStatus::PartialContent));
-        deferred.Deferred = true;
+        deferred.Delivery = AVEVA::AzureClient::Tests::Delivery::Deferred;
         m_heldDownloads.Add(record.Index, download);
         m_requestHeld.notify_all();
         return deferred;

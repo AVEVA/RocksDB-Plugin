@@ -98,8 +98,8 @@ class FileCacheEntry
     Generation GetGeneration() const noexcept;
     void SetGeneration(Generation generation) noexcept;
 
-    // The handle readers share; created on first use. Callers must hold the owning cache's mutex.
-    std::shared_ptr<detail::CachedReadHandle> GetOrCreateReadHandle();
+    // The handle readers share; created on first use. The lock proves the caller holds the owning cache's mutex.
+    std::shared_ptr<detail::CachedReadHandle> GetOrCreateReadHandle(const std::unique_lock<std::mutex>& cacheLock);
     // Detaches the handle (null if none) so the owner can close it outside its mutex.
     std::shared_ptr<detail::CachedReadHandle> TakeReadHandle() noexcept;
     // Owned if this entry still owns exactly this handle, i.e. it is the entry the caller read from.
@@ -107,7 +107,7 @@ class FileCacheEntry
 
   private:
     // Intrusive-hook operations; only the owning cache, which holds its mutex, may relink an entry.
-    friend class FileCache;
+    friend class FileCacheImpl;
     void unlink();
     ListLink LinkState() const;
 };

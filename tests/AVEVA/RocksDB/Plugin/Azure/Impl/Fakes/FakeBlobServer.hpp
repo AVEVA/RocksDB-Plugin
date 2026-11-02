@@ -235,7 +235,6 @@ class FakeBlobServer {
     // return copies taken under a lock, so they are safe while other threads keep sending.
     RequestLog<Upload> Uploads;
     // Address of the zero-copy body of every upload that was sent as a view of a caller-owned buffer.
-    RequestLog<const char*> SharedUploadPayloadAddresses;
     RequestLog<int64_t> SizeWrites;
     RequestLog<int64_t> CapacityWrites;
     // One entry per ranged GET, so a download split into several requests is recorded as several.
@@ -276,8 +275,9 @@ class FakeBlobServer {
     Knob<bool> DeferProperties;
     size_t PendingProperties() { return Count(m_heldProperties); }
     void CompleteProperties() {
-        if (!m_http->CompleteRequest(
-                Take(m_heldProperties, 0, "FakeBlobServer has no deferred properties request").RequestIndex)) {
+        if (m_http->CompleteRequest(
+                Take(m_heldProperties, 0, "FakeBlobServer has no deferred properties request").RequestIndex) !=
+            ::AVEVA::AzureClient::Tests::Settlement::Settled) {
             throw std::logic_error("FakeBlobServer properties request was already completed");
         }
         Settle(*m_http);
@@ -309,8 +309,9 @@ class FakeBlobServer {
 
     // Completes a deferred upload; the bytes land in the blob only now.
     void CompleteUpload(const size_t index = 0) {
-        if (!m_http->CompleteRequest(
-                Take(m_heldUploads, index, "FakeBlobServer upload index out of range").RequestIndex)) {
+        if (m_http->CompleteRequest(
+                Take(m_heldUploads, index, "FakeBlobServer upload index out of range").RequestIndex) !=
+            ::AVEVA::AzureClient::Tests::Settlement::Settled) {
             throw std::logic_error("FakeBlobServer upload was already completed");
         }
         Settle(*m_http);
@@ -356,7 +357,7 @@ class FakeBlobServer {
 
     [[nodiscard]] static HttpResponse MakeResponse(const AVEVA::HttpStatusCode status,
                                                    std::vector<HttpHeader> headers = {}, std::string body = {}) {
-        headers.emplace_back("x-ms-request-id", "fake-request-id");
+        headers.emplace_back(AVEVA::HeaderName{"x-ms-request-id"}, AVEVA::HeaderValue{"fake-request-id"});
         return HttpResponse{status, std::move(headers), std::move(body)};
     }
 
@@ -446,11 +447,13 @@ class FakeBlobServer {
 
     Result PageWrite(const FakeHttpClient::RequestRecord& record, const std::string& path, StoredBlob& blob);
 
-    // Writes (or, for `clear`, zeroes and unmarks) a page range. Unlike a lenient in-memory buffer the service never
+    enum class PageWriteMode : std::uint8_t { Update, Clear };
+
+    // Writes (or, for Clear, zeroes and unmarks) a page range. Unlike a lenient in-memory buffer the service never
     // grows a page blob by writing past its end, so a range that no longer fits (e.g. the blob was shrunk after the
     // request was queued) fails with nullopt and leaves the blob untouched.
     [[nodiscard]] static std::optional<std::string> Apply(StoredBlob& blob, const int64_t offset,
-                                                          const std::string& payload, const bool clear = false);
+                                                          const std::string& payload, PageWriteMode mode);
 
     [[nodiscard]] static size_t PageCount(const size_t bytes) { return (bytes + PageSize - 1) / PageSize; }
 

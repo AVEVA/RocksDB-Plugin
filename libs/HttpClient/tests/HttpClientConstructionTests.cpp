@@ -17,7 +17,7 @@ TEST(HttpClientConstruction, BadTrustSettingsFailConstructionWithAClearError) {
     boost::asio::io_context context;
     const auto messageOf = [&context](AVEVA::HttpClientOptions options) {
         try {
-            auto client = AVEVA::HttpClient::Create(context, std::move(options));
+            auto client = std::make_unique<AVEVA::HttpClient>(context, std::move(options));
         } catch (const std::runtime_error& error) {
             return std::string(error.what());
         }
@@ -33,7 +33,7 @@ TEST(HttpClientConstruction, BadTrustSettingsFailConstructionWithAClearError) {
     EXPECT_NE(messageOf(missingDirectory).find("CA directory"), std::string::npos);
 
     AVEVA::HttpClientOptions garbagePem;
-    garbagePem.SetCaPem("this is not a certificate");
+    garbagePem.SetCaPem(AVEVA::PemText{"this is not a certificate"});
     EXPECT_NE(messageOf(garbagePem).find("CA PEM"), std::string::npos);
 
     const HttpClientTests::TempFile notPem("aveva-http-client-bad-ca-");
@@ -56,8 +56,8 @@ TEST(HttpClientConstruction, FactoryReturnsUsableClients) {
     boost::asio::post(context, [&handlerRan] { handlerRan = true; });
 
     {
-        auto client = AVEVA::HttpClient::Create(context);
-        auto secondClient = AVEVA::HttpClient::Create(context);
+        auto client = std::make_unique<AVEVA::HttpClient>(context);
+        auto secondClient = std::make_unique<AVEVA::HttpClient>(context);
 
         ASSERT_TRUE(client);
         ASSERT_TRUE(secondClient);

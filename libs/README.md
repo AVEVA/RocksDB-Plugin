@@ -18,7 +18,7 @@ Both libraries are installed as static-only CMake packages (`aveva_install_libra
 
 | Package | Imported target | Public dependencies (resolved by its config file) | Link-only dependencies (private, still required at link time) |
 |---------|-----------------|---------------------------------------------------|----------------------------------------------------------------|
-| `aveva-http-client` | `aveva::http-client` | `boost_asio`, `Microsoft.GSL` | `boost_beast`, `boost_intrusive`, `boost_unordered`, `boost_url`, OpenSSL |
+| `aveva-http-client` | `aveva::http-client` | `boost_asio`, `Microsoft.GSL` | `boost_beast`, `boost_intrusive`, `boost_scope`, `boost_unordered`, `boost_url`, OpenSSL |
 | `aveva-azure-client` | `aveva::azure-client` | `aveva-http-client`, `boost_asio`, `Microsoft.GSL` | OpenSSL, `boost_json`, `boost_url`, `boost_uuid`, LibXml2 (config package) |
 
 A consumer only calls `find_package(aveva-azure-client CONFIG REQUIRED)` (and `aveva-http-client` if it uses the HTTP
@@ -47,14 +47,26 @@ host injects one. Redesigning the API to hide Asio is deliberately out of scope.
 
 ### Completion contract
 
-Every `...Async` operation (both libraries) completes its handler exactly once and never from inside the initiating
-call; failures detected at initiation are delivered through the handler, not thrown. This does not mean the
-completion cannot run on another I/O thread before the initiating thread returns, so synchronize shared state. The
-handler runs on its associated executor (else the client's); a strand or a different `io_context` is honoured, and
-the client holds work on both until delivery. If an executor keeps rejecting work, the handler runs once on the
-completing thread rather than being lost. The HTTP client and its `io_context` must outlive every in-flight
-operation (or be shared through the `std::shared_ptr` constructors); the blob client object itself may be moved from
-or destroyed after initiating, since operations snapshot its state.
+Every `...Async` operation (both libraries) returns a lazy `boost::asio::awaitable`: nothing is sent until it is
+`co_await`ed, and it completes exactly once. `HttpClient::SendAsync` yields `HttpResult`
+(`std::expected<HttpResponse, std::error_code>`); an HTTP error status is a response, not an error. Failures are
+reported in the result rather than thrown: a rejected request yields `HttpClientError::InvalidRequest` (or
+`InvalidUrl`), `std::bad_alloc` yields `std::errc::not_enough_memory`, and any other exception
+`std::errc::state_not_recoverable`. The AzureClient operations likewise yield
+`std::expected<Response<T>, BlobStorageError>`.
+
+- **Cancellation.** Each request is one coroutine, so cancelling the awaiting coroutine (through its cancellation
+  slot) cancels the request, which then completes with `std::errc::operation_canceled`.
+- **Timeout.** The per-request timeout (`HttpRequestOptions`) is a single deadline covering the whole request,
+  including the wait for a per-origin connection slot. When it fires the result is `HttpClientError::TimedOut` and a
+  `Timeout` diagnostic (with the request phase) is reported. Very large timeouts are clamped, not overflowed.
+- **Executor affinity.** The request runs on a strand of the awaiting coroutine's executor (the strand serializes the
+  deadline timer with the request's completion), and the awaiting coroutine resumes on its own executor. Await from
+  a coroutine running on the `io_context` the client was created with (`get_executor()`), and never block on the
+  result from a thread that runs that `io_context`.
+- **Lifetime.** The caller owns the `io_context` and must keep it alive and running while requests are outstanding.
+  The `HttpClient` object may be destroyed while a request is running (the request holds the state it needs);
+  destroying it fails requests still waiting for a per-origin slot.
 
 ## Local modifications
 

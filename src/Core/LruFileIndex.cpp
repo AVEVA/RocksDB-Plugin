@@ -7,6 +7,7 @@
 #include <boost/scope/scope_exit.hpp>
 
 #include <algorithm>
+#include <cstddef>
 #include <filesystem>
 #include <iterator>
 #include <string>
@@ -146,7 +147,7 @@ LruFileIndex::TouchResult LruFileIndex::Touch(std::string_view filename) {
     return TouchResult::Touched;
 }
 
-std::optional<std::pair<std::string, std::string>> LruFileIndex::Remove(std::string_view filename) noexcept {
+std::optional<PendingEviction> LruFileIndex::Remove(std::string_view filename) noexcept {
     try {
         std::lock_guard lock(m_mutex);
         auto it = m_index.find(filename);
@@ -216,7 +217,7 @@ void LruFileIndex::EvictUntilSizeLocked(const ByteCount targetSize, EvictList& e
             projectedSize -= candidate->size;
         }
     } catch (...) {
-        evictPairs.resize(pairsBefore);
+        evictPairs.erase(evictPairs.begin() + static_cast<std::ptrdiff_t>(pairsBefore), evictPairs.end());
         throw;
     }
 
@@ -225,13 +226,13 @@ void LruFileIndex::EvictUntilSizeLocked(const ByteCount targetSize, EvictList& e
         EraseEntryLocked(victim);
 }
 
-std::pair<std::string, std::string> LruFileIndex::RemoveEntryLocked(LruIterator it) {
-    auto pair = BuildEvictionPair(*it);
+PendingEviction LruFileIndex::RemoveEntryLocked(LruIterator it) {
+    auto eviction = BuildEvictionPair(*it);
     EraseEntryLocked(it);
-    return pair;
+    return eviction;
 }
 
-std::pair<std::string, std::string> LruFileIndex::BuildEvictionPair(const Entry& entry) const {
+PendingEviction LruFileIndex::BuildEvictionPair(const Entry& entry) const {
     // Build the orig and graveyard path strings while under the lock.
     // No filesystem operation is performed here; the caller must commit the returned
     // pair after releasing the lock.  Deferring the rename outside the lock allows
@@ -247,7 +248,7 @@ std::pair<std::string, std::string> LruFileIndex::BuildEvictionPair(const Entry&
     std::string graveyardPathStr;
     graveyardPathStr.reserve(origPathStr.size() + 4);
     graveyardPathStr.append(origPathStr).append(".del");
-    return {std::move(origPathStr), std::move(graveyardPathStr)};
+    return PendingEviction{CacheFilePath{std::move(origPathStr)}, GraveyardFilePath{std::move(graveyardPathStr)}};
 }
 
 void LruFileIndex::EraseEntryLocked(LruIterator it) noexcept {

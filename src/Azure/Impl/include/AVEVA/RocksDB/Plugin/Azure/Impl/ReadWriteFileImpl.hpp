@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -47,15 +48,18 @@ template <typename TBlob> class BasicReadWriteFileImpl {
     };
     struct GapRead {
         std::span<char> Target; // inside the extent's buffer
-        int64_t Offset = 0;
-        int64_t Length = 0; // bytes the gap must receive in full
+        Core::ByteOffset Offset;
+        Core::ByteCount Length; // bytes the gap must receive in full
     };
     [[nodiscard]] std::vector<Extent> BuildExtents() const;
     [[nodiscard]] Durability Persistence() const noexcept;
     void PlanGapReads(Extent& extent, int64_t sizeBefore, std::vector<GapRead>& reads);
     BlobOperations::Task<void> ReadGapAsync(GapRead read);
     void OverlayChunks(const Extent& extent);
-    BlobOperations::Task<void> RunWaveAsync(std::vector<Extent>& extents, size_t begin, size_t end, int64_t sizeBefore);
+    // Owns its wave, so the buffers the reads and uploads use live exactly as long as the wave's frame.
+    BlobOperations::Task<void> RunWaveAsync(std::vector<Extent> wave, int64_t sizeBefore);
+    // Only Read awaits this, blocking until it completes, so `buffer` outlives every suspension.
+    [[nodiscard]] BlobOperations::Task<Core::ByteCount> ReadAsync(Core::ByteOffset offset, std::span<char> buffer);
 
   public:
     BasicReadWriteFileImpl(
@@ -73,8 +77,6 @@ template <typename TBlob> class BasicReadWriteFileImpl {
     [[nodiscard]] BlobOperations::Task<void> FlushAsync();
     [[nodiscard]] BlobOperations::Task<void> SyncAsync();
     [[nodiscard]] BlobOperations::Task<void> CloseAsync();
-    /// Same contract as Read. `buffer` must stay valid until the awaitable completes.
-    [[nodiscard]] BlobOperations::Task<int64_t> ReadAsync(int64_t offset, int64_t bytesRequested, char* buffer);
 
     // Blocking counterparts for RocksDB's threads, which must not be running the client's executor.
     void Close();
@@ -83,10 +85,11 @@ template <typename TBlob> class BasicReadWriteFileImpl {
     [[nodiscard]] std::shared_ptr<std::vector<char>> AcquireExtentBuffer(size_t size);
     void TrimExtentPool();
     [[nodiscard]] size_t PooledExtentBufferCount() const noexcept { return m_extentPool.size(); }
-    void Write(int64_t offset, const char* data, int64_t size);
+    void Write(Core::ByteOffset offset, std::span<const char> data);
     /// Provides read-your-writes: buffered bytes are flushed to the blob first, so data passed to Write is visible
-    /// whether or not Sync has been called. Reads are bounded by the written size, not the last synced size.
-    int64_t Read(int64_t offset, int64_t bytesRequested, char* buffer);
+    /// whether or not Sync has been called. Reads are bounded by the written size, not the last synced size; at most
+    /// `buffer.size()` bytes are read.
+    [[nodiscard]] Core::ByteCount Read(Core::ByteOffset offset, std::span<char> buffer);
 };
 extern template class BasicReadWriteFileImpl<PageBlobClient>;
 

@@ -13,17 +13,14 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 
-#include <gsl/pointers>
 #include <gsl/util>
 
 #include <filesystem>
 #include <limits>
-#include <list>
 #include <memory>
-#include <mutex>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
+#include <utility>
 
 namespace AVEVA::Private {
 namespace {
@@ -56,78 +53,92 @@ int CountPemCertificates(const std::string& pem) {
     return count;
 }
 
-void FreeCache(void* /*parent*/, void* data, CRYPTO_EX_DATA* /*ad*/, int /*index*/, long /*argl*/, void* /*argp*/) {
-    delete static_cast<gsl::owner<TlsSessionCache*>>(data);
-}
+/// <summary>What a client's SSL_CTX carries for its new-session callback.</summary>
+struct ContextState {
+    TlsSessionCache cache;
+    std::shared_ptr<const DiagnosticsSink> diagnostics;
+};
 
-void FreeOrigin(void* /*parent*/, void* data, CRYPTO_EX_DATA* /*ad*/, int /*index*/, long /*argl*/, void* /*argp*/) {
-    delete static_cast<gsl::owner<std::string*>>(data);
-}
+/// <summary>
+/// An OpenSSL ex_data slot owning a T. OpenSSL calls the registered free callback when the owning SSL or SSL_CTX is
+/// freed; the callback adopts the pointer back into a unique_ptr, so ownership moves to OpenSSL and back without a
+/// raw delete anywhere.
+/// </summary>
+template <typename T> struct ContextSlot {
+    static void Free(void* /*parent*/, void* data, CRYPTO_EX_DATA* /*ad*/, int /*index*/, long /*argl*/,
+                     void* /*argp*/) {
+        const std::unique_ptr<T> owned(static_cast<T*>(data));
+    }
 
-int CacheIndex() {
-    static const int index = SSL_CTX_get_ex_new_index(0, nullptr, nullptr, nullptr, &FreeCache);
-    return index;
-}
+    static int Index() {
+        static const int index = SSL_CTX_get_ex_new_index(0, nullptr, nullptr, nullptr, &Free);
+        return index;
+    }
 
-int OriginIndex() {
-    static const int index = SSL_get_ex_new_index(0, nullptr, nullptr, nullptr, &FreeOrigin);
-    return index;
-}
+    // Hands ownership to the context; if OpenSSL refuses, the value is simply destroyed here.
+    static void Attach(SSL_CTX* context, std::unique_ptr<T> value) {
+        if (SSL_CTX_set_ex_data(context, Index(), value.get()) == 1) {
+            static_cast<void>(value.release());
+        }
+    }
+
+    static T* Find(const SSL_CTX* context) noexcept { return static_cast<T*>(SSL_CTX_get_ex_data(context, Index())); }
+};
+
+/// <summary>The SSL counterpart of <see cref="ContextSlot"/>.</summary>
+template <typename T> struct ConnectionSlot {
+    static void Free(void* /*parent*/, void* data, CRYPTO_EX_DATA* /*ad*/, int /*index*/, long /*argl*/,
+                     void* /*argp*/) {
+        const std::unique_ptr<T> owned(static_cast<T*>(data));
+    }
+
+    static int Index() {
+        static const int index = SSL_get_ex_new_index(0, nullptr, nullptr, nullptr, &Free);
+        return index;
+    }
+
+    static void Attach(SSL* ssl, std::unique_ptr<T> value) {
+        if (SSL_set_ex_data(ssl, Index(), value.get()) == 1) {
+            static_cast<void>(value.release());
+        }
+    }
+
+    static T* Find(const SSL* ssl) noexcept { return static_cast<T*>(SSL_get_ex_data(ssl, Index())); }
+};
+
+using StateSlot = ContextSlot<ContextState>;
+using OriginSlot = ConnectionSlot<std::string>;
 
 // TLS 1.3 servers send tickets after the handshake, so sessions are captured here rather than after
 // async_handshake returns. Returning 0 leaves the reference with OpenSSL; the cache stores its own copy
 // because OpenSSL marks a connection's session non-resumable when the connection is freed without a
 // clean shutdown (e.g. pooled connections closed by the peer).
 int OnNewSession(SSL* ssl, SSL_SESSION* session) {
-    auto* cache = static_cast<TlsSessionCache*>(SSL_CTX_get_ex_data(SSL_get_SSL_CTX(ssl), CacheIndex()));
-    const auto* origin = static_cast<const std::string*>(SSL_get_ex_data(ssl, OriginIndex()));
-    if (cache == nullptr || origin == nullptr) {
+    auto* const state = StateSlot::Find(SSL_get_SSL_CTX(ssl));
+    const auto* const origin = OriginSlot::Find(ssl);
+    if (state == nullptr || origin == nullptr) {
         return 0;
     }
     try {
         if (UniqueSession copy{SSL_SESSION_dup(session)}; copy != nullptr) {
-            cache->Store(*origin, std::move(copy));
+            state->cache.Store(*origin, std::move(copy));
         }
-    } catch (const std::exception&) {
-        // Resumption is only an optimization; losing a session is harmless.
+    } catch (const std::exception& failure) {
+        // Resumption is only an optimization: losing a session costs one full handshake later.
+        DiagnosticsSink::Report(state->diagnostics, HttpDiagnosticKind::SwallowedException, HttpRequestPhase::Handshake,
+                                {}, {}, {}, failure.what());
     }
     return 0;
 }
-} // namespace
 
-void PrepareTlsSessionResumption(SSL* ssl, const std::string& host, const std::string& service) {
-    auto* cache = static_cast<TlsSessionCache*>(SSL_CTX_get_ex_data(SSL_get_SSL_CTX(ssl), CacheIndex()));
-    if (cache == nullptr) {
-        return;
-    }
-
-    auto origin = std::make_unique<std::string>();
-    origin->reserve(host.size() + 1 + service.size());
-    origin->append(host).append(1, ':').append(service);
-    if (UniqueSession session = cache->Take(*origin)) {
-        // SSL_set_session takes its own reference. If it is refused, no session is set and the handshake is a
-        // full one, which is exactly a cache miss.
-        SSL_set_session(ssl, session.get());
-    }
-    if (SSL_set_ex_data(ssl, OriginIndex(), origin.get()) == 1) {
-        origin.release();
-    }
-}
-
-void ConfigureTlsContext(boost::asio::ssl::context& tlsContext, const HttpClientOptions& options) {
-    const auto nativeContext = tlsContext.native_handle();
-    SSL_CTX_set_session_cache_mode(nativeContext, SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL_STORE);
-    SSL_CTX_sess_set_new_cb(nativeContext, &OnNewSession);
-    auto cache = std::make_unique<TlsSessionCache>();
-    if (SSL_CTX_set_ex_data(nativeContext, CacheIndex(), cache.get()) == 1) {
-        cache.release();
-    }
-    if (options.GetTlsVersion() == TlsVersion::Tls12) {
+// Applies the requested protocol range; each failure names the version that could not be configured.
+void ApplyTlsVersion(SSL_CTX* nativeContext, TlsVersion version) {
+    if (version == TlsVersion::Tls12) {
         if (SSL_CTX_set_min_proto_version(nativeContext, TLS1_2_VERSION) != 1 ||
             SSL_CTX_set_max_proto_version(nativeContext, TLS1_2_VERSION) != 1) {
             throw std::runtime_error("Unable to configure TLS 1.2");
         }
-    } else if (options.GetTlsVersion() == TlsVersion::Tls13) {
+    } else if (version == TlsVersion::Tls13) {
         if (SSL_CTX_set_min_proto_version(nativeContext, TLS1_3_VERSION) != 1 ||
             SSL_CTX_set_max_proto_version(nativeContext, TLS1_3_VERSION) != 1) {
             throw std::runtime_error("Unable to configure TLS 1.3");
@@ -135,46 +146,85 @@ void ConfigureTlsContext(boost::asio::ssl::context& tlsContext, const HttpClient
     } else if (SSL_CTX_set_min_proto_version(nativeContext, TLS1_2_VERSION) != 1) {
         throw std::runtime_error("Unable to configure minimum TLS version");
     }
+}
+
+// Loads every configured trust root, or the system defaults when none is configured.
+void ApplyTrustRoots(boost::asio::ssl::context& tlsContext, const HttpClientOptions& options) {
+    const auto caFile = options.GetCaFile();
+    const auto caDirectory = options.GetCaDirectory();
+    const auto caPem = options.GetCaPem();
+    if (!caFile.empty()) {
+        boost::system::error_code error;
+        tlsContext.load_verify_file(caFile.string(), error);
+        ThrowIfFailed(error, "Unable to load the TLS CA file '" + caFile.string() + "'");
+    }
+    if (!caDirectory.empty()) {
+        // OpenSSL only looks inside a CA directory when verifying, so a bad path would otherwise surface as a
+        // verification failure on the first request.
+        if (std::error_code directoryError; !std::filesystem::is_directory(caDirectory, directoryError)) {
+            throw boost::system::system_error(
+                boost::system::error_code(boost::system::errc::not_a_directory, boost::system::generic_category()),
+                "The TLS CA directory '" + caDirectory.string() + "' is not a directory");
+        }
+        boost::system::error_code error;
+        tlsContext.add_verify_path(caDirectory.string(), error);
+        ThrowIfFailed(error, "Unable to use the TLS CA directory '" + caDirectory.string() + "'");
+    }
+    if (const auto& pem = caPem.Value(); !pem.empty()) {
+        // add_certificate_authority silently accepts text that holds no certificate at all.
+        if (CountPemCertificates(pem) == 0) {
+            throw boost::system::system_error(
+                boost::system::error_code(boost::system::errc::invalid_argument, boost::system::generic_category()),
+                "The TLS CA PEM does not contain a readable certificate");
+        }
+        boost::system::error_code error;
+        tlsContext.add_certificate_authority(boost::asio::buffer(pem.data(), pem.size()), error);
+        ThrowIfFailed(error, "Unable to load the TLS CA PEM");
+    }
+    if (caFile.empty() && caDirectory.empty() && caPem.Value().empty()) {
+        boost::system::error_code error;
+        tlsContext.set_default_verify_paths(error);
+        ThrowIfFailed(error, "Unable to load the default TLS CA paths");
+    }
+}
+} // namespace
+
+void PrepareTlsSessionResumption(SSL* ssl, const TlsConnectionKey& origin) {
+    auto* const state = StateSlot::Find(SSL_get_SSL_CTX(ssl));
+    if (state == nullptr) {
+        return;
+    }
+
+    auto originName = std::make_unique<std::string>();
+    originName->reserve(origin.host.size() + 1 + origin.service.size());
+    originName->append(origin.host).append(1, ':').append(origin.service);
+    if (UniqueSession session = state->cache.Take(*originName)) {
+        // SSL_set_session takes its own reference. If it is refused, no session is set and the handshake is a
+        // full one, which is exactly a cache miss.
+        SSL_set_session(ssl, session.get());
+    }
+    OriginSlot::Attach(ssl, std::move(originName));
+}
+
+std::shared_ptr<boost::asio::ssl::context> MakeTlsContext(const HttpClientOptions& options,
+                                                          std::shared_ptr<const DiagnosticsSink> diagnostics) {
+    auto tlsContext = std::make_shared<boost::asio::ssl::context>(boost::asio::ssl::context::tls_client);
+    tlsContext->set_options(boost::asio::ssl::context::default_workarounds | boost::asio::ssl::context::no_sslv2 |
+                            boost::asio::ssl::context::no_sslv3);
+    const auto nativeContext = tlsContext->native_handle();
+    SSL_CTX_set_session_cache_mode(nativeContext, SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL_STORE);
+    SSL_CTX_sess_set_new_cb(nativeContext, &OnNewSession);
+    auto state = std::make_unique<ContextState>();
+    state->diagnostics = std::move(diagnostics);
+    StateSlot::Attach(nativeContext, std::move(state));
+    ApplyTlsVersion(nativeContext, options.GetTlsVersion());
 
     if (options.GetPeerVerification() == PeerVerification::Verify) {
-        tlsContext.set_verify_mode(boost::asio::ssl::verify_peer);
-        if (!options.GetCaFile().empty()) {
-            boost::system::error_code error;
-            tlsContext.load_verify_file(options.GetCaFile(), error);
-            ThrowIfFailed(error, "Unable to load the TLS CA file '" + options.GetCaFile() + "'");
-        }
-        if (!options.GetCaDirectory().empty()) {
-            // OpenSSL only looks inside a CA directory when verifying, so a bad path would otherwise surface as a
-            // verification failure on the first request.
-            if (std::error_code directoryError;
-                !std::filesystem::is_directory(options.GetCaDirectory(), directoryError)) {
-                throw boost::system::system_error(
-                    boost::system::error_code(boost::system::errc::not_a_directory, boost::system::generic_category()),
-                    "The TLS CA directory '" + options.GetCaDirectory() + "' is not a directory");
-            }
-            boost::system::error_code error;
-            tlsContext.add_verify_path(options.GetCaDirectory(), error);
-            ThrowIfFailed(error, "Unable to use the TLS CA directory '" + options.GetCaDirectory() + "'");
-        }
-        if (!options.GetCaPem().empty()) {
-            const auto& pem = options.GetCaPem();
-            // add_certificate_authority silently accepts text that holds no certificate at all.
-            if (CountPemCertificates(pem) == 0) {
-                throw boost::system::system_error(
-                    boost::system::error_code(boost::system::errc::invalid_argument, boost::system::generic_category()),
-                    "The TLS CA PEM does not contain a readable certificate");
-            }
-            boost::system::error_code error;
-            tlsContext.add_certificate_authority(boost::asio::buffer(pem.data(), pem.size()), error);
-            ThrowIfFailed(error, "Unable to load the TLS CA PEM");
-        }
-        if (options.GetCaFile().empty() && options.GetCaDirectory().empty() && options.GetCaPem().empty()) {
-            boost::system::error_code error;
-            tlsContext.set_default_verify_paths(error);
-            ThrowIfFailed(error, "Unable to load the default TLS CA paths");
-        }
+        tlsContext->set_verify_mode(boost::asio::ssl::verify_peer);
+        ApplyTrustRoots(*tlsContext, options);
     } else {
-        tlsContext.set_verify_mode(boost::asio::ssl::verify_none);
+        tlsContext->set_verify_mode(boost::asio::ssl::verify_none);
     }
+    return tlsContext;
 }
 } // namespace AVEVA::Private

@@ -51,7 +51,7 @@ boost::asio::awaitable<void> SendAndInvoke(AVEVA::HttpClient& client, AVEVA::Htt
     if (result) {
         handler(std::error_code{}, std::move(*result));
     } else {
-        handler(result.error(), AVEVA::HttpResponse{});
+        handler(result.error().Error(), AVEVA::HttpResponse{});
     }
 }
 } // namespace detail
@@ -69,8 +69,20 @@ void SendWith(AVEVA::HttpClient& client, AVEVA::HttpRequest request, AVEVA::Http
 // URL of a loopback port that has no listener.
 std::string ClosedLocalUrl();
 
+// How a scripted server answers a request it has read.
+enum class ServerReply {
+    // Writes the response and keeps the connection open for the next request.
+    Respond,
+    // Writes the response and then closes the connection.
+    RespondAndClose,
+    // Never answers.
+    Hold,
+    // Closes the connection without any response.
+    Drop,
+};
+
 ExchangeResult Exchange(AVEVA::HttpRequest request, std::string wireResponse, AVEVA::HttpRequestOptions options = {},
-                        bool holdResponse = false);
+                        ServerReply reply = ServerReply::RespondAndClose);
 
 // Deletes the file on destruction so a failing assertion cannot leak it.
 class TempFile {
@@ -102,13 +114,9 @@ SelfSignedCertificate MakeSelfSignedCertificate(const std::string& commonName, c
 
 struct ServerAction {
     std::string Wire;
-    bool CloseAfterWrite = false;
+    ServerReply Reply = ServerReply::Respond;
     // When set, the response is withheld until the delay elapsed.
     std::chrono::milliseconds Delay{0};
-    // When true, the request is read but never answered.
-    bool Hold = false;
-    // When true, the connection is closed right after the request was read, without any response.
-    bool Drop = false;
 };
 
 // Accepts any number of connections and serves keep-alive requests on each; what to answer is scripted

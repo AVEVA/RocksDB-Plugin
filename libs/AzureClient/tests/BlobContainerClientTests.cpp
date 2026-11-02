@@ -95,7 +95,8 @@ void ListBlobsWithOptionsAndVerifyResult(FakeHttpClient& httpClient, BlobContain
     AVEVA::AzureClient::ListBlobsOptions options;
     options.Prefix = "pref/";
     options.Marker = "page-1";
-    options.MaxResults = 7U;
+    constexpr std::uint32_t pageSize = 7U;
+    options.MaxResults = pageSize;
     options.Metadata = AVEVA::AzureClient::MetadataListing::Include;
 
     const auto result = RunAwaitable(httpClient, client.ListBlobsAsync(options));
@@ -190,7 +191,8 @@ TEST(BlobContainerClientTests, Constructor_EnforcesContainerNameBoundariesAndDas
     EXPECT_NO_THROW((BlobContainerClient{httpClient, shortName}));
 
     BlobContainerClientOptions maxName = BuildOptions();
-    maxName.ContainerName = std::string(63U, 'a');
+    constexpr std::size_t maxContainerNameLength = 63U;
+    maxName.ContainerName = std::string(maxContainerNameLength, 'a');
     EXPECT_NO_THROW((BlobContainerClient{httpClient, maxName}));
 
     BlobContainerClientOptions leadingDash = BuildOptions();
@@ -271,7 +273,7 @@ TEST(BlobContainerClientTests, ListBlobsAsync_OptionsOverloadIncludesSupportedQu
 TEST(BlobContainerClientTests, CreateIfNotExists_TreatsAlreadyExistsAsNonFatal) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(
-        MakeAzureErrorResponse(AVEVA::HttpStatusCode{409}, "ContainerAlreadyExists", "", "create-request"));
+        MakeAzureErrorResponse(::AVEVA::HttpStatus::Conflict, "ContainerAlreadyExists", "", "create-request"));
     BlobContainerClient client{httpClient, BuildOptions()};
 
     CreateContainerIfMissingAndVerifyExpectedConflict(httpClient, client);

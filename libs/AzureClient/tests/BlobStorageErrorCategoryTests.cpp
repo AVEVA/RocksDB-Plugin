@@ -41,21 +41,24 @@ void ExpectEnumeratorHasMessageAndRoundTrips(const BlobStorageErrorCategory& cat
     }
 }
 
-void ExpectStatusesAreTransient(std::initializer_list<unsigned int> statuses) {
-    for (const unsigned int status : statuses) {
-        EXPECT_EQ(TransienceOf(BlobStorageError{.StatusCode = AVEVA::HttpStatusCode{status},
+// HTTP has no named constant for 501 Not Implemented.
+constexpr AVEVA::HttpStatusCode NotImplemented{501U};
+
+void ExpectStatusesAreTransient(std::initializer_list<AVEVA::HttpStatusCode> statuses) {
+    for (const AVEVA::HttpStatusCode status : statuses) {
+        EXPECT_EQ(TransienceOf(BlobStorageError{.StatusCode = status,
                                                 .Code = make_error_code(BlobStorageErrorCode::ServiceError)}),
                   Transience::Transient)
-            << status;
+            << status.Value();
     }
 }
 
-void ExpectStatusesAreNotTransient(std::initializer_list<unsigned int> statuses) {
-    for (const unsigned int status : statuses) {
-        EXPECT_EQ(TransienceOf(BlobStorageError{.StatusCode = AVEVA::HttpStatusCode{status},
+void ExpectStatusesAreNotTransient(std::initializer_list<AVEVA::HttpStatusCode> statuses) {
+    for (const AVEVA::HttpStatusCode status : statuses) {
+        EXPECT_EQ(TransienceOf(BlobStorageError{.StatusCode = status,
                                                 .Code = make_error_code(BlobStorageErrorCode::ServiceError)}),
                   Transience::Permanent)
-            << status;
+            << status.Value();
     }
 }
 } // namespace
@@ -283,25 +286,28 @@ TEST(BlobStorageErrorCategoryTests, ExtendedErrorCodes_MapToPortableConditions) 
 
 TEST(BlobStorageErrorCategoryTests, EnumeratorValuesArePinned) {
     using AVEVA::AzureClient::BlobStorageErrorCode;
+    // The numeric values are persisted in logs and compared across versions, so they must never shift.
+    constexpr int PinnedBlobNotFound = 11;
+    constexpr int PinnedServiceError = 15;
     static_assert(static_cast<int>(BlobStorageErrorCode::ContainerAlreadyExists) == 1);
     static_assert(static_cast<int>(BlobStorageErrorCode::ContainerNotFound) == 2);
-    static_assert(static_cast<int>(BlobStorageErrorCode::BlobNotFound) == 11);
-    static_assert(static_cast<int>(BlobStorageErrorCode::ServiceError) == 15);
+    static_assert(static_cast<int>(BlobStorageErrorCode::BlobNotFound) == PinnedBlobNotFound);
+    static_assert(static_cast<int>(BlobStorageErrorCode::ServiceError) == PinnedServiceError);
     SUCCEED();
 }
 
 TEST(BlobStorageErrorCategoryTests, TransportFailureHasZeroStatusAndNoServiceFields) {
     const auto failure = AVEVA::AzureClient::Private::DetermineBlobStorageFailure(
-        std::make_error_code(std::errc::connection_reset), AVEVA::HttpResponse{});
+        AVEVA::HttpFailure{std::make_error_code(std::errc::connection_reset)}, AVEVA::HttpResponse{});
     EXPECT_EQ(failure.Error, std::make_error_code(std::errc::connection_reset));
     EXPECT_FALSE(failure.Details.has_value());
 }
 
 TEST(BlobStorageErrorCategoryTests, TransportFailureWithCauseCarriesTheCauseInTheMessage) {
-    AVEVA::HttpResponse response;
-    response.SetCause(std::make_error_code(std::errc::connection_refused));
     const auto failure = AVEVA::AzureClient::Private::DetermineBlobStorageFailure(
-        AVEVA::make_error_code(AVEVA::HttpClientError::ConnectFailed), response);
+        AVEVA::HttpFailure{AVEVA::make_error_code(AVEVA::HttpClientError::ConnectFailed),
+                           AVEVA::TransportCause{std::make_error_code(std::errc::connection_refused)}},
+        AVEVA::HttpResponse{});
     EXPECT_EQ(failure.Error, AVEVA::make_error_code(AVEVA::HttpClientError::ConnectFailed));
     ASSERT_TRUE(failure.Details.has_value());
     EXPECT_NE(ValueOrFail(failure.Details).Message.find(std::make_error_code(std::errc::connection_refused).message()),
@@ -313,7 +319,10 @@ TEST(BlobStorageErrorCategoryTests, DetermineFailure_Maps304WithoutErrorCodeToCo
     using AVEVA::HttpStatusCode;
     using AVEVA::AzureClient::Private::DetermineBlobStorageFailure;
     const auto failure = DetermineBlobStorageFailure(
-        {}, AVEVA::HttpResponse{AVEVA::HttpStatus::NotModified, {{"x-ms-request-id", "req-304"}}, ""});
+        {},
+        AVEVA::HttpResponse{AVEVA::HttpStatus::NotModified,
+                            {AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-request-id"}, AVEVA::HeaderValue{"req-304"})},
+                            ""});
     EXPECT_EQ(failure.Error, BlobStorageErrorCode::ConditionNotMet);
     ASSERT_TRUE(failure.Details.has_value());
     EXPECT_EQ(ValueOrFail(failure.Details).StatusCode, AVEVA::HttpStatus::NotModified);
@@ -325,11 +334,15 @@ TEST(BlobStorageErrorCategoryTests, DetermineFailure_Maps304WithoutErrorCodeToCo
     EXPECT_EQ(DetermineBlobStorageFailure({}, AVEVA::HttpResponse{AVEVA::HttpStatus::NotFound, {}, ""}).Error,
               BlobStorageErrorCode::ResourceNotFound);
     EXPECT_EQ(
-        DetermineBlobStorageFailure({}, AVEVA::HttpResponse{HttpStatusCode{403}, {{"x-ms-error-code", "Unknown"}}, ""})
+        DetermineBlobStorageFailure({}, AVEVA::HttpResponse{::AVEVA::HttpStatus::Forbidden,
+                                                            {AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-error-code"},
+                                                                               AVEVA::HeaderValue{"Unknown"})},
+                                                            ""})
             .Error,
         BlobStorageErrorCode::AuthorizationFailure);
-    EXPECT_EQ(DetermineBlobStorageFailure({}, AVEVA::HttpResponse{HttpStatusCode{412}, {}, ""}).Error,
-              BlobStorageErrorCode::ConditionNotMet);
+    EXPECT_EQ(
+        DetermineBlobStorageFailure({}, AVEVA::HttpResponse{::AVEVA::HttpStatus::PreconditionFailed, {}, ""}).Error,
+        BlobStorageErrorCode::ConditionNotMet);
     EXPECT_EQ(
         DetermineBlobStorageFailure({}, AVEVA::HttpResponse{AVEVA::HttpStatus::InternalServerError, {}, ""}).Error,
         BlobStorageErrorCode::InternalError);
@@ -339,13 +352,20 @@ TEST(BlobStorageErrorCategoryTests, DetermineFailure_Maps304WithoutErrorCodeToCo
               BlobStorageErrorCode::ServiceError);
 
     const auto newCode = DetermineBlobStorageFailure(
-        {}, AVEVA::HttpResponse{HttpStatusCode{409}, {{"x-ms-error-code", "LeaseAlreadyPresent"}}, ""});
+        {}, AVEVA::HttpResponse{
+                ::AVEVA::HttpStatus::Conflict,
+                {AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-error-code"}, AVEVA::HeaderValue{"LeaseAlreadyPresent"})},
+                ""});
     EXPECT_EQ(newCode.Error, BlobStorageErrorCode::LeaseAlreadyPresent);
 }
 
 TEST(BlobStorageErrorCategoryTests, TransienceOf_ClassifiesStatusAndTransportFailures) {
-    ExpectStatusesAreTransient({408U, 429U, 500U, 502U, 503U, 504U});
-    ExpectStatusesAreNotTransient({200U, 304U, 400U, 403U, 404U, 409U, 412U, 501U});
+    ExpectStatusesAreTransient({AVEVA::HttpStatus::RequestTimeout, AVEVA::HttpStatus::TooManyRequests,
+                                AVEVA::HttpStatus::InternalServerError, AVEVA::HttpStatus::BadGateway,
+                                AVEVA::HttpStatus::ServiceUnavailable, AVEVA::HttpStatus::GatewayTimeout});
+    ExpectStatusesAreNotTransient({AVEVA::HttpStatus::Ok, AVEVA::HttpStatus::NotModified, AVEVA::HttpStatus::BadRequest,
+                                   AVEVA::HttpStatus::Forbidden, AVEVA::HttpStatus::NotFound,
+                                   AVEVA::HttpStatus::Conflict, AVEVA::HttpStatus::PreconditionFailed, NotImplemented});
 
     EXPECT_EQ(TransienceOf(BlobStorageError{.Code = std::make_error_code(std::errc::connection_reset)}),
               Transience::Transient);

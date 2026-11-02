@@ -60,9 +60,9 @@ TEST(HttpClientTls, UntrustedCertificateReturnsTlsError) {
 
     AVEVA::HttpClientOptions clientOptions;
     clientOptions.SetTlsVersion(AVEVA::TlsVersion::Tls12);
-    auto client = AVEVA::HttpClient::Create(context, clientOptions);
+    auto client = std::make_unique<AVEVA::HttpClient>(context, clientOptions);
     AVEVA::HttpRequest request;
-    request.SetUrl("https://127.0.0.1:" + std::to_string(acceptor.local_endpoint().port()) + "/");
+    request.SetUrl(AVEVA::HttpUrl{"https://127.0.0.1:" + std::to_string(acceptor.local_endpoint().port()) + "/"});
     int completions = 0;
     HttpClientTests::SendWith(*client, std::move(request), AVEVA::HttpRequestOptions{},
                               [&](std::error_code error, AVEVA::HttpResponse response) {
@@ -101,13 +101,13 @@ std::error_code ConnectTrustingCertificateWithAltName(const std::string& subject
     clientOptions.SetTlsVersion(AVEVA::TlsVersion::Tls12);
     if (trustThroughPem) {
         std::ifstream pemFile(caFile.Path(), std::ios::binary);
-        clientOptions.SetCaPem(std::string(std::istreambuf_iterator<char>(pemFile), {}));
+        clientOptions.SetCaPem(AVEVA::PemText{std::string(std::istreambuf_iterator<char>(pemFile), {})});
     } else {
         clientOptions.SetCaFile(caFile.Path().string());
     }
-    auto client = AVEVA::HttpClient::Create(context, clientOptions);
+    auto client = std::make_unique<AVEVA::HttpClient>(context, clientOptions);
     AVEVA::HttpRequest request;
-    request.SetUrl("https://127.0.0.1:" + std::to_string(acceptor.local_endpoint().port()) + "/");
+    request.SetUrl(AVEVA::HttpUrl{"https://127.0.0.1:" + std::to_string(acceptor.local_endpoint().port()) + "/"});
     std::error_code result;
     HttpClientTests::SendWith(*client, std::move(request), AVEVA::HttpRequestOptions{},
                               [&](std::error_code error, AVEVA::HttpResponse) {
@@ -306,8 +306,8 @@ std::vector<TlsOutcome> SendSequentialRequests(asio::io_context& context, TlsTes
                                                AVEVA::HttpClientOptions options, const std::string& host, int count,
                                                bool stopWhenDone = true,
                                                AVEVA::HttpRequestOptions requestOptions = {}) {
-    options.SetCaPem(server.CertificatePem());
-    std::shared_ptr<AVEVA::HttpClient> client = AVEVA::HttpClient::Create(context, options);
+    options.SetCaPem(AVEVA::PemText{server.CertificatePem()});
+    std::shared_ptr<AVEVA::HttpClient> client = std::make_unique<AVEVA::HttpClient>(context, options);
     const std::string url = "https://" + host + ":" + std::to_string(server.Port()) + "/";
     std::vector<TlsOutcome> outcomes;
     asio::steady_timer guard(
@@ -321,7 +321,7 @@ std::vector<TlsOutcome> SendSequentialRequests(asio::io_context& context, TlsTes
     std::function<void()> sendNext;
     sendNext = [&]() {
         AVEVA::HttpRequest request;
-        request.SetUrl(url);
+        request.SetUrl(AVEVA::HttpUrl{url});
         HttpClientTests::SendWith(
             *client, std::move(request), requestOptions, [&](std::error_code error, AVEVA::HttpResponse response) {
                 outcomes.push_back({error, response.GetStatus(), std::string{response.GetBody()}});
@@ -495,14 +495,14 @@ TEST(HttpClientTls, RequestStateIsReleasedAtCompletionNotAfterTheTlsShutdownGrac
     // The server never answers the client's close_notify, so the shutdown only ends at the grace timeout.
     TlsTestServer server(context, "IP:127.0.0.1", TlsTestServer::AfterResponse::AdvertiseClose);
     AVEVA::HttpClientOptions options;
-    options.SetCaPem(server.CertificatePem());
-    auto client = AVEVA::HttpClient::Create(context, options);
+    options.SetCaPem(AVEVA::PemText{server.CertificatePem()});
+    auto client = std::make_unique<AVEVA::HttpClient>(context, options);
 
     auto body = std::make_shared<std::array<std::byte, 4>>();
     std::weak_ptr<const void> weakBody = body;
     AVEVA::HttpRequest request;
-    request.SetUrl("https://127.0.0.1:" + std::to_string(server.Port()) + "/");
-    request.SetBodyView(std::span<const std::byte>(*body), body);
+    request.SetUrl(AVEVA::HttpUrl{"https://127.0.0.1:" + std::to_string(server.Port()) + "/"});
+    request.SetBody(AVEVA::HttpBody(*body, body));
     body.reset();
 
     bool completed = false;
@@ -524,20 +524,20 @@ TEST(HttpClientTls, RequestStateIsReleasedAtCompletionNotAfterTheTlsShutdownGrac
     EXPECT_TRUE(releasedPromptly);
 }
 
-TEST(HttpClientTls, TimeoutOfAStalledRawViewUploadCompletesOnceAndLetsTheCallerFreeTheBody) {
+TEST(HttpClientTls, TimeoutOfAStalledBorrowedUploadCompletesOnceAndLetsTheCallerFreeTheBody) {
     asio::io_context context;
     TlsTestServer server(context, "IP:127.0.0.1", TlsTestServer::AfterResponse::StallReads);
     AVEVA::HttpClientOptions options;
-    options.SetCaPem(server.CertificatePem());
-    auto client = AVEVA::HttpClient::Create(context, options);
+    options.SetCaPem(AVEVA::PemText{server.CertificatePem()});
+    auto client = std::make_unique<AVEVA::HttpClient>(context, options);
 
-    auto body = std::make_unique<std::vector<std::byte>>(64U * 1024U * 1024U, std::byte{0x41});
+    auto body = std::make_shared<std::vector<std::byte>>(64U * 1024U * 1024U, std::byte{0x41});
     AVEVA::HttpRequest request;
     request.SetMethod(AVEVA::HttpMethod::Put);
-    request.SetUrl("https://127.0.0.1:" + std::to_string(server.Port()) + "/");
-    request.SetBodyView(std::span<const std::byte>(*body));
+    request.SetUrl(AVEVA::HttpUrl{"https://127.0.0.1:" + std::to_string(server.Port()) + "/"});
+    request.SetBody(AVEVA::HttpBody(*body, body));
     AVEVA::HttpRequestOptions requestOptions;
-    requestOptions.SetTimeout(std::chrono::milliseconds(300));
+    requestOptions.SetTimeout(AVEVA::Timeout{std::chrono::milliseconds(300)});
 
     int completions = 0;
     std::error_code observed;

@@ -12,7 +12,7 @@ BasicBlobFilesystemImpl<THttp>::LockFile(const std::string& filePath) {
 
     auto [prefix, realPath, blob] = ResolveBlob(filePath);
 
-    BlobOperations::CreateIfNotExists(*m_runtime, blob, SignedBytes(Configuration::PageBlob::DefaultSize));
+    BlobOperations::CreateIfNotExists(m_runtime, blob, Defaults::DataFileInitialSize);
     auto lockFile = std::make_shared<LockFileType>(
         m_runtime, std::make_unique<PageBlobClientOn<THttp>>(std::move(blob)), Configuration::LeaseLength, m_logger,
         std::string(realPath), m_lockAcquireTimeout);

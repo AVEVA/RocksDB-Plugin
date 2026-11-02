@@ -13,7 +13,7 @@
 #include "RequestValidation.hpp"
 #include "Route.hpp"
 #include "StreamTypes.hpp"
-#include "Timeouts.hpp"
+
 #include "TlsContextConfigurator.hpp"
 
 #include <boost/asio/awaitable.hpp>
@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -46,18 +47,14 @@ class HttpClientCore : public std::enable_shared_from_this<HttpClientCore> {
     /// <param name="runtime">The io_context every connection and timer runs on; must outlive the client.</param>
     /// <param name="options">The TLS, pooling, and concurrency settings to build from.</param>
     HttpClientCore(asio::io_context& runtime, const HttpClientOptions& options)
-        : m_context(runtime), m_tlsContext(std::make_shared<asio::ssl::context>(asio::ssl::context::tls_client)),
-          m_sweeper(IdleSweeper::Create(options.GetMaxIdleConnectionsPerHost().Value(),
-                                        options.GetIdleConnectionTimeout(), options.GetIdleProbeThreshold())),
+        : m_context(runtime), m_diagnostics(DiagnosticsSink::For(options)),
+          m_tlsContext(MakeTlsContext(options, m_diagnostics)),
+          m_sweeper(IdleSweeper::Create(options.GetMaxIdleConnectionsPerHost(), options.GetIdleConnectionTimeout(),
+                                        options.GetIdleProbeThreshold(), m_diagnostics)),
           m_plainPool(m_sweeper->PlainPool()), m_tlsPool(m_sweeper->TlsPool()) {
-        m_tlsContext->set_options(asio::ssl::context::default_workarounds | asio::ssl::context::no_sslv2 |
-                                  asio::ssl::context::no_sslv3 | asio::ssl::context::no_tlsv1 |
-                                  asio::ssl::context::no_tlsv1_1);
-        ConfigureTlsContext(*m_tlsContext, options);
-        m_diagnostics = DiagnosticsSink::For(options);
-        m_sweeper->SetDiagnostics(m_diagnostics);
         if (options.GetMaxConnectionsPerHost() != ConnectionCount{}) {
-            m_gate = std::make_shared<OriginGate>(runtime.get_executor(), options.GetMaxConnectionsPerHost().Value());
+            m_gate =
+                std::make_shared<OriginGate>(runtime.get_executor(), options.GetMaxConnectionsPerHost(), m_diagnostics);
         }
     }
 
@@ -76,7 +73,7 @@ class HttpClientCore : public std::enable_shared_from_this<HttpClientCore> {
         m_sweeper->Stop();
     }
 
-    const std::shared_ptr<const DiagnosticsSink>& Diagnostics() const noexcept { return m_diagnostics; }
+    [[nodiscard]] std::shared_ptr<const DiagnosticsSink> Diagnostics() const noexcept { return m_diagnostics; }
 
     /// <summary>
     /// Sends a request. The deadline covers everything, including the wait for a per-origin slot, and cancelling the
@@ -86,86 +83,130 @@ class HttpClientCore : public std::enable_shared_from_this<HttpClientCore> {
     asio::awaitable<HttpResult> Send(HttpRequest request, HttpRequestOptions options) {
         std::error_code failure;
         try {
-            const Route route = Route::Of(request, options);
+            Route route = Route::Of(request);
             if (route.Sendable() == Sendability::Unsendable) {
-                co_return std::unexpected(
-                    route.Parsed == UrlParse::Parsed ? route.Error : make_error_code(HttpClientError::InvalidUrl));
+                co_return std::unexpected(HttpFailure{
+                    route.Parsed == UrlParse::Parsed ? route.Error : make_error_code(HttpClientError::InvalidUrl)});
             }
 
-            HttpRequestPhase phase = HttpRequestPhase::Queued;
             const auto deadline = DeadlineFor(options);
+            Outcome outcome = Interrupted{HttpRequestPhase::Queued};
             try {
                 // The strand serializes the deadline timer with the request's completion, which cancel_at requires.
-                co_return co_await asio::co_spawn(
+                outcome = co_await asio::co_spawn(
                     asio::make_strand(co_await asio::this_coro::executor),
-                    RunWithDeadline(route, std::move(request), std::move(options), phase, deadline),
-                    asio::use_awaitable);
+                    RunWithDeadline(route, std::move(request), std::move(options), deadline), asio::use_awaitable);
             } catch (const boost::system::system_error& aborted) {
+                // Cancelled before the request got anywhere: it is still queued.
                 if (aborted.code() != asio::error::operation_aborted) {
                     throw;
                 }
             }
+            if (auto* const result = std::get_if<HttpResult>(&outcome)) {
+                co_return std::move(*result);
+            }
             // Either the caller cancelled or the deadline fired; a deadline abort can only happen once it has passed.
             if (std::chrono::steady_clock::now() < deadline) {
-                co_return std::unexpected(std::make_error_code(std::errc::operation_canceled));
+                co_return std::unexpected(HttpFailure{std::make_error_code(std::errc::operation_canceled)});
             }
-            DiagnosticsSink::Report(m_diagnostics, HttpDiagnosticKind::Timeout, phase, route.Host, route.Port, {},
-                                    "The request timed out");
-            co_return std::unexpected(make_error_code(HttpClientError::TimedOut));
+            DiagnosticsSink::Report(m_diagnostics, HttpDiagnosticKind::Timeout, std::get<Interrupted>(outcome).phase,
+                                    route.Host, route.Port, {}, "The request timed out");
+            co_return std::unexpected(HttpFailure{make_error_code(HttpClientError::TimedOut)});
         } catch (...) {
             failure = ClassifyBuildFailure(std::current_exception());
         }
-        co_return std::unexpected(failure);
+        co_return std::unexpected(HttpFailure{failure});
     }
 
   private:
+    /// <summary>The request was aborted, by the deadline or the caller, while in <c>phase</c>.</summary>
+    struct Interrupted {
+        HttpRequestPhase phase;
+    };
+    using Outcome = std::variant<HttpResult, Interrupted>;
+
     static std::chrono::steady_clock::time_point DeadlineFor(const HttpRequestOptions& options) {
-        // Clamp so huge timeouts (e.g. milliseconds::max()) cannot overflow the clock's time_point.
-        constexpr auto MaxTimeout = std::chrono::duration_cast<std::chrono::milliseconds>(EffectivelyInfinite);
-        return std::chrono::steady_clock::now() + std::min(options.GetTimeout(), MaxTimeout);
+        // Timeout already caps itself well below what could overflow the clock's time_point.
+        return std::chrono::steady_clock::now() + options.GetTimeout().Value();
     }
 
     /// <summary>
     /// Runs the request with the deadline attached. Throws operation_aborted when the deadline passes or the
-    /// awaiting coroutine is cancelled.
+    /// awaiting coroutine is cancelled before the request has started.
     /// </summary>
-    asio::awaitable<HttpResult> RunWithDeadline(const Route& route, HttpRequest request, HttpRequestOptions options,
-                                                HttpRequestPhase& phase,
-                                                std::chrono::steady_clock::time_point deadline) {
+    asio::awaitable<Outcome> RunWithDeadline(Route route, HttpRequest request, HttpRequestOptions options,
+                                             std::chrono::steady_clock::time_point deadline) {
         co_return co_await asio::co_spawn(co_await asio::this_coro::executor,
-                                          Dispatch(route, std::move(request), std::move(options), phase),
+                                          Dispatch(std::move(route), std::move(request), std::move(options)),
                                           asio::cancel_at(deadline, asio::use_awaitable));
     }
+
     /// <summary>
     /// Waits for a per-origin slot when a cap is configured, then runs the exchange over the stream the route calls
-    /// for. The slot is returned as the coroutine ends, before the caller sees the result.
+    /// for. The slot is returned as the coroutine ends, before the caller sees the result. An abort is returned as
+    /// the phase it interrupted, so the caller can report where a timeout hit.
     /// </summary>
-    asio::awaitable<HttpResult> Dispatch(const Route& route, HttpRequest request, HttpRequestOptions options,
-                                         HttpRequestPhase& phase) {
+    asio::awaitable<Outcome> Dispatch(Route route, HttpRequest request, HttpRequestOptions options) {
         OriginGate::Slot slot;
         if (m_gate) {
-            auto acquired = co_await m_gate->Acquire(route.Origin());
+            auto acquired = co_await AcquireSlot(route.Origin());
             if (!acquired) {
-                co_return std::unexpected(acquired.error());
+                co_return std::move(acquired.error());
             }
             slot = std::move(*acquired);
         }
         if (route.Tls == Transport::Tls) {
-            Exchange<TlsStream> exchange({m_context, m_tlsContext, m_tlsPool, m_diagnostics}, route, std::move(request),
-                                         std::move(options), phase);
-            co_return co_await exchange.Run();
+            Exchange<TlsStream> exchange({m_context, m_tlsContext, m_tlsPool, m_diagnostics}, std::move(route),
+                                         std::move(request), std::move(options));
+            co_return co_await RunExchange(exchange);
         }
-        Exchange<PlainStream> exchange({m_context, m_tlsContext, m_plainPool, m_diagnostics}, route, std::move(request),
-                                       std::move(options), phase);
-        co_return co_await exchange.Run();
+        Exchange<PlainStream> exchange({m_context, m_tlsContext, m_plainPool, m_diagnostics}, std::move(route),
+                                       std::move(request), std::move(options));
+        co_return co_await RunExchange(exchange);
+    }
+
+    /// <summary>
+    /// Waits for a per-origin slot. A closed gate fails the request; an abort while queued is returned as such.
+    /// </summary>
+    asio::awaitable<std::expected<OriginGate::Slot, Outcome>> AcquireSlot(std::string origin) {
+        std::optional<Outcome> failure;
+        try {
+            auto acquired = co_await m_gate->Acquire(std::move(origin));
+            if (acquired) {
+                co_return std::move(*acquired);
+            }
+            failure.emplace(HttpResult{std::unexpect, HttpFailure{acquired.error()}});
+        } catch (const boost::system::system_error& aborted) {
+            if (aborted.code() != asio::error::operation_aborted) {
+                throw;
+            }
+            failure.emplace(Interrupted{HttpRequestPhase::Queued});
+        }
+        co_return std::unexpected(std::move(*failure));
+    }
+
+    /// <summary>
+    /// Runs an exchange, turning the operation_aborted its cancellation throws into the phase it interrupted.
+    /// </summary>
+    template <typename Stream> static asio::awaitable<Outcome> RunExchange(Exchange<Stream>& exchange) {
+        std::optional<Interrupted> interrupted;
+        try {
+            co_return co_await exchange.Run();
+        } catch (const boost::system::system_error& aborted) {
+            if (aborted.code() != asio::error::operation_aborted) {
+                throw;
+            }
+            interrupted = Interrupted{exchange.Phase()};
+        }
+        co_return *interrupted;
     }
 
     asio::io_context& m_context;
+    std::shared_ptr<const DiagnosticsSink> m_diagnostics; // Before everything built with it.
     std::shared_ptr<asio::ssl::context> m_tlsContext;
     std::shared_ptr<IdleSweeper> m_sweeper;
     std::shared_ptr<PlainConnectionPool> m_plainPool;
     std::shared_ptr<TlsConnectionPool> m_tlsPool;
-    std::shared_ptr<const DiagnosticsSink> m_diagnostics;
     std::shared_ptr<OriginGate> m_gate; // Null when no per-origin cap is configured.
 };
 } // namespace AVEVA::Private

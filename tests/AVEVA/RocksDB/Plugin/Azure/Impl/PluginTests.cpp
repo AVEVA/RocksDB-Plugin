@@ -18,35 +18,42 @@
 #include <future>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 
 using AVEVA::RocksDB::Plugin::Azure::Plugin;
+using AVEVA::RocksDB::Plugin::Azure::SignedByteCount;
 using AVEVA::RocksDB::Plugin::Azure::Models::ServicePrincipalStorageInfo;
 using AVEVA::RocksDB::Plugin::Core::ByteCount;
+namespace Models = AVEVA::RocksDB::Plugin::Azure::Models;
 
 namespace {
+ServicePrincipalStorageInfo InfoFor(std::string dbName, std::string accountUrl) {
+    return ServicePrincipalStorageInfo{Models::DbName{std::move(dbName)}, Models::AccountUrl{std::move(accountUrl)},
+                                       Models::ClientId{"client"}, Models::ClientSecret{"secret"},
+                                       Models::TenantId{"tenant"}};
+}
+
 ServicePrincipalStorageInfo MakeInfo(const std::string& dbName, const std::string& account = "myaccount") {
-    return ServicePrincipalStorageInfo{dbName, "https://" + account + ".blob.core.windows.net", "client", "secret",
-                                       "tenant"};
+    return InfoFor(dbName, "https://" + account + ".blob.core.windows.net");
 }
 
 // An unusable account URL makes filesystem creation fail fast instead of talking to the network.
-ServicePrincipalStorageInfo BadInfo() {
-    return ServicePrincipalStorageInfo{"shared-ctx-db", "", "client", "secret", "tenant"};
+ServicePrincipalStorageInfo BadInfo() { return InfoFor("shared-ctx-db", ""); }
+
+Plugin::StorageAccounts Accounts(ServicePrincipalStorageInfo primary,
+                                 std::optional<ServicePrincipalStorageInfo> backup = std::nullopt) {
+    return Plugin::AccountPair<ServicePrincipalStorageInfo>{std::move(primary), std::move(backup)};
 }
 
-Plugin::RegisterOptions OptionsFor(std::shared_ptr<boost::asio::io_context> context, ServicePrincipalStorageInfo info,
-                                   Plugin::Logger logger = nullptr) {
-    return Plugin::RegisterOptions{.IoContext = std::move(context),
-                                   .Accounts =
-                                       Plugin::AccountPair<ServicePrincipalStorageInfo>{std::move(info), std::nullopt},
-                                   .Log = std::move(logger)};
+Plugin::RegisterOptions OptionsFor(ServicePrincipalStorageInfo info, Plugin::Logger logger = nullptr) {
+    return Plugin::RegisterOptions{.Accounts = Accounts(std::move(info)), .Log = std::move(logger)};
 }
 } // namespace
 
 TEST(PluginTests, NameFor_StartsWithPluginNameAndIsHexEncoded) {
-    const auto name = Plugin::NameFor(MakeInfo("container"));
+    const auto name = Plugin::NameFor(Accounts(MakeInfo("container")));
 
     ASSERT_EQ(0U, name.find(std::string(Plugin::Name) + "-"));
     for (const char ch : name.substr(Plugin::Name.size() + 1)) {
@@ -54,42 +61,28 @@ TEST(PluginTests, NameFor_StartsWithPluginNameAndIsHexEncoded) {
     }
 }
 
-TEST(PluginTests, Register_WithCacheSizeAboveInt64Max_IsRejected) {
-    const auto logger =
-        std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
-    rocksdb::ConfigOptions configOptions;
-    rocksdb::Env* env = nullptr;
-    std::shared_ptr<rocksdb::Env> guard;
-    auto options = OptionsFor(std::make_shared<boost::asio::io_context>(), BadInfo(), logger);
-    options.Cache =
-        Plugin::CacheOptions{"cache", ByteCount{static_cast<std::uint64_t>(std::numeric_limits<int64_t>::max()) + 1}};
-
-    const auto status = Plugin::Register(configOptions, &env, &guard, std::move(options));
-
-    EXPECT_TRUE(status.IsInvalidArgument()) << status.ToString();
-}
-
 // A null logger is replaced at registration, so the warning path and every filesystem created afterwards can log.
 TEST(PluginTests, Register_WithNullLogger_CreatesUsableEnv) {
     rocksdb::ConfigOptions configOptions;
     rocksdb::Env* env = nullptr;
     std::shared_ptr<rocksdb::Env> guard;
-    auto options = OptionsFor(std::make_shared<boost::asio::io_context>(), BadInfo());
-    options.Cache = Plugin::CacheOptions{"cache", ByteCount{}};
+    boost::asio::io_context context;
+    auto options = OptionsFor(BadInfo());
+    options.Cache = Plugin::CacheOptions{"cache", SignedByteCount{ByteCount{}}};
 
-    const auto status = Plugin::Register(configOptions, &env, &guard, std::move(options));
+    const auto status = Plugin::Register(configOptions, &env, &guard, context, std::move(options));
 
     EXPECT_FALSE(status.ok());
-    Plugin::Unregister(BadInfo());
+    Plugin::Unregister(Accounts(BadInfo()));
 }
 
 TEST(PluginTests, NameFor_DistinguishesAccountsDatabasesAndBackup) {
-    const auto base = Plugin::NameFor(MakeInfo("db"));
+    const auto base = Plugin::NameFor(Accounts(MakeInfo("db")));
 
-    EXPECT_NE(base, Plugin::NameFor(MakeInfo("db2")));
-    EXPECT_NE(base, Plugin::NameFor(MakeInfo("db", "other")));
-    EXPECT_NE(base, Plugin::NameFor(MakeInfo("db"), MakeInfo("db")));
-    EXPECT_EQ(base, Plugin::NameFor(MakeInfo("db")));
+    EXPECT_NE(base, Plugin::NameFor(Accounts(MakeInfo("db2"))));
+    EXPECT_NE(base, Plugin::NameFor(Accounts(MakeInfo("db", "other"))));
+    EXPECT_NE(base, Plugin::NameFor(Accounts(MakeInfo("db"), MakeInfo("db"))));
+    EXPECT_EQ(base, Plugin::NameFor(Accounts(MakeInfo("db"))));
 }
 
 // The registry name earlier versions used stays published next to the current one.
@@ -100,40 +93,41 @@ TEST(PluginTests, Register_PublishesBothTheCurrentAndTheLegacyName) {
     rocksdb::Env* env = nullptr;
     std::shared_ptr<rocksdb::Env> guard;
     // Empty account URLs make filesystem creation fail fast; nothing in this test runs an io_context.
-    const auto primary = ServicePrincipalStorageInfo{"legacy-db", "", "client", "secret", "tenant"};
-    const auto backup = ServicePrincipalStorageInfo{"legacy-backup", "", "client", "secret", "tenant"};
-    auto options = OptionsFor(std::make_shared<boost::asio::io_context>(), primary, logger);
-    options.Accounts = Plugin::AccountPair<ServicePrincipalStorageInfo>{primary, backup};
+    boost::asio::io_context context;
+    const auto accounts = Accounts(InfoFor("legacy-db", ""), InfoFor("legacy-backup", ""));
+    auto options = OptionsFor(BadInfo(), logger);
+    options.Accounts = accounts;
 
-    [[maybe_unused]] const auto status = Plugin::Register(configOptions, &env, &guard, std::move(options));
+    [[maybe_unused]] const auto status = Plugin::Register(configOptions, &env, &guard, context, std::move(options));
 
     auto* library = rocksdb::ObjectLibrary::Default().get();
-    EXPECT_NE(nullptr, library->FindFactory<rocksdb::FileSystem>(Plugin::NameFor(primary, backup)));
+    EXPECT_NE(nullptr, library->FindFactory<rocksdb::FileSystem>(Plugin::NameFor(accounts)));
     EXPECT_NE(nullptr, library->FindFactory<rocksdb::FileSystem>(std::string(Plugin::Name) + "legacy-dblegacy-backup"));
     guard.reset();
+    Plugin::Unregister(accounts);
 }
 
-TEST(PluginTests, Register_WithSharedIoContext_KeepsItAliveUntilUnregistered) {
+// The host owns the io_context; once unregistered, the name no longer resolves to a factory that refers to it.
+TEST(PluginTests, Unregister_RemovesTheRegistration) {
     const auto logger =
         std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
     rocksdb::ConfigOptions configOptions;
     rocksdb::Env* env = nullptr;
     std::shared_ptr<rocksdb::Env> guard;
-    auto context = std::make_shared<boost::asio::io_context>();
-    const std::weak_ptr<boost::asio::io_context> weak = context;
+    boost::asio::io_context context;
 
     [[maybe_unused]] const auto status =
-        Plugin::Register(configOptions, &env, &guard, OptionsFor(context, BadInfo(), logger));
+        Plugin::Register(configOptions, &env, &guard, context, OptionsFor(BadInfo(), logger));
     guard.reset();
-    EXPECT_GT(context.use_count(), 1);
+    EXPECT_NE(nullptr, rocksdb::ObjectLibrary::Default()->FindFactory<rocksdb::FileSystem>(
+                           Plugin::NameFor(Accounts(BadInfo()))));
 
-    Plugin::Unregister(BadInfo());
-    EXPECT_EQ(1, context.use_count());
+    Plugin::Unregister(Accounts(BadInfo()));
 
     rocksdb::Env* again = nullptr;
     std::shared_ptr<rocksdb::Env> againGuard;
     const auto created =
-        rocksdb::Env::CreateFromUri(configOptions, "", Plugin::NameFor(BadInfo()), &again, &againGuard);
+        rocksdb::Env::CreateFromUri(configOptions, "", Plugin::NameFor(Accounts(BadInfo())), &again, &againGuard);
     EXPECT_FALSE(created.ok());
 }
 
@@ -141,27 +135,20 @@ TEST(PluginTests, Register_WithInvalidDataFileSizes_IsRejected) {
     rocksdb::ConfigOptions configOptions;
     rocksdb::Env* env = nullptr;
     std::shared_ptr<rocksdb::Env> guard;
-    const auto context = std::make_shared<boost::asio::io_context>();
+    boost::asio::io_context context;
     const auto tooLarge = ByteCount{static_cast<std::uint64_t>(std::numeric_limits<int64_t>::max()) + 1};
 
     for (const auto badBuffer : {ByteCount{0}, ByteCount{1000}, ByteCount{512}, tooLarge}) {
-        auto options = OptionsFor(context, MakeInfo("sizes-db"));
+        auto options = OptionsFor(MakeInfo("sizes-db"));
         options.DataFileBufferSize = badBuffer;
-        EXPECT_TRUE(Plugin::Register(configOptions, &env, &guard, std::move(options)).IsInvalidArgument())
+        EXPECT_TRUE(Plugin::Register(configOptions, &env, &guard, context, std::move(options)).IsInvalidArgument())
             << badBuffer.Value();
     }
-    auto options = OptionsFor(context, MakeInfo("sizes-db"));
+    auto options = OptionsFor(MakeInfo("sizes-db"));
     options.DataFileInitialSize = tooLarge;
-    EXPECT_TRUE(Plugin::Register(configOptions, &env, &guard, std::move(options)).IsInvalidArgument());
+    EXPECT_TRUE(Plugin::Register(configOptions, &env, &guard, context, std::move(options)).IsInvalidArgument());
     EXPECT_EQ(nullptr, rocksdb::ObjectLibrary::Default()->FindFactory<rocksdb::FileSystem>(
-                           Plugin::NameFor(MakeInfo("sizes-db"))));
-}
-
-TEST(PluginTests, Register_WithNullSharedIoContext_IsRejected) {
-    rocksdb::ConfigOptions configOptions;
-    rocksdb::Env* env = nullptr;
-    std::shared_ptr<rocksdb::Env> guard;
-    EXPECT_TRUE(Plugin::Register(configOptions, &env, &guard, OptionsFor(nullptr, MakeInfo("db"))).IsInvalidArgument());
+                           Plugin::NameFor(Accounts(MakeInfo("sizes-db")))));
 }
 namespace {
 // Reports, from its own destructor, whether the registration lock was free: a helper thread clears the same

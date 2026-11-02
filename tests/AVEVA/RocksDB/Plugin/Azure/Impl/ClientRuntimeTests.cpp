@@ -19,28 +19,28 @@ using AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntimeBase;
 
 TEST(ClientRuntimeTests, InvalidatingAnotherBlobDuringAFetchStillCachesTheSize) {
     ClientRuntimeBase runtime;
-    const auto epoch = runtime.BlobSizeEpoch();
-    runtime.InvalidateBlobSize("a");
-    runtime.CacheBlobSize("b", 42, epoch);
-    EXPECT_EQ(42, runtime.CachedBlobSize("b"));
+    const auto epoch = runtime.MetadataCache().SizeEpoch();
+    runtime.MetadataCache().Invalidate("a");
+    runtime.MetadataCache().StoreSize("b", 42, epoch);
+    EXPECT_EQ(42, runtime.MetadataCache().Size("b"));
 }
 
 TEST(ClientRuntimeTests, InvalidatingTheSameBlobDuringAFetchRejectsTheSize) {
     ClientRuntimeBase runtime;
-    const auto epoch = runtime.BlobSizeEpoch();
-    runtime.InvalidateBlobSize("a");
-    runtime.CacheBlobSize("a", 42, epoch);
-    EXPECT_FALSE(runtime.CachedBlobSize("a"));
-    runtime.CacheBlobSize("a", 42, runtime.BlobSizeEpoch());
-    EXPECT_EQ(42, runtime.CachedBlobSize("a"));
+    const auto epoch = runtime.MetadataCache().SizeEpoch();
+    runtime.MetadataCache().Invalidate("a");
+    runtime.MetadataCache().StoreSize("a", 42, epoch);
+    EXPECT_FALSE(runtime.MetadataCache().Size("a"));
+    runtime.MetadataCache().StoreSize("a", 42, runtime.MetadataCache().SizeEpoch());
+    EXPECT_EQ(42, runtime.MetadataCache().Size("a"));
 }
 
 TEST(ClientRuntimeTests, InvalidatingAllBlobsDuringAFetchRejectsTheSize) {
     ClientRuntimeBase runtime;
-    const auto epoch = runtime.BlobSizeEpoch();
-    runtime.InvalidateAllBlobSizes();
-    runtime.CacheBlobSize("b", 42, epoch);
-    EXPECT_FALSE(runtime.CachedBlobSize("b"));
+    const auto epoch = runtime.MetadataCache().SizeEpoch();
+    runtime.MetadataCache().InvalidateAll();
+    runtime.MetadataCache().StoreSize("b", 42, epoch);
+    EXPECT_FALSE(runtime.MetadataCache().Size("b"));
 }
 
 TEST(ClientRuntimeTests, HttpClientUsesProvidedContext) {

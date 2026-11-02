@@ -65,8 +65,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobServic
 
     /// <summary>
     /// Creates a client that shares ownership of the HTTP client for as long as this client or any client made from
-    /// it exists. Operations already in flight borrow the HTTP client without owning it, so keep a client (or the
-    /// shared_ptr) alive until they complete.
+    /// it exists, including the operations those clients have in flight.
     /// </summary>
     /// <param name="httpClient">The HTTP client to send requests with.</param>
     /// <param name="options">The account endpoint and authentication settings.</param>

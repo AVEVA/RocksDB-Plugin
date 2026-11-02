@@ -27,17 +27,15 @@ template <typename TContainer> class BasicAzureContainerClient final : public Co
     BasicAzureContainerClient(std::shared_ptr<ClientRuntimeBase> runtime, std::shared_ptr<TContainer> client)
         : m_runtime(std::move(runtime)), m_client(std::move(client)) {}
 
-    Core::ByteCount GetBlobSize(const std::string& path, std::stop_token stopToken) override {
-        auto blob = m_client->GetPageBlobClient(path);
+    Core::ByteCount GetBlobSize(const Core::BlobName& name, std::stop_token stopToken) override {
+        auto blob = m_client->GetPageBlobClient(name.Value());
         return Core::ByteCount{static_cast<std::uint64_t>(BlobOperations::GetInfo(blob, std::move(stopToken)).Size)};
     }
 
-    void DownloadBlobTo(const std::string& path, const std::filesystem::path& destinationPath, Core::ByteOffset offset,
-                        Core::ByteCount length, std::stop_token stopToken) override {
-        auto blob = m_client->GetPageBlobClient(path);
-        BlobOperations::DownloadToFile(blob, destinationPath, static_cast<int64_t>(offset.Value()),
-                                       static_cast<int64_t>(length.Value()), std::move(stopToken),
-                                       m_runtime->DownloadWriter());
+    void DownloadBlobTo(const Core::BlobName& name, const std::filesystem::path& destinationPath,
+                        Core::ByteOffset offset, Core::ByteCount length, std::stop_token stopToken) override {
+        auto blob = m_client->GetPageBlobClient(name.Value());
+        BlobOperations::DownloadToFile(blob, destinationPath, offset, length, std::move(stopToken));
     }
 };
 

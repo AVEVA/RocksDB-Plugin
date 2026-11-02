@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
-// Eviction, size accounting checks and deferred file release for FileCache. Every *Unsafe member here expects the
+// Eviction, size accounting checks and deferred file release for FileCacheImpl. Every *Unsafe member here expects the
 // caller to hold m_mutex; ReleaseOnBackgroundThread and TryDeleteCachedFile must be called with it released.
 
-#include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
+#include "FileCacheImpl.hpp"
 #include <boost/log/trivial.hpp>
 #include <cassert>
 #include <exception>
@@ -19,7 +19,7 @@ constexpr size_t MaxUndownloadedStaleEntries = 2048;
 
 // Second chance: an entry relinked within the last size/4 accesses is already near the front, so hot files do not
 // churn the list on every read. Small caches (< 4 entries) always relink, keeping exact LRU order.
-void FileCache::EntryAccessedUnsafe(FileCacheEntry& file, const RelinkPolicy policy) {
+void FileCacheImpl::EntryAccessedUnsafe(FileCacheEntry& file, const RelinkPolicy policy) {
     ++m_accessEpoch;
     if (policy == RelinkPolicy::Lazy && file.LinkState() == ListLink::Linked &&
         m_accessEpoch.Value() - file.LastRelinkEpoch.Value() < m_cache.size() / 4) {
@@ -30,7 +30,7 @@ void FileCache::EntryAccessedUnsafe(FileCacheEntry& file, const RelinkPolicy pol
     m_entryList.push_front(file);
 }
 
-size_t FileCache::PruneUndownloadedStaleEntriesUnsafe() {
+size_t FileCacheImpl::PruneUndownloadedStaleEntriesUnsafe() {
     if (m_undownloadedStaleCount <= MaxUndownloadedStaleEntries) {
         return 0;
     }
@@ -50,7 +50,7 @@ size_t FileCache::PruneUndownloadedStaleEntriesUnsafe() {
     return pruned;
 }
 
-FileCache::EvictionOutcome FileCache::EvictToFit(const ByteCount bytes) {
+FileCacheImpl::EvictionOutcome FileCacheImpl::EvictToFit(const ByteCount bytes) {
     if (bytes > m_maxSize) {
         // No point in evicting everything from the cache if we can't fit the new file.
         BOOST_LOG_SEV(*m_logger, debug) << "Skipping eviction from file cache because " << bytes.Value()
@@ -60,7 +60,7 @@ FileCache::EvictionOutcome FileCache::EvictToFit(const ByteCount bytes) {
     return EvictBytesUnsafe(bytes);
 }
 
-FileCache::EvictionOutcome FileCache::ShrinkToMaxUnsafe() {
+FileCacheImpl::EvictionOutcome FileCacheImpl::ShrinkToMaxUnsafe() {
     const auto size = GetCurrentSizeUnsafe();
     if (size <= m_maxSize) {
         return EvictionOutcome::Sufficient;
@@ -76,7 +76,7 @@ FileCache::EvictionOutcome FileCache::ShrinkToMaxUnsafe() {
     return EvictionOutcome::Sufficient;
 }
 
-FileCache::EvictionOutcome FileCache::EvictBytesUnsafe(const ByteCount bytes) {
+FileCacheImpl::EvictionOutcome FileCacheImpl::EvictBytesUnsafe(const ByteCount bytes) {
     BOOST_LOG_SEV(*m_logger, debug) << "Attempting to evict " << bytes.Value() << " (bytes) from the file cache.";
     ByteCount bytesEvicted;
     size_t evictedCount = 0;
@@ -122,7 +122,7 @@ FileCache::EvictionOutcome FileCache::EvictBytesUnsafe(const ByteCount bytes) {
 
 // Runs on the background thread with no lock held. Closing a handle waits for any reader still using it, and only
 // then is the file deleted, which matters on Windows where an open file cannot be removed.
-void FileCache::ReleaseOnBackgroundThread(std::vector<PendingRelease>& releases) {
+void FileCacheImpl::ReleaseOnBackgroundThread(std::vector<PendingRelease>& releases) {
     for (auto& release : releases) {
         if (release.Handle) {
             release.Handle->Close();
@@ -136,26 +136,27 @@ void FileCache::ReleaseOnBackgroundThread(std::vector<PendingRelease>& releases)
 }
 
 // A file that cannot be deleted is logged and remembered for a later retry; its bytes have already left the
-// cache's accounting, so the only cost of a failure is disk space until the retry succeeds.
-FileCache::DeleteOutcome FileCache::TryDeleteCachedFile(const std::string& filePath) {
-    const auto cachedFilePath = m_cachePath / filePath;
+// cache's accounting, so the only cost of a failure is disk space until the retry succeeds. The path is built inside
+// the try so an allocation failure is reported as a failed delete rather than abandoning the release mid-way.
+FileCacheImpl::DeleteOutcome FileCacheImpl::TryDeleteCachedFile(const std::string& filePath) {
     try {
+        const auto cachedFilePath = m_cachePath / filePath;
         if (m_filesystem->DeleteFile(cachedFilePath) == FilesystemResult::Succeeded) {
             return DeleteOutcome::Deleted;
         }
         BOOST_LOG_SEV(*m_logger, warning)
             << "Could not delete cached file '" << cachedFilePath.string() << "'. It will be retried.";
     } catch (const std::exception& e) {
-        BOOST_LOG_SEV(*m_logger, warning) << "Deleting cached file '" << cachedFilePath.string()
-                                          << "' failed: " << e.what() << ". It will be retried.";
+        BOOST_LOG_SEV(*m_logger, warning)
+            << "Deleting cached file '" << filePath << "' failed: " << e.what() << ". It will be retried.";
     }
     return DeleteOutcome::Failed;
 }
 
-ByteCount FileCache::GetCurrentSizeUnsafe() const noexcept { return m_activeBytes; }
+ByteCount FileCacheImpl::GetCurrentSizeUnsafe() const noexcept { return m_activeBytes; }
 
 // Debug-only cross-check of the running totals against a full scan of the entries.
-void FileCache::ValidateCountersUnsafe() const {
+void FileCacheImpl::ValidateCountersUnsafe() const {
 #ifndef NDEBUG
     ByteCount bytes;
     size_t stale = 0;

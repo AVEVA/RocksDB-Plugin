@@ -5,6 +5,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntime.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/PluginClients.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/RequestHelpers.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/Units.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -48,7 +49,8 @@ void CreateContainerIfNotExists(TContainer& client, int maxRetries = 5,
 // For reads that must fill a known range (unlike EOF-tolerant random reads): throws a RequestFailedException with
 // InvalidResponse when fewer or more bytes than `expected` arrived, since a short read would leave stale buffer
 // contents that a later upload writes over real data.
-void RequireFullDownload(std::string_view name, int64_t offset, int64_t expected, int64_t actual);
+void RequireFullDownload(std::string_view name, Core::ByteOffset offset, Core::ByteCount expected,
+                         Core::ByteCount actual);
 // Both return {bytes past the page boundary, rounded size}. They throw std::invalid_argument for a negative size, and
 // RoundToEndOfNearestPage also when the rounded-up size does not fit in int64_t.
 [[nodiscard]] std::pair<int64_t, int64_t> RoundToEndOfNearestPage(int64_t size);

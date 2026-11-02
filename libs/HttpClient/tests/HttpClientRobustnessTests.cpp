@@ -10,12 +10,14 @@
 
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/cancellation_signal.hpp>
+#include <boost/asio/co_spawn.hpp>
 #include <boost/asio/execution.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
+#include <boost/asio/use_future.hpp>
 #include <boost/asio/write.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
@@ -23,13 +25,16 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <future>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <system_error>
 #include <thread>
+#include <variant>
 #include <vector>
 namespace AllocationFailure {
 extern thread_local int allocationsUntilFailure;
@@ -47,24 +52,25 @@ constexpr const char* const OkResponse = "HTTP/1.1 200 OK\r\nContent-Length: 2\r
 using HttpClientTests::RunBounded;
 using HttpClientTests::ScriptedServer;
 using HttpClientTests::ServerAction;
+using HttpClientTests::ServerReply;
 
 AVEVA::HttpRequest MakeRequest(const std::string& url, AVEVA::HttpMethod method = AVEVA::HttpMethod::Get) {
     AVEVA::HttpRequest request;
     request.SetMethod(method);
-    request.SetUrl(url);
+    request.SetUrl(AVEVA::HttpUrl{url});
     if (method == AVEVA::HttpMethod::Post) {
-        request.SetBody("payload");
+        request.SetBody(AVEVA::HttpBody{"payload"});
     }
     return request;
 }
 
 TEST(HttpClientRobustness, EofDelimitedResponseIsNotReturnedToThePool) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     ScriptedServer server(context, [](int connection, const http::request<http::string_body>&) -> ServerAction {
         if (connection == 0) {
             // No Content-Length and no chunking: the body ends when the server closes the connection.
-            return {"HTTP/1.1 200 OK\r\n\r\nbody", true};
+            return {"HTTP/1.1 200 OK\r\n\r\nbody", ServerReply::RespondAndClose};
         }
         return {OkResponse};
     });
@@ -99,7 +105,7 @@ TEST(HttpClientRobustness, EofDelimitedResponseIsNotReturnedToThePool) {
 
 TEST(HttpClientRobustness, ExtraBytesAfterACompleteResponseKeepTheConnectionOutOfThePool) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     ScriptedServer server(context, [](int connection, const http::request<http::string_body>&) -> ServerAction {
         if (connection == 0) {
             return {"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOKX"};
@@ -131,10 +137,10 @@ TEST(HttpClientRobustness, ExtraBytesAfterACompleteResponseKeepTheConnectionOutO
 
 TEST(HttpClientRobustness, IdempotentRequestIsRetriedOnAStalePooledConnection) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     ScriptedServer server(context, [](int connection, const http::request<http::string_body>&) -> ServerAction {
         // The first connection is closed right after its keep-alive response, so the pooled stream is dead.
-        return {OkResponse, connection == 0};
+        return {OkResponse, connection == 0 ? ServerReply::RespondAndClose : ServerReply::Respond};
     });
 
     std::vector<std::error_code> errors;
@@ -163,11 +169,13 @@ TEST(HttpClientRobustness, IdempotentRequestIsRetriedOnAStalePooledConnection) {
 
 TEST(HttpClientRobustness, PostLostOnAReusedConnectionIsNotSentAgain) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     ScriptedServer server(context, [](int connection, const http::request<http::string_body>& request) -> ServerAction {
         ServerAction action{OkResponse};
         // The first connection receives the POST and then dies without answering it.
-        action.Drop = connection == 0 && request.method() == http::verb::post;
+        if (connection == 0 && request.method() == http::verb::post) {
+            action.Reply = ServerReply::Drop;
+        }
         return action;
     });
 
@@ -195,11 +203,13 @@ TEST(HttpClientRobustness, PostLostOnAReusedConnectionIsNotSentAgain) {
 // from the Azure retry layer, which alone knows whether the request is safe to resend.
 void ExpectMutationLostOnAReusedConnectionIsNotSentAgain(AVEVA::HttpMethod method, http::verb verb) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     ScriptedServer server(context,
                           [verb](int connection, const http::request<http::string_body>& request) -> ServerAction {
                               ServerAction action{OkResponse};
-                              action.Drop = connection == 0 && request.method() == verb;
+                              if (connection == 0 && request.method() == verb) {
+                                  action.Reply = ServerReply::Drop;
+                              }
                               return action;
                           });
 
@@ -232,10 +242,12 @@ TEST(HttpClientRobustness, PutLostOnAReusedConnectionIsNotSentAgain) {
 
 TEST(HttpClientRobustness, GetLostOnAReusedConnectionIsRetried) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     ScriptedServer server(context, [](int connection, const http::request<http::string_body>& request) -> ServerAction {
         ServerAction action{OkResponse};
-        action.Drop = connection == 0 && request.target() == "/second";
+        if (connection == 0 && request.target() == "/second") {
+            action.Reply = ServerReply::Drop;
+        }
         return action;
     });
 
@@ -257,11 +269,11 @@ TEST(HttpClientRobustness, GetLostOnAReusedConnectionIsRetried) {
 
 TEST(HttpClientRobustness, GetIsNotRetriedOnceResponseBytesWereReceivedOnAReusedConnection) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     ScriptedServer server(context, [](int connection, const http::request<http::string_body>& request) -> ServerAction {
         if (connection == 0 && request.target() == "/second") {
             // The server accepted the request and started answering before dying.
-            return {"HTTP/1.1 200 OK\r\nContent-Le", true};
+            return {"HTTP/1.1 200 OK\r\nContent-Le", ServerReply::RespondAndClose};
         }
         return {OkResponse};
     });
@@ -287,20 +299,21 @@ TEST(HttpClientRobustness, GetIsNotRetriedOnceResponseBytesWereReceivedOnAReused
 
 TEST(HttpClientRobustness, StalledServerCompletesOnceWithTimeout) {
     AVEVA::HttpRequestOptions requestOptions;
-    requestOptions.SetTimeout(std::chrono::milliseconds(100));
-    auto result = HttpClientTests::Exchange({}, {}, requestOptions, true);
+    requestOptions.SetTimeout(AVEVA::Timeout{std::chrono::milliseconds(100)});
+    auto result = HttpClientTests::Exchange({}, {}, requestOptions, ServerReply::Hold);
 
     EXPECT_EQ(result.error, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
 }
 
 TEST(HttpClientRobustness, PlainHttpRequestTimesOut) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
-    ScriptedServer server(context,
-                          [](int, const http::request<http::string_body>&) -> ServerAction { return {.Hold = true}; });
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
+    ScriptedServer server(context, [](int, const http::request<http::string_body>&) -> ServerAction {
+        return {.Reply = ServerReply::Hold};
+    });
 
     AVEVA::HttpRequestOptions options;
-    options.SetTimeout(std::chrono::milliseconds(100));
+    options.SetTimeout(AVEVA::Timeout{std::chrono::milliseconds(100)});
 
     std::error_code observed;
     HttpClientTests::SendWith(*client, MakeRequest(server.Url("/timeout")), options,
@@ -314,21 +327,21 @@ TEST(HttpClientRobustness, PlainHttpRequestTimesOut) {
     EXPECT_EQ(server.Accepted(), 1);
 }
 
-TEST(HttpClientRobustness, TimeoutOfAStalledRawViewUploadCompletesOnceAndLetsTheCallerFreeTheBody) {
+TEST(HttpClientRobustness, TimeoutOfAStalledBorrowedUploadCompletesOnceAndLetsTheCallerFreeTheBody) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     // Accepts the connection but never reads, so the client's upload stalls once the socket buffers fill.
     Tcp::acceptor acceptor(context, {asio::ip::make_address("127.0.0.1"), 0});
     Tcp::socket accepted(context);
     acceptor.async_accept(accepted, [](boost::system::error_code) {});
 
-    auto body = std::make_unique<std::vector<std::byte>>(64U * 1024U * 1024U, std::byte{0x41});
+    auto body = std::make_shared<std::vector<std::byte>>(64U * 1024U * 1024U, std::byte{0x41});
     AVEVA::HttpRequest request;
     request.SetMethod(AVEVA::HttpMethod::Put);
-    request.SetUrl("http://127.0.0.1:" + std::to_string(acceptor.local_endpoint().port()) + "/");
-    request.SetBodyView(std::span<const std::byte>(*body));
+    request.SetUrl(AVEVA::HttpUrl{"http://127.0.0.1:" + std::to_string(acceptor.local_endpoint().port()) + "/"});
+    request.SetBody(AVEVA::HttpBody(*body, body));
     AVEVA::HttpRequestOptions options;
-    options.SetTimeout(std::chrono::milliseconds(300));
+    options.SetTimeout(AVEVA::Timeout{std::chrono::milliseconds(300)});
 
     int completions = 0;
     std::error_code observed;
@@ -345,18 +358,18 @@ TEST(HttpClientRobustness, TimeoutOfAStalledRawViewUploadCompletesOnceAndLetsThe
     EXPECT_EQ(observed, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
 }
 
-TEST(HttpClientRobustness, CancellingAStalledRawViewUploadCompletesOnceAndLetsTheCallerFreeTheBody) {
+TEST(HttpClientRobustness, CancellingAStalledBorrowedUploadCompletesOnceAndLetsTheCallerFreeTheBody) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     Tcp::acceptor acceptor(context, {asio::ip::make_address("127.0.0.1"), 0});
     Tcp::socket accepted(context);
     acceptor.async_accept(accepted, [](boost::system::error_code) {});
 
-    auto body = std::make_unique<std::vector<std::byte>>(64U * 1024U * 1024U, std::byte{0x41});
+    auto body = std::make_shared<std::vector<std::byte>>(64U * 1024U * 1024U, std::byte{0x41});
     AVEVA::HttpRequest request;
     request.SetMethod(AVEVA::HttpMethod::Put);
-    request.SetUrl("http://127.0.0.1:" + std::to_string(acceptor.local_endpoint().port()) + "/");
-    request.SetBodyView(std::span<const std::byte>(*body));
+    request.SetUrl(AVEVA::HttpUrl{"http://127.0.0.1:" + std::to_string(acceptor.local_endpoint().port()) + "/"});
+    request.SetBody(AVEVA::HttpBody(*body, body));
     asio::cancellation_signal cancellation;
     AVEVA::HttpRequestOptions options;
 
@@ -382,16 +395,16 @@ TEST(HttpClientRobustness, CancellingAStalledRawViewUploadCompletesOnceAndLetsTh
 
 TEST(HttpClientRobustness, ReusedConnectionRequestTimesOut) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     ScriptedServer server(context, [](int connection, const http::request<http::string_body>& request) -> ServerAction {
         if (connection == 0 && request.target() == "/second") {
-            return {.Hold = true};
+            return {.Reply = ServerReply::Hold};
         }
         return {OkResponse};
     });
 
     AVEVA::HttpRequestOptions timeoutOptions;
-    timeoutOptions.SetTimeout(std::chrono::milliseconds(100));
+    timeoutOptions.SetTimeout(AVEVA::Timeout{std::chrono::milliseconds(100)});
 
     std::vector<std::error_code> errors;
     HttpClientTests::SendWith(*client, MakeRequest(server.Url("/first")), AVEVA::HttpRequestOptions{},
@@ -413,13 +426,13 @@ TEST(HttpClientRobustness, ReusedConnectionRequestTimesOut) {
 
 TEST(HttpClientRobustness, MaximumRequestTimeoutDoesNotExpireImmediately) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     ScriptedServer server(context, [](int, const http::request<http::string_body>&) -> ServerAction {
         return {.Wire = OkResponse, .Delay = std::chrono::milliseconds(50)};
     });
 
     AVEVA::HttpRequestOptions options;
-    options.SetTimeout(std::chrono::milliseconds::max());
+    options.SetTimeout(AVEVA::Timeout{std::chrono::milliseconds::max()});
 
     std::error_code observed;
     AVEVA::HttpStatusCode status;
@@ -438,8 +451,8 @@ TEST(HttpClientRobustness, MaximumRequestTimeoutDoesNotExpireImmediately) {
 TEST(HttpClientRobustness, IdleTimeoutExpiryClosesThePooledConnection) {
     asio::io_context context;
     AVEVA::HttpClientOptions options;
-    options.SetIdleConnectionTimeout(std::chrono::seconds(1));
-    auto client = AVEVA::HttpClient::Create(context, options);
+    options.SetIdleConnectionTimeout(AVEVA::Timeout{std::chrono::seconds(1)});
+    auto client = std::make_unique<AVEVA::HttpClient>(context, options);
     ScriptedServer server(context,
                           [](int, const http::request<http::string_body>&) -> ServerAction { return {OkResponse}; });
 
@@ -470,7 +483,7 @@ TEST(HttpClientRobustness, MaxConnectionsPerHostQueuesExtraRequestsAndReusesTheC
     asio::io_context context;
     AVEVA::HttpClientOptions options;
     options.SetMaxConnectionsPerHost(AVEVA::ConnectionCount{1});
-    auto client = AVEVA::HttpClient::Create(context, options);
+    auto client = std::make_unique<AVEVA::HttpClient>(context, options);
     ScriptedServer server(context,
                           [](int, const http::request<http::string_body>&) -> ServerAction { return {OkResponse}; });
 
@@ -500,7 +513,7 @@ static void RunQueuedRequestWhileHandlerBlocks(bool pooled) {
     if (!pooled) {
         options.SetMaxIdleConnectionsPerHost(AVEVA::ConnectionCount{0});
     }
-    auto client = AVEVA::HttpClient::Create(context, options);
+    auto client = std::make_unique<AVEVA::HttpClient>(context, options);
     // ScriptedServer is not thread-safe, so it gets its own single-threaded context.
     asio::io_context serverContext;
     ScriptedServer server(serverContext,
@@ -548,14 +561,15 @@ TEST(HttpClientRobustness, TimeSpentQueuedForASlotCountsAgainstTheRequestTimeout
     asio::io_context context;
     AVEVA::HttpClientOptions clientOptions;
     clientOptions.SetMaxConnectionsPerHost(AVEVA::ConnectionCount{1});
-    auto client = AVEVA::HttpClient::Create(context, clientOptions);
-    ScriptedServer server(context,
-                          [](int, const http::request<http::string_body>&) -> ServerAction { return {.Hold = true}; });
+    auto client = std::make_unique<AVEVA::HttpClient>(context, clientOptions);
+    ScriptedServer server(context, [](int, const http::request<http::string_body>&) -> ServerAction {
+        return {.Reply = ServerReply::Hold};
+    });
 
     AVEVA::HttpRequestOptions holdingOptions;
-    holdingOptions.SetTimeout(std::chrono::milliseconds(400));
+    holdingOptions.SetTimeout(AVEVA::Timeout{std::chrono::milliseconds(400)});
     AVEVA::HttpRequestOptions queuedOptions;
-    queuedOptions.SetTimeout(std::chrono::milliseconds(150));
+    queuedOptions.SetTimeout(AVEVA::Timeout{std::chrono::milliseconds(150)});
 
     std::error_code firstResult;
     std::error_code queuedResult;
@@ -593,10 +607,10 @@ TEST(HttpClientRobustness, CancellingAQueuedRequestFailsItWithoutStartingIt) {
     asio::io_context context;
     AVEVA::HttpClientOptions clientOptions;
     clientOptions.SetMaxConnectionsPerHost(AVEVA::ConnectionCount{1});
-    auto client = AVEVA::HttpClient::Create(context, clientOptions);
+    auto client = std::make_unique<AVEVA::HttpClient>(context, clientOptions);
     ScriptedServer server(context, [](int, const http::request<http::string_body>&) -> ServerAction {
         ServerAction action;
-        action.Hold = true;
+        action.Reply = ServerReply::Hold;
         return action;
     });
 
@@ -643,8 +657,8 @@ TEST(HttpClientRobustness, CancellingAQueuedRequestFailsItWithoutStartingIt) {
 TEST(HttpClientRobustness, MaximumIdleTimeoutStillAllowsPooling) {
     asio::io_context context;
     AVEVA::HttpClientOptions options;
-    options.SetIdleConnectionTimeout(std::chrono::seconds::max());
-    auto client = AVEVA::HttpClient::Create(context, options);
+    options.SetIdleConnectionTimeout(AVEVA::Timeout{std::chrono::seconds::max()});
+    auto client = std::make_unique<AVEVA::HttpClient>(context, options);
     ScriptedServer server(context,
                           [](int, const http::request<http::string_body>&) -> ServerAction { return {OkResponse}; });
 
@@ -670,16 +684,16 @@ TEST(HttpClientRobustness, MaximumIdleTimeoutStillAllowsPooling) {
 TEST(HttpClientRobustness, CancellationAtVaryingStagesCompletesExactlyOnce) {
     for (int iteration = 0; iteration < 25; ++iteration) {
         asio::io_context context;
-        auto client = AVEVA::HttpClient::Create(context);
+        auto client = std::make_unique<AVEVA::HttpClient>(context);
         ScriptedServer server(context, [](int, const http::request<http::string_body>&) -> ServerAction {
             ServerAction action;
-            action.Hold = true;
+            action.Reply = ServerReply::Hold;
             return action;
         });
 
         asio::cancellation_signal cancellation;
         AVEVA::HttpRequestOptions options;
-        options.SetTimeout(std::chrono::seconds(10));
+        options.SetTimeout(AVEVA::Timeout{std::chrono::seconds(10)});
 
         int completions = 0;
         std::error_code result;
@@ -712,9 +726,9 @@ TEST(HttpClientRobustness, CancellationAtVaryingStagesCompletesExactlyOnce) {
 TEST(HttpClientRobustness, CancellationDuringStaleConnectionRetryCompletesExactlyOnce) {
     for (int iteration = 0; iteration < 25; ++iteration) {
         asio::io_context context;
-        auto client = AVEVA::HttpClient::Create(context);
+        auto client = std::make_unique<AVEVA::HttpClient>(context);
         ScriptedServer server(context, [](int connection, const http::request<http::string_body>&) -> ServerAction {
-            return {OkResponse, connection == 0};
+            return {OkResponse, connection == 0 ? ServerReply::RespondAndClose : ServerReply::Respond};
         });
 
         asio::cancellation_signal cancellation;
@@ -753,9 +767,10 @@ TEST(HttpClientRobustness, CancellationDuringStaleConnectionRetryCompletesExactl
 }
 std::error_code SendOnce(const std::string& wire, AVEVA::HttpRequestOptions options = {}) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
-    ScriptedServer server(context,
-                          [&](int, const http::request<http::string_body>&) -> ServerAction { return {wire, true}; });
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
+    ScriptedServer server(context, [&](int, const http::request<http::string_body>&) -> ServerAction {
+        return {wire, ServerReply::RespondAndClose};
+    });
     std::error_code result;
     HttpClientTests::SendWith(*client, MakeRequest(server.Url()), options,
                               [&](std::error_code error, AVEVA::HttpResponse) {
@@ -777,7 +792,7 @@ TEST(HttpClientRobustness, MalformedChunkFramingIsAProtocolError) {
 
 TEST(HttpClientRobustness, DestroyingTheClientWithPooledIdleConnectionsClosesThem) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     ScriptedServer server(context,
                           [](int, const http::request<http::string_body>&) -> ServerAction { return {OkResponse}; });
 
@@ -799,7 +814,7 @@ TEST(HttpClientRobustness, DestroyingTheClientWithPooledIdleConnectionsClosesThe
 
 TEST(HttpClientRobustness, DestroyingTheClientWhileLeadingASharedLookupCompletesTheRequestOnce) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     int completions = 0;
     for (int i = 0; i < 2; ++i) {
         HttpClientTests::SendWith(*client, MakeRequest("http://shared-lookup.invalid/" + std::to_string(i)),
@@ -820,7 +835,7 @@ TEST(HttpClientRobustness, DestroyingTheClientWhileLeadingASharedLookupCompletes
 
 TEST(HttpClientRobustness, DestroyingTheClientBeforeTheIoContextRunsDoesNotTouchAFreedClient) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
 
     // SendAsync must copy what it needs from the client eagerly, synchronously, when called here: co_spawn's
     // awaitable starts suspended and does not run any of its body until the context below processes it, by which
@@ -841,31 +856,89 @@ TEST(HttpClientRobustness, DestroyingTheClientBeforeTheIoContextRunsDoesNotTouch
 
 TEST(HttpClientRobustness, StartedDnsLeaderKeepsItsPendingEntryWhileTheLookupIsInFlight) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     HttpClientTests::SendWith(*client, MakeRequest("http://leader-guard.invalid/"), AVEVA::HttpRequestOptions{},
                               [](std::error_code, AVEVA::HttpResponse) {});
     // Run the coroutine's start so the request has been submitted; the probe below is then queued behind the
     // request's own start.
     context.run_one();
 
-    auto probed = AVEVA::Private::Admission::Leader;
+    std::optional<AVEVA::Private::DnsCache::Admission> probed;
     // Queued behind the request's start, before the resolver thread can post its completion.
     asio::post(context, [&] {
-        probed = AVEVA::Private::DnsCache::Shared().JoinOrLead(
+        probed.emplace(AVEVA::Private::DnsCache::Shared().Acquire(
             "leader-guard.invalid", "80",
             [&context] {
                 return AVEVA::Private::ResolveWaiter(
-                    std::make_shared<AVEVA::Private::ResolveChannel>(context.get_executor(), 1));
+                    std::make_shared<AVEVA::Private::ResolveChannel>(context.get_executor(), 1), nullptr);
             },
-            &context);
-        if (probed == AVEVA::Private::Admission::Leader) {
-            AVEVA::Private::DnsCache::Shared().Finish("leader-guard.invalid", "80", asio::error::operation_aborted, {},
-                                                      &context);
-        }
+            &context, nullptr));
     });
     RunBounded(context);
 
-    EXPECT_EQ(probed, AVEVA::Private::Admission::Joined);
+    ASSERT_TRUE(probed.has_value());
+    EXPECT_TRUE(std::holds_alternative<AVEVA::Private::DnsCache::JoinedLookup>(*probed));
+}
+
+// getaddrinfo cannot be cancelled, so a hung lookup must not hold the request past its deadline. The lookup is held
+// open by taking its leadership in the cache first, which makes the request wait on it exactly like a slow resolve.
+TEST(HttpClientRobustness, TimeoutFiresWhileTheLookupHangs) {
+    asio::io_context context;
+    std::vector<AVEVA::HttpDiagnostic> events;
+    AVEVA::HttpClientOptions clientOptions;
+    clientOptions.SetDiagnosticsCallback(
+        AVEVA::HttpDiagnosticsCallback{[&](const AVEVA::HttpDiagnostic& event) noexcept { events.push_back(event); }});
+    auto client = std::make_unique<AVEVA::HttpClient>(context, std::move(clientOptions));
+
+    auto admission = AVEVA::Private::DnsCache::Shared().Acquire(
+        "hung-lookup.invalid", "80",
+        [&context] {
+            return AVEVA::Private::ResolveWaiter(
+                std::make_shared<AVEVA::Private::ResolveChannel>(context.get_executor(), 1), nullptr);
+        },
+        &context, nullptr);
+    ASSERT_TRUE(std::holds_alternative<AVEVA::Private::DnsCache::LeaderToken>(admission));
+
+    AVEVA::HttpRequestOptions requestOptions;
+    requestOptions.SetTimeout(AVEVA::Timeout{std::chrono::milliseconds(200)});
+    const auto started = std::chrono::steady_clock::now();
+    std::error_code result;
+    HttpClientTests::SendWith(*client, MakeRequest("http://hung-lookup.invalid/"), requestOptions,
+                              [&](std::error_code error, AVEVA::HttpResponse) {
+                                  result = error;
+                                  // Abandon the lookup only now, so it cannot have ended the wait.
+                                  admission = AVEVA::Private::DnsCache::CachedAnswer{};
+                              });
+    RunBounded(context);
+
+    EXPECT_EQ(result, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(5));
+    const auto timeout = std::ranges::find_if(
+        events, [](const auto& event) { return event.Kind == AVEVA::HttpDiagnosticKind::Timeout; });
+    ASSERT_NE(timeout, events.end());
+    EXPECT_EQ(timeout->Phase, AVEVA::HttpRequestPhase::Resolve);
+}
+
+TEST(HttpClientRobustness, RefusedConnectionCarriesTheTransportCause) {
+    asio::io_context context;
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
+    // Bind a port and close it again so nothing listens there.
+    std::uint16_t port = 0;
+    {
+        Tcp::acceptor acceptor(context, {asio::ip::make_address("127.0.0.1"), 0});
+        port = acceptor.local_endpoint().port();
+    }
+
+    auto future =
+        asio::co_spawn(context, client->SendAsync(MakeRequest("http://127.0.0.1:" + std::to_string(port) + "/"), {}),
+                       asio::use_future);
+    RunBounded(context);
+
+    const auto result = future.get();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Error(), AVEVA::make_error_code(AVEVA::HttpClientError::ConnectFailed));
+    EXPECT_EQ(result.error().Cause().Error(),
+              std::error_code(boost::system::error_code(asio::error::connection_refused)));
 }
 
 TEST(HttpClientRobustness, OversizedBodyIsReportedAsResponseTooLarge) {
@@ -881,7 +954,7 @@ TEST(HttpClientRobustness, TruncatedMessageIsAReadFailureNotAProtocolError) {
 }
 TEST(HttpClientRobustness, RequestTargetIsBuiltFromPathAndQuery) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     std::vector<std::string> targets;
     ScriptedServer server(context, [&](int, const http::request<http::string_body>& request) -> ServerAction {
         targets.emplace_back(request.target());
@@ -911,10 +984,10 @@ TEST(HttpClientRobustness, DestroyingTheClientFailsQueuedRequestsAndCompletesAct
     asio::io_context context;
     AVEVA::HttpClientOptions clientOptions;
     clientOptions.SetMaxConnectionsPerHost(AVEVA::ConnectionCount{1});
-    auto client = AVEVA::HttpClient::Create(context, clientOptions);
+    auto client = std::make_unique<AVEVA::HttpClient>(context, clientOptions);
     ScriptedServer server(context, [](int, const http::request<http::string_body>&) -> ServerAction {
         ServerAction action;
-        action.Hold = true;
+        action.Reply = ServerReply::Hold;
         return action;
     });
 
@@ -923,7 +996,7 @@ TEST(HttpClientRobustness, DestroyingTheClientFailsQueuedRequestsAndCompletesAct
     int queuedDone = 0;
     for (int i = 0; i < 3; ++i) {
         AVEVA::HttpRequestOptions options;
-        options.SetTimeout(std::chrono::seconds(10));
+        options.SetTimeout(AVEVA::Timeout{std::chrono::seconds(10)});
         HttpClientTests::SendWith(*client, MakeRequest(server.Url("/" + std::to_string(i))), options,
                                   [&, i](std::error_code error, AVEVA::HttpResponse) {
                                       ++completions[i];
@@ -949,17 +1022,17 @@ TEST(HttpClientRobustness, DestroyingTheClientFailsQueuedRequestsAndCompletesAct
 
 TEST(HttpClientRobustness, DestroyingTheClientWithRunningRequestsCompletesEachExactlyOnce) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     ScriptedServer server(context, [](int, const http::request<http::string_body>&) -> ServerAction {
         ServerAction action;
-        action.Hold = true;
+        action.Reply = ServerReply::Hold;
         return action;
     });
 
     int completions = 0;
     for (int i = 0; i < 3; ++i) {
         AVEVA::HttpRequestOptions options;
-        options.SetTimeout(std::chrono::seconds(10));
+        options.SetTimeout(AVEVA::Timeout{std::chrono::seconds(10)});
         HttpClientTests::SendWith(*client, MakeRequest(server.Url("/" + std::to_string(i))), options,
                                   [&](std::error_code error, AVEVA::HttpResponse) {
                                       EXPECT_TRUE(error);
@@ -991,13 +1064,13 @@ TEST(HttpClientRobustness, DestroyingTheClientWhileSlotsReleaseOnAMultiThreadedC
         asio::io_context context;
         AVEVA::HttpClientOptions clientOptions;
         clientOptions.SetMaxConnectionsPerHost(AVEVA::ConnectionCount{2});
-        auto client = AVEVA::HttpClient::Create(context, clientOptions);
+        auto client = std::make_unique<AVEVA::HttpClient>(context, clientOptions);
 
         // Each finished request hands its slot to the next waiter, which is what races with destruction.
         std::atomic<int> completions = 0;
         for (int i = 0; i < Requests; ++i) {
             AVEVA::HttpRequestOptions options;
-            options.SetTimeout(std::chrono::seconds(10));
+            options.SetTimeout(AVEVA::Timeout{std::chrono::seconds(10)});
             HttpClientTests::SendWith(*client, MakeRequest(server.Url("/" + std::to_string(i))), options,
                                       [&](std::error_code, AVEVA::HttpResponse) { ++completions; });
         }
@@ -1028,7 +1101,7 @@ TEST(HttpClientRobustness, DestroyingTheClientWhileSlotsReleaseOnAMultiThreadedC
 TEST(HttpClientRobustness, CancellingTheSharedDnsLeaderStillCompletesEveryJoinedRequestOnce) {
     for (int iteration = 0; iteration < 10; ++iteration) {
         asio::io_context context;
-        auto client = AVEVA::HttpClient::Create(context);
+        auto client = std::make_unique<AVEVA::HttpClient>(context);
         ScriptedServer server(
             context, [](int, const http::request<http::string_body>&) -> ServerAction { return {OkResponse}; });
         // The cache key includes the port, which is fresh per server, so every iteration starts a new lookup.
@@ -1063,7 +1136,7 @@ TEST(HttpClientRobustness, CancellingTheSharedDnsLeaderStillCompletesEveryJoined
 
 TEST(HttpClientRobustness, MixedCaseSchemeReusesTheSameConnection) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     ScriptedServer server(
         context, [](int, const http::request<http::string_body>&) -> ServerAction { return {.Wire = OkResponse}; });
     const auto port = server.Url("/").substr(std::string("http://127.0.0.1").size());
@@ -1088,8 +1161,7 @@ TEST(HttpClientRobustness, MixedCaseSchemeReusesTheSameConnection) {
 }
 
 TEST(HttpClientRobustness, RouteFoldsSchemeAndDnsHostCaseButKeepsTheTarget) {
-    const auto route =
-        AVEVA::Private::Route::Of(MakeRequest("HTTP://Example.COM:8080/Path?Q=1"), AVEVA::HttpRequestOptions{});
+    const auto route = AVEVA::Private::Route::Of(MakeRequest("HTTP://Example.COM:8080/Path?Q=1"));
 
     ASSERT_EQ(route.Sendable(), AVEVA::Private::Sendability::Sendable);
     EXPECT_EQ(route.Origin(), "http://example.com:8080");
@@ -1098,18 +1170,18 @@ TEST(HttpClientRobustness, RouteFoldsSchemeAndDnsHostCaseButKeepsTheTarget) {
 
 TEST(HttpClientRobustness, RouteCanonicalizesEquivalentPortsAndIpLiteralsButKeepsHostHeaderSpelling) {
     const AVEVA::HttpRequestOptions options;
-    const auto padded = AVEVA::Private::Route::Of(MakeRequest("http://example.com:080/a"), options);
-    const auto plain = AVEVA::Private::Route::Of(MakeRequest("http://example.com:80/a"), options);
-    const auto implicit = AVEVA::Private::Route::Of(MakeRequest("http://example.com/a"), options);
-    const auto other = AVEVA::Private::Route::Of(MakeRequest("http://example.com:81/a"), options);
+    const auto padded = AVEVA::Private::Route::Of(MakeRequest("http://example.com:080/a"));
+    const auto plain = AVEVA::Private::Route::Of(MakeRequest("http://example.com:80/a"));
+    const auto implicit = AVEVA::Private::Route::Of(MakeRequest("http://example.com/a"));
+    const auto other = AVEVA::Private::Route::Of(MakeRequest("http://example.com:81/a"));
     ASSERT_EQ(padded.Sendable(), AVEVA::Private::Sendability::Sendable);
     EXPECT_EQ(padded.Origin(), plain.Origin());
     EXPECT_EQ(padded.Origin(), implicit.Origin());
     EXPECT_NE(padded.Origin(), other.Origin());
     EXPECT_EQ(padded.Authority, "example.com:080");
 
-    const auto longForm = AVEVA::Private::Route::Of(MakeRequest("http://[0:0:0:0:0:0:0:1]:0080/"), options);
-    const auto shortForm = AVEVA::Private::Route::Of(MakeRequest("http://[::1]:80/"), options);
+    const auto longForm = AVEVA::Private::Route::Of(MakeRequest("http://[0:0:0:0:0:0:0:1]:0080/"));
+    const auto shortForm = AVEVA::Private::Route::Of(MakeRequest("http://[::1]:80/"));
     ASSERT_EQ(longForm.Sendable(), AVEVA::Private::Sendability::Sendable);
     EXPECT_EQ(longForm.Origin(), shortForm.Origin());
     EXPECT_EQ(longForm.Host, shortForm.Host);
@@ -1118,7 +1190,7 @@ TEST(HttpClientRobustness, RouteCanonicalizesEquivalentPortsAndIpLiteralsButKeep
 
 TEST(HttpClientRobustness, ConnectingToAClosedPortFailsWithConnectFailed) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
 
     std::error_code result;
     HttpClientTests::SendWith(*client, MakeRequest(HttpClientTests::ClosedLocalUrl()), AVEVA::HttpRequestOptions{},
@@ -1130,7 +1202,7 @@ TEST(HttpClientRobustness, ConnectingToAClosedPortFailsWithConnectFailed) {
 
 TEST(HttpClientRobustness, UnresolvableHostFailsWithResolveFailed) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
 
     std::error_code result;
     HttpClientTests::SendWith(*client, MakeRequest("http://no-such-host.invalid/"), AVEVA::HttpRequestOptions{},
@@ -1145,8 +1217,9 @@ TEST(HttpClientDiagnostics, DisabledPoolingDoesNotReportConnectionNotPooled) {
     std::vector<AVEVA::HttpDiagnostic> events;
     AVEVA::HttpClientOptions clientOptions;
     clientOptions.SetMaxIdleConnectionsPerHost(AVEVA::ConnectionCount{0});
-    clientOptions.SetDiagnosticsCallback([&](const AVEVA::HttpDiagnostic& event) { events.push_back(event); });
-    auto client = AVEVA::HttpClient::Create(context, std::move(clientOptions));
+    clientOptions.SetDiagnosticsCallback(
+        AVEVA::HttpDiagnosticsCallback{[&](const AVEVA::HttpDiagnostic& event) noexcept { events.push_back(event); }});
+    auto client = std::make_unique<AVEVA::HttpClient>(context, std::move(clientOptions));
     ScriptedServer server(context,
                           [](int, const http::request<http::string_body>&) -> ServerAction { return {OkResponse}; });
 
@@ -1167,16 +1240,17 @@ TEST(HttpClientDiagnostics, TimeoutReportsThePhaseItHappenedIn) {
     asio::io_context context;
     std::vector<AVEVA::HttpDiagnostic> events;
     AVEVA::HttpClientOptions clientOptions;
-    clientOptions.SetDiagnosticsCallback([&](const AVEVA::HttpDiagnostic& event) { events.push_back(event); });
-    auto client = AVEVA::HttpClient::Create(context, std::move(clientOptions));
+    clientOptions.SetDiagnosticsCallback(
+        AVEVA::HttpDiagnosticsCallback{[&](const AVEVA::HttpDiagnostic& event) noexcept { events.push_back(event); }});
+    auto client = std::make_unique<AVEVA::HttpClient>(context, std::move(clientOptions));
     ScriptedServer server(context, [](int, const http::request<http::string_body>&) -> ServerAction {
         ServerAction action;
-        action.Hold = true;
+        action.Reply = ServerReply::Hold;
         return action;
     });
 
     AVEVA::HttpRequestOptions requestOptions;
-    requestOptions.SetTimeout(std::chrono::milliseconds(200));
+    requestOptions.SetTimeout(AVEVA::Timeout{std::chrono::milliseconds(200)});
     std::error_code result;
     HttpClientTests::SendWith(*client, MakeRequest(server.Url()), requestOptions,
                               [&](std::error_code error, AVEVA::HttpResponse) {
@@ -1192,49 +1266,21 @@ TEST(HttpClientDiagnostics, TimeoutReportsThePhaseItHappenedIn) {
     const auto it = std::ranges::find_if(
         events, [](const auto& event) { return event.Kind == AVEVA::HttpDiagnosticKind::Timeout; });
     EXPECT_EQ(it->Phase, AVEVA::HttpRequestPhase::Read);
-    EXPECT_FALSE(it->Origin.empty());
-}
-
-TEST(HttpClientDiagnostics, ThrowingCallbackDoesNotDisturbTheRequest) {
-    asio::io_context context;
-    int calls = 0;
-    AVEVA::HttpClientOptions clientOptions;
-    clientOptions.SetDiagnosticsCallback([&](const AVEVA::HttpDiagnostic&) {
-        ++calls;
-        throw std::runtime_error("receiver failed");
-    });
-    auto client = AVEVA::HttpClient::Create(context, std::move(clientOptions));
-    ScriptedServer server(context, [](int, const http::request<http::string_body>&) -> ServerAction {
-        ServerAction action;
-        action.Hold = true;
-        return action;
-    });
-
-    AVEVA::HttpRequestOptions requestOptions;
-    requestOptions.SetTimeout(std::chrono::milliseconds(200));
-    std::error_code result;
-    HttpClientTests::SendWith(*client, MakeRequest(server.Url()), requestOptions,
-                              [&](std::error_code error, AVEVA::HttpResponse) {
-                                  result = error;
-                                  server.Stop();
-                              });
-    RunBounded(context);
-
-    EXPECT_EQ(result, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
-    EXPECT_GE(calls, 1);
+    EXPECT_FALSE(it->Origin.Value().empty());
 }
 
 TEST(HttpClientDiagnostics, StaleReusedConnectionIsReportedAsARetry) {
     asio::io_context context;
     std::vector<AVEVA::HttpDiagnostic> events;
     AVEVA::HttpClientOptions clientOptions;
-    clientOptions.SetDiagnosticsCallback([&](const AVEVA::HttpDiagnostic& event) { events.push_back(event); });
-    auto client = AVEVA::HttpClient::Create(context, std::move(clientOptions));
+    clientOptions.SetDiagnosticsCallback(
+        AVEVA::HttpDiagnosticsCallback{[&](const AVEVA::HttpDiagnostic& event) noexcept { events.push_back(event); }});
+    auto client = std::make_unique<AVEVA::HttpClient>(context, std::move(clientOptions));
     ScriptedServer server(context, [](int connection, const http::request<http::string_body>& request) -> ServerAction {
         // The first connection answers its first request, then closes silently on the second.
         if (connection == 0 && request.target() == "/second") {
             ServerAction action;
-            action.Drop = true;
+            action.Reply = ServerReply::Drop;
             return action;
         }
         return {OkResponse};

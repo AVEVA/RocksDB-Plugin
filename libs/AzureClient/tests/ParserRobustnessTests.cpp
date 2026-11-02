@@ -118,14 +118,20 @@ TEST(ParserRobustnessTests, MalformedDocumentsThrowStdExceptions) {
 TEST(ParserRobustnessTests, ArbitraryBytesNeverEscapeAsNonStdExceptions) {
     // A deterministic stream of bytes biased towards XML punctuation.
     constexpr std::string_view Alphabet = "<>/=\"'&;!?[]-abcXYZ019 \n\t\x80\xFF";
-    std::uint32_t state = 12345U;
+    // A linear congruential generator with the classic C library constants.
+    constexpr std::uint32_t seed = 12345U;
+    constexpr std::uint32_t multiplier = 1103515245U;
+    constexpr std::uint32_t increment = 12345U;
+    constexpr std::uint32_t discardedLowBits = 16U;
+    constexpr int samples = 200;
+    std::uint32_t state = seed;
     for (const XmlParser& parser : XmlParsers()) {
-        for (int sample = 0; sample < 200; ++sample) {
+        for (int sample = 0; sample < samples; ++sample) {
             std::string xml;
             const std::size_t length = state % 64U;
             for (std::size_t index = 0; index < length; ++index) {
-                state = (state * 1103515245U) + 12345U;
-                xml += Alphabet.at((state >> 16U) % Alphabet.size());
+                state = (state * multiplier) + increment;
+                xml += Alphabet.at((state >> discardedLowBits) % Alphabet.size());
             }
             try {
                 parser.Parse(xml);
@@ -194,7 +200,8 @@ TEST(ParserRobustnessTests, ListBlobs_UnboundNamespacePrefixesAreTolerated) {
 
 TEST(ParserRobustnessTests, ListBlobs_FullPageOf5000Items) {
     std::string xml = "<EnumerationResults><Blobs>";
-    for (int index = 0; index < 5000; ++index) {
+    constexpr int fullPage = 5000;
+    for (int index = 0; index < fullPage; ++index) {
         xml += "<Blob><Name>blob-" + std::to_string(index) + "</Name><Properties><Content-Length>" +
                std::to_string(index) +
                "</Content-Length><Last-Modified>Tue, 02 Jan 2024 00:00:00 GMT</Last-Modified></Properties></Blob>";
@@ -282,19 +289,26 @@ TEST(AS_R07_Iso8601FractionTests, DigitsBeyondTheSeventhAreTruncatedNotRounded) 
 }
 
 TEST(AS_R04_ContentRangePresenceTests, PresentButInvalidContentRangeIsRejectedAndAbsentFallsBack) {
-    HttpResponse invalid{
-        AVEVA::HttpStatus::PartialContent, {{"Content-Range", "bytes 0-9/5"}, {"Content-Length", "10"}}, ""};
+    HttpResponse invalid{AVEVA::HttpStatus::PartialContent,
+                         {AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Range"}, AVEVA::HeaderValue{"bytes 0-9/5"}),
+                          AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Length"}, AVEVA::HeaderValue{"10"})},
+                         ""};
     EXPECT_THROW(static_cast<void>(ParseBlobProperties(invalid)), std::invalid_argument);
 
-    HttpResponse valid{
-        AVEVA::HttpStatus::PartialContent, {{"Content-Range", "bytes 0-9/100"}, {"Content-Length", "10"}}, ""};
+    HttpResponse valid{AVEVA::HttpStatus::PartialContent,
+                       {AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Range"}, AVEVA::HeaderValue{"bytes 0-9/100"}),
+                        AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Length"}, AVEVA::HeaderValue{"10"})},
+                       ""};
     EXPECT_EQ(ParseBlobProperties(valid).ContentLength, 100U);
 
-    HttpResponse unknownTotal{
-        AVEVA::HttpStatus::PartialContent, {{"Content-Range", "bytes 0-9/*"}, {"Content-Length", "10"}}, ""};
+    HttpResponse unknownTotal{AVEVA::HttpStatus::PartialContent,
+                              {AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Range"}, AVEVA::HeaderValue{"bytes 0-9/*"}),
+                               AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Length"}, AVEVA::HeaderValue{"10"})},
+                              ""};
     EXPECT_EQ(ParseBlobProperties(unknownTotal).ContentLength, 10U);
 
-    HttpResponse absent{AVEVA::HttpStatus::Ok, {{"Content-Length", "42"}}, ""};
+    HttpResponse absent{
+        AVEVA::HttpStatus::Ok, {AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Length"}, AVEVA::HeaderValue{"42"})}, ""};
     EXPECT_EQ(ParseBlobProperties(absent).ContentLength, 42U);
 }
 

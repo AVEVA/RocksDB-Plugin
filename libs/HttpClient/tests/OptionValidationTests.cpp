@@ -11,17 +11,21 @@
 namespace {
 using namespace AVEVA;
 
-TEST(HttpOptionValidation, NegativeIdleTimeoutIsRejected) {
-    HttpClientOptions options;
-    const auto before = options.GetIdleConnectionTimeout();
-    EXPECT_THROW(options.SetIdleConnectionTimeout(std::chrono::seconds{-1}), std::invalid_argument);
-    EXPECT_EQ(options.GetIdleConnectionTimeout(), before);
+TEST(HttpOptionValidation, NonPositiveTimeoutsAreRejectedWhenBuilt) {
+    EXPECT_THROW(Timeout{std::chrono::seconds{-1}}, std::invalid_argument);
+    EXPECT_THROW(Timeout{std::chrono::milliseconds{0}}, std::invalid_argument);
 }
 
-TEST(HttpOptionValidation, ZeroIdleTimeoutIsAccepted) {
+TEST(HttpOptionValidation, HugeTimeoutsAreClampedInsteadOfOverflowing) {
+    EXPECT_EQ(Timeout{std::chrono::milliseconds::max()}, Timeout{Timeout::Max});
+    EXPECT_EQ(Timeout{std::chrono::microseconds{1}}.Value(), std::chrono::milliseconds{1});
+}
+
+TEST(HttpOptionValidation, IdleTimeoutIsKept) {
     HttpClientOptions options;
-    options.SetIdleConnectionTimeout(std::chrono::seconds{0});
-    EXPECT_EQ(options.GetIdleConnectionTimeout(), std::chrono::seconds{0});
+    EXPECT_EQ(options.GetIdleConnectionTimeout(), Timeout{std::chrono::seconds{30}});
+    options.SetIdleConnectionTimeout(Timeout{std::chrono::seconds{5}});
+    EXPECT_EQ(options.GetIdleConnectionTimeout(), Timeout{std::chrono::seconds{5}});
 }
 
 TEST(HttpOptionValidation, IdleProbeThresholdDefaultsToFiftyMillisecondsAndRejectsNegatives) {

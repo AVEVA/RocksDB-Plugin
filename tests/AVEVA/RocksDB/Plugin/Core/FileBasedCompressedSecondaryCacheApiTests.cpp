@@ -95,11 +95,14 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, GetUsageReflectsCurrentSize) {
 TEST_F(FileBasedCompressedSecondaryCacheTests, WaitAllIsNoOp) {
     // Empty vector.
     std::vector<rocksdb::SecondaryCacheResultHandle*> noHandles;
-    m_cache->WaitAll(noHandles);
+    EXPECT_NO_THROW(m_cache->WaitAll(noHandles));
+    EXPECT_TRUE(noHandles.empty());
 
     // Vector with a null sentinel (simulates a handle that is already ready).
     std::vector<rocksdb::SecondaryCacheResultHandle*> withNull{nullptr};
-    m_cache->WaitAll(withNull);
+    EXPECT_NO_THROW(m_cache->WaitAll(withNull));
+    ASSERT_EQ(1U, withNull.size());
+    EXPECT_EQ(nullptr, withNull[0]);
 }
 
 // --------------------------------------------------------------------------

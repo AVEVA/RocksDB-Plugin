@@ -26,9 +26,16 @@ function(aveva_azure_client_enable_clang_tidy target_name)
             # command line, so re-assert it explicitly for clang-tidy's own invocation.
             set(AVEVA_AZURE_CLIENT_CLANG_TIDY_EXTRA_ARGS ";--extra-arg=/EHsc")
         endif()
+        # The repository's configuration lives two levels above this project; when the project is built on its own
+        # outside the repository, clang-tidy falls back to discovering the nearest .clang-tidy itself.
+        set(AVEVA_AZURE_CLIENT_CLANG_TIDY_CONFIG_ARG "")
+        cmake_path(SET AVEVA_AZURE_CLIENT_CLANG_TIDY_CONFIG NORMALIZE "${PROJECT_SOURCE_DIR}/../../.clang-tidy")
+        if(EXISTS "${AVEVA_AZURE_CLIENT_CLANG_TIDY_CONFIG}")
+            set(AVEVA_AZURE_CLIENT_CLANG_TIDY_CONFIG_ARG ";--config-file=${AVEVA_AZURE_CLIENT_CLANG_TIDY_CONFIG}")
+        endif()
         set(
             AVEVA_AZURE_CLIENT_CLANG_TIDY
-            "${AVEVA_AZURE_CLIENT_CLANG_TIDY_EXE};--config-file=${CMAKE_SOURCE_DIR}/.clang-tidy${AVEVA_AZURE_CLIENT_CLANG_TIDY_EXTRA_ARGS}"
+            "${AVEVA_AZURE_CLIENT_CLANG_TIDY_EXE}${AVEVA_AZURE_CLIENT_CLANG_TIDY_CONFIG_ARG}${AVEVA_AZURE_CLIENT_CLANG_TIDY_EXTRA_ARGS}"
             CACHE INTERNAL
             "clang-tidy command for aveva-azure-client")
     endif()

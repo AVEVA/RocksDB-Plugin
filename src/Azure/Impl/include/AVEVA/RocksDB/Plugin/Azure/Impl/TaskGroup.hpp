@@ -2,8 +2,11 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #pragma once
+#include "AVEVA/RocksDB/Plugin/Core/Units.hpp"
+
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/cancellation_type.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/experimental/concurrent_channel.hpp>
@@ -18,6 +21,10 @@
 #include <utility>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
+struct ConcurrencyLimitTag;
+/// <summary>How many children of a TaskGroup may run at once; zero is treated as one.</summary>
+using ConcurrencyLimit = Core::StrongInteger<ConcurrencyLimitTag, size_t>;
+
 /// <summary>
 /// Runs child coroutines concurrently, at most `limit` at a time, from inside a parent coroutine. It replaces
 /// hand-managed futures: `Scope` does not return until every child has finished, so children may freely use anything
@@ -27,7 +34,7 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// parent's buffers alive, so it must never be abandoned part way.
 ///
 /// <code>
-/// TaskGroup group(co_await boost::asio::this_coro::executor, 4);
+/// TaskGroup group(co_await boost::asio::this_coro::executor, ConcurrencyLimit{4});
 /// co_await group.Scope([&](TaskGroup&amp; tasks) -> boost::asio::awaitable&lt;void&gt; {
 ///     for (auto&amp; item : items) {
 ///         co_await tasks.Spawn(Process(item)); // waits for a free slot when `limit` children are running
@@ -79,8 +86,8 @@ class TaskGroup {
     }
 
   public:
-    TaskGroup(boost::asio::any_io_executor executor, const size_t limit)
-        : m_executor(std::move(executor)), m_limit(limit == 0 ? 1 : limit),
+    TaskGroup(boost::asio::any_io_executor executor, const ConcurrencyLimit limit)
+        : m_executor(std::move(executor)), m_limit(limit.Value() == 0 ? 1 : limit.Value()),
           m_state(std::make_shared<State>(m_executor, m_limit)) {}
     TaskGroup(const TaskGroup&) = delete;
     TaskGroup& operator=(const TaskGroup&) = delete;
@@ -102,7 +109,9 @@ class TaskGroup {
 
     /// <summary>
     /// Runs `body(*this)`, then waits for every child to finish whatever happened. Rethrows the body's failure, or
-    /// else the first child failure.
+    /// else the first child failure. The drain ignores cancellation: the detached children use the caller's frame,
+    /// so leaving early on a terminal cancellation would free state they are still using. Once drained, the default
+    /// (terminal) cancellation filter is restored for the rest of the caller.
     /// </summary>
     template <typename Body> boost::asio::awaitable<void> Scope(Body body) {
         std::exception_ptr failure;
@@ -111,8 +120,12 @@ class TaskGroup {
         } catch (...) {
             failure = std::current_exception();
         }
-        while (m_running > 0) {
-            co_await WaitForOne();
+        if (m_running > 0) {
+            co_await boost::asio::this_coro::reset_cancellation_state(boost::asio::disable_cancellation());
+            while (m_running > 0) {
+                co_await WaitForOne();
+            }
+            co_await boost::asio::this_coro::reset_cancellation_state();
         }
         if (!failure) {
             failure = m_state->FirstFailure();

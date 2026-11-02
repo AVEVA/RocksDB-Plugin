@@ -139,6 +139,19 @@ template <typename TMeta = std::monostate> class HeldRequests {
 
 namespace AVEVA::AzureClient::Tests {
 
+// How long a test waits for something that should happen almost at once; it only bounds how long a hung test takes
+// to fail.
+inline constexpr std::chrono::seconds DeadlockWatchdog{10};
+
+// When a scripted response is delivered: as soon as the request is sent, or only when the test releases it.
+enum class Delivery : std::uint8_t { Immediate, Deferred };
+
+// Whether a wait saw its condition hold before the watchdog expired.
+enum class WaitOutcome : std::uint8_t { Done, TimedOut };
+
+// Whether releasing a deferred request found one to release.
+enum class Settlement : std::uint8_t { Settled, NothingPending };
+
 // A test-settable value that transport or pump threads read while the test thread may be changing it. Assignment and
 // reads take a lock and reads return a copy, so a callback is never invoked under the lock and a copy stays valid.
 template <class T> class Knob {
@@ -295,6 +308,9 @@ class FakeHttpClient final {
         // zero-copy upload path (SetBodyView), the backing buffer may have been freed.
         std::string Body;
 
+        // Address of the body bytes as sent, so tests can prove a zero-copy upload handed over the caller's buffer.
+        const void* SentBodyAddress = nullptr;
+
         // Position in Requests(), which is also the index CompleteRequest()/FailRequest() take.
         std::size_t Index = 0U;
     };
@@ -302,7 +318,7 @@ class FakeHttpClient final {
     struct ScriptedResult {
         std::error_code Error;
         HttpResponse Response{HttpStatus::Ok, {}, ""};
-        bool Deferred = false;
+        Tests::Delivery Delivery = Delivery::Immediate;
         std::function<bool(const RequestRecord&)> MatchRequest;
         // Runs just before a successful completion is delivered, so a deferred request applies its effect (e.g. a
         // page upload's bytes) only when the test releases it. It may amend the response (e.g. with the new ETag).
@@ -394,51 +410,53 @@ class FakeHttpClient final {
     // Runs handlers (including timers such as retry backoff) until `done()` holds, blocking on the
     // io_context rather than spinning. Each wait is capped so the poll lock is released and `done()` is
     // re-evaluated even when it turns true from another thread without a handler running here. `timeout` is only a
-    // deadlock watchdog; returns false if it expires.
-    [[nodiscard]] bool RunUntil(const std::function<bool()>& done,
-                                std::chrono::milliseconds timeout = std::chrono::seconds{10}) {
+    // deadlock watchdog; reports TimedOut if it expires.
+    [[nodiscard]] WaitOutcome RunUntil(const std::function<bool()>& done,
+                                       std::chrono::milliseconds timeout = DeadlockWatchdog) {
         constexpr std::chrono::milliseconds maxWait{100};
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         while (!done()) {
             const auto remaining = deadline - std::chrono::steady_clock::now();
             if (remaining <= std::chrono::steady_clock::duration::zero()) {
-                return false;
+                return WaitOutcome::TimedOut;
             }
             std::scoped_lock lock(m_pollMutex);
             m_context.restart();
             m_context.run_one_for(std::min<std::chrono::steady_clock::duration>(remaining, maxWait));
         }
-        return true;
+        return WaitOutcome::Done;
     }
 
-    [[nodiscard]] bool WaitForRequest(std::size_t count, std::chrono::milliseconds timeout = std::chrono::seconds{10}) {
+    [[nodiscard]] WaitOutcome WaitForRequest(std::size_t count, std::chrono::milliseconds timeout = DeadlockWatchdog) {
         return RunUntil([&] { return RequestCount() >= count; }, timeout);
     }
 
     // Blocks on a condition variable (no polling) until `count` requests were sent, for tests where another thread
     // issues them. `timeout` is only a deadlock guard.
-    [[nodiscard]] bool WaitForRequestCount(std::size_t count,
-                                           std::chrono::milliseconds timeout = std::chrono::seconds{10}) {
+    [[nodiscard]] WaitOutcome WaitForRequestCount(std::size_t count,
+                                                  std::chrono::milliseconds timeout = DeadlockWatchdog) {
         std::unique_lock lock(m_mutex);
-        return m_requestCv.wait_for(lock, timeout, [&] { return m_requests.size() >= count; });
+        return m_requestCv.wait_for(lock, timeout, [&] { return m_requests.size() >= count; }) ? WaitOutcome::Done
+                                                                                               : WaitOutcome::TimedOut;
     }
 
     // `cancellation` is the awaiting coroutine's slot; it fails a deferred request when it fires.
     void SendAsyncErased(HttpRequest request, CompletionHandler completion, HttpRequestOptions options,
                          boost::asio::cancellation_slot cancellation = {}) {
-        // Snapshot the body now, while any SetBodyView() backing buffer is still guaranteed
-        // alive (i.e. before completion runs) -- mirrors how a real transport consumes the
-        // bytes up front rather than retaining a live reference across the completion.
+        // Snapshot the body now -- mirrors how a real transport consumes the bytes up front.
         std::string body = BodyAsString(request);
 
         // The retained record must not pin a zero-copy payload's owner for the rest of the test: a real transport
         // releases the body once the request finishes, and callers that pool their buffers rely on that to reuse them.
-        if (request.GetBodyStorage() == BodyStorage::View && request.GetBodyKeepAlive()) {
-            std::shared_ptr<const void> keepAlive = request.GetBodyKeepAlive();
-            request.SetBodyView(request.GetBodyView());
+        // The record keeps an owned copy instead and the original body lives only until the completion runs.
+        const void* sentBodyAddress = nullptr;
+        {
+            HttpBody original = request.GetBody();
+            sentBodyAddress = original.Bytes().data();
+            request.SetBody(HttpBody{body});
             completion = [inner = std::move(completion),
-                          keepAlive = std::move(keepAlive)](std::error_code error, HttpResponse response) mutable {
-                keepAlive.reset();
+                          original = std::move(original)](std::error_code error, HttpResponse response) mutable {
+                original = HttpBody{};
                 inner(error, std::move(response));
             };
         }
@@ -448,8 +466,11 @@ class FakeHttpClient final {
         {
             std::scoped_lock lock(m_mutex);
             requestIndex = m_requests.size();
-            m_requests.push_back(RequestRecord{
-                .Request = std::move(request), .Options = options, .Body = std::move(body), .Index = requestIndex});
+            m_requests.push_back(RequestRecord{.Request = std::move(request),
+                                               .Options = options,
+                                               .Body = std::move(body),
+                                               .SentBodyAddress = sentBodyAddress,
+                                               .Index = requestIndex});
             // A deque never relocates its elements on push_back, so this stays valid for later requests.
             record = &m_requests.back();
             responder = m_responder;
@@ -465,7 +486,7 @@ class FakeHttpClient final {
             custom = responder(*record);
         }
         ScriptedResult scripted = custom.has_value() ? std::move(*custom) : DequeueResult(*record);
-        if (scripted.Deferred) {
+        if (scripted.Delivery == Delivery::Deferred) {
             {
                 std::scoped_lock lock(m_mutex);
                 m_pending.push_back(PendingCompletion{.Error = scripted.Error,
@@ -499,31 +520,23 @@ class FakeHttpClient final {
         });
     }
 
-    void EnqueueResponse(HttpResponse response, std::error_code error = {}, bool deferred = false) {
-        EnqueueResponse(std::move(response), error, deferred, {});
-    }
-
-    void EnqueueResponse(HttpResponse response, std::error_code error, bool deferred,
-                         std::function<bool(const RequestRecord&)> matchRequest) {
+    void EnqueueResponse(HttpResponse response, std::error_code error = {}, Delivery delivery = Delivery::Immediate,
+                         std::function<bool(const RequestRecord&)> matchRequest = {}) {
         std::scoped_lock lock(m_mutex);
         m_scriptedResults.push_back(ScriptedResult{.Error = error,
                                                    .Response = std::move(response),
-                                                   .Deferred = deferred,
+                                                   .Delivery = delivery,
                                                    .MatchRequest = std::move(matchRequest)});
     }
 
-    void EnqueueDeferredResponse(HttpResponse response, std::error_code error = {}) {
-        EnqueueResponse(std::move(response), error, true);
-    }
+    [[nodiscard]] Settlement CompleteNext() { return CompletePending(0U); }
 
-    [[nodiscard]] bool CompleteNext() { return CompletePending(0U); }
-
-    [[nodiscard]] bool CompletePending(std::size_t index) { return CompleteTaken(TakePending(index)); }
+    [[nodiscard]] Settlement CompletePending(std::size_t index) { return CompleteTaken(TakePending(index)); }
 
     // Templated only because PendingCompletion is declared further down.
-    template <class TPending> [[nodiscard]] bool CompleteTaken(TPending pending) {
+    template <class TPending> [[nodiscard]] Settlement CompleteTaken(TPending pending) {
         if (!pending.has_value()) {
-            return false;
+            return Settlement::NothingPending;
         }
 
         // Completes on the client's executor right away, so a test that calls CompleteNext/CompletePending sees the
@@ -534,7 +547,7 @@ class FakeHttpClient final {
             }
             pending->Completion(pending->Error, std::move(pending->Response));
         });
-        return true;
+        return Settlement::Settled;
     }
 
     // True while the request is deferred and neither completed, failed nor cancelled.
@@ -548,42 +561,43 @@ class FakeHttpClient final {
         return m_registeredDeferred.contains(requestIndex) && !FindPendingLocked(requestIndex).has_value();
     }
 
-    [[nodiscard]] bool CompleteRequest(std::size_t requestIndex) {
+    [[nodiscard]] Settlement CompleteRequest(std::size_t requestIndex) {
         return CompleteTaken(TakePendingRequest(requestIndex));
     }
 
-    [[nodiscard]] bool FailPending(std::size_t index, std::error_code error, HttpResponse response = HttpResponse{}) {
+    [[nodiscard]] Settlement FailPending(std::size_t index, std::error_code error,
+                                         HttpResponse response = HttpResponse{}) {
         return FailTaken(TakePending(index), error, std::move(response));
     }
 
     template <class TPending>
-    [[nodiscard]] bool FailTaken(TPending pending, std::error_code error, HttpResponse response) {
+    [[nodiscard]] Settlement FailTaken(TPending pending, std::error_code error, HttpResponse response) {
         if (!pending.has_value()) {
-            return false;
+            return Settlement::NothingPending;
         }
 
         RunOnExecutor([&] { pending->Completion(error, std::move(response)); });
-        return true;
+        return Settlement::Settled;
     }
 
     // Looks up a pending completion by its original RequestIndex (rather than its current
     // position in m_pending, which shifts as other requests complete) and fails it. Used to
     // forward a cancellation_slot signal to the specific request it was attached to.
-    [[nodiscard]] bool FailRequest(std::size_t requestIndex, std::error_code error,
-                                   HttpResponse response = HttpResponse{}) {
+    [[nodiscard]] Settlement FailRequest(std::size_t requestIndex, std::error_code error,
+                                         HttpResponse response = HttpResponse{}) {
         return FailTaken(TakePendingRequest(requestIndex), error, std::move(response));
     }
 
-    [[nodiscard]] bool TimeoutPending(std::size_t index) {
+    [[nodiscard]] Settlement TimeoutPending(std::size_t index) {
         return FailPending(index, std::make_error_code(std::errc::timed_out));
     }
 
-    [[nodiscard]] bool CancelPending(std::size_t index) {
+    [[nodiscard]] Settlement CancelPending(std::size_t index) {
         return FailPending(index, std::make_error_code(std::errc::operation_canceled));
     }
 
     void CompleteAll() {
-        while (CompleteNext()) {
+        while (CompleteNext() == Settlement::Settled) {
         }
     }
 
@@ -596,8 +610,6 @@ class FakeHttpClient final {
         std::scoped_lock lock(m_mutex);
         return m_pending.size();
     }
-
-    [[nodiscard]] bool NoRequestMade() const { return RequestCount() == 0U; }
 
     // A copy of the records taken under the lock, so it can be inspected while other threads keep sending.
     [[nodiscard]] std::deque<RequestRecord> Requests() const {
@@ -652,26 +664,20 @@ class FakeHttpClient final {
         return {};
     }
 
-    // Materializes a request's body as a string regardless of whether it was set via SetBody()
-    // (owned, GetBody() works directly) or SetBodyView() (non-owning; internal zero-copy upload
-    // path -- GetBody() is empty by design, see HttpRequest.hpp). Must only be called while the
-    // view's backing buffer is still alive -- i.e. before the request's completion handler has
-    // run, per SetBodyView()'s lifetime contract.
+    // Materializes a request's body as a string.
     [[nodiscard]] static std::string BodyAsString(const HttpRequest& request) {
-        if (request.GetBodyStorage() == BodyStorage::Owned) {
-            return request.GetBody();
-        }
-
-        const std::span<const std::byte> view = request.GetBodyView();
-        return {reinterpret_cast<const char*>(view.data()), view.size()};
+        const HttpBody body = request.GetBody();
+        const std::span<const std::byte> bytes = body.Bytes();
+        return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
     }
 
-    // These are assigned (`client.DeferByDefault() = true;`) by the test while the pump thread may be consulting them.
+    // These are assigned (`client.DefaultDelivery() = Delivery::Deferred;`) by the test while the pump thread may be
+    // consulting them.
     [[nodiscard]] Knob<HttpResponse>& DefaultResponse() noexcept { return m_defaultResponse; }
 
     [[nodiscard]] Knob<std::error_code>& DefaultError() noexcept { return m_defaultError; }
 
-    [[nodiscard]] Knob<bool>& DeferByDefault() noexcept { return m_deferByDefault; }
+    [[nodiscard]] Knob<Delivery>& DefaultDelivery() noexcept { return m_defaultDelivery; }
 
   private:
     struct PendingCompletion {
@@ -724,7 +730,7 @@ class FakeHttpClient final {
 
     [[nodiscard]] ScriptedResult DefaultResult() const {
         return ScriptedResult{
-            .Error = m_defaultError.Get(), .Response = m_defaultResponse.Get(), .Deferred = m_deferByDefault.Get()};
+            .Error = m_defaultError.Get(), .Response = m_defaultResponse.Get(), .Delivery = m_defaultDelivery.Get()};
     }
 
     // Counts a responder call in progress so SetResponder() can wait for it.
@@ -761,9 +767,9 @@ class FakeHttpClient final {
         return DefaultResult();
     }
 
-    Knob<HttpResponse> m_defaultResponse{HttpResponse{HttpStatusCode{201}, {}, ""}};
+    Knob<HttpResponse> m_defaultResponse{HttpResponse{::AVEVA::HttpStatus::Created, {}, ""}};
     Knob<std::error_code> m_defaultError;
-    Knob<bool> m_deferByDefault;
+    Knob<Delivery> m_defaultDelivery{Delivery::Immediate};
 
     // Backs m_context unless the client is built on a caller-owned io_context.
     boost::asio::io_context m_ownedContext;
@@ -851,7 +857,7 @@ class ScriptedTokenCredential final {
     struct Script {
         std::error_code Error;
         AccessToken Token;
-        bool Deferred = false;
+        Tests::Delivery Delivery = Delivery::Immediate;
         bool Throws = false;
     };
 
@@ -864,7 +870,7 @@ class ScriptedTokenCredential final {
     };
 
     void EnqueueImmediate(std::error_code error, AccessToken token) {
-        m_scripts.push_back(Script{.Error = error, .Token = std::move(token), .Deferred = false});
+        m_scripts.push_back(Script{.Error = error, .Token = std::move(token), .Delivery = Delivery::Immediate});
     }
 
     // The next token request throws from inside GetTokenAsync, as an allocation failure would.
@@ -874,7 +880,7 @@ class ScriptedTokenCredential final {
     // cancelled, which completes it with operation_canceled). The awaiting coroutine resumes on its own executor, so
     // poll that executor after completing it.
     void EnqueueDeferred(std::error_code error, AccessToken token) {
-        m_scripts.push_back(Script{.Error = error, .Token = std::move(token), .Deferred = true});
+        m_scripts.push_back(Script{.Error = error, .Token = std::move(token), .Delivery = Delivery::Deferred});
     }
 
     boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> scopes) {
@@ -891,7 +897,7 @@ class ScriptedTokenCredential final {
             throw std::bad_alloc{};
         }
 
-        if (!script.Deferred) {
+        if (script.Delivery == Delivery::Immediate) {
             if (script.Error) {
                 co_return std::unexpected(script.Error);
             }
@@ -934,17 +940,17 @@ class ScriptedTokenCredential final {
 
     [[nodiscard]] std::size_t PendingCount() const noexcept { return m_pending.size(); }
 
-    [[nodiscard]] bool CompleteNext() { return CompletePending(0U); }
+    [[nodiscard]] Settlement CompleteNext() { return CompletePending(0U); }
 
-    [[nodiscard]] bool CompletePending(std::size_t index) {
+    [[nodiscard]] Settlement CompletePending(std::size_t index) {
         if (index >= m_pending.size()) {
-            return false;
+            return Settlement::NothingPending;
         }
 
         PendingRequest pending = std::move(m_pending.at(index));
         m_pending.erase(m_pending.begin() + static_cast<std::ptrdiff_t>(index));
         pending.Completion(pending.Error, std::move(pending.Token));
-        return true;
+        return Settlement::Settled;
     }
 
     [[nodiscard]] int CallCount() const noexcept { return m_callCount; }

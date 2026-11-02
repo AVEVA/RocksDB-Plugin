@@ -116,7 +116,8 @@ jobs:
       - name: Test
         run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure --build-config ${{ matrix.config || 'Debug' }} --parallel 4 -LE benchmark
 
-      # One writer per OS, on main only; an exact hit means the entry already exists.
+      # One writer per OS, on main only; an exact hit means the entry already exists. The key includes the runner image
+      # version (setup-vcpkg), so a runner image update misses and saves a fresh entry.
       - name: Save vcpkg binary cache
         if: ${{ success() && matrix.save-cache && github.ref == 'refs/heads/main' && steps.vcpkg.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -193,6 +194,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+
+      # Pester 5 is preinstalled on GitHub-hosted runners; the tests build throwaway git repositories under TestDrive.
+      - name: Test change detection script
+        shell: pwsh
+        run: Invoke-Pester -Path .github/scripts/detect-relevant-changes.Tests.ps1 -CI
 
       - name: Detect relevant changes
         id: changes
@@ -279,8 +285,9 @@ jobs:
         shell: bash
         run: cmake --build consumer/out --config Release
 
-      # Source compatibility with consumers written against main: old-style Plugin::Register calls and normal
-      # rocksdb::FileSystem usage, compiled and linked against the installed package (tests/consumer).
+      # Builds and links consumer code against the installed package (tests/consumer): the single
+      # Plugin::Register(..., RegisterOptions{...}) entry point and normal rocksdb::FileSystem usage of the registered
+      # filesystem. It does not exercise the removed pre-0.2.0 Register overloads.
       - name: Configure and build main-API consumer
         shell: bash
         run: |

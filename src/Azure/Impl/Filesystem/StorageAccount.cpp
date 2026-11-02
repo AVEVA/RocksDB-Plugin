@@ -4,7 +4,8 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 static const constexpr char g_prefixSeparator = '+';
-std::string StorageAccount::UniquePrefix(const std::string& storageAccountUrl, const std::string& dbName) {
+std::string StorageAccount::UniquePrefix(const Models::AccountUrl& accountUrl, const Models::DbName& dbName) {
+    const auto& storageAccountUrl = accountUrl.Value();
     // strip out invalid url portions
     auto secondSlash = storageAccountUrl.find_first_of('/') + 2;
     auto period = storageAccountUrl.find_first_of('.');
@@ -14,7 +15,7 @@ std::string StorageAccount::UniquePrefix(const std::string& storageAccountUrl, c
     // between the same db name pointed at different storage accounts (a legitimate use-case).
     // The storage account portion (including the path separator) will be stripped by the time
     // it reaches the plugin.
-    return storageAccountUrl.substr(secondSlash, period - secondSlash) + g_prefixSeparator + dbName;
+    return storageAccountUrl.substr(secondSlash, period - secondSlash) + g_prefixSeparator + dbName.Value();
 }
 
 std::pair<std::string_view, std::string_view> StorageAccount::StripPrefix(const std::string_view filePath) {

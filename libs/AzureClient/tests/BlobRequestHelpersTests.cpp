@@ -46,7 +46,6 @@ using AVEVA::AzureClient::BlobContainerClientOptions;
 using AVEVA::AzureClient::BlobServiceClientOptions;
 using AVEVA::AzureClient::BlobStorageErrorCode;
 using AVEVA::AzureClient::CredentialPresence;
-using AVEVA::AzureClient::SharedKeyCredentialOptions;
 using AVEVA::AzureClient::StringMatch;
 using AVEVA::AzureClient::Models::BlobType;
 using AVEVA::AzureClient::Private::AuthorizeRequest;
@@ -108,11 +107,26 @@ struct OddTimeComponent {
     constexpr OddTimeComponent(int value) noexcept : Value(value) {}
 };
 
+// std::tm counts years from 1900.
+constexpr int TmEpochYear = 1900;
+constexpr int MaxByteValue = 255;
+// Fuzz shape: iteration counts, maximum generated lengths and fixed seeds that keep the tests deterministic.
+constexpr int FuzzIterations = 256;
+constexpr int HeaderFuzzIterations = 128;
+constexpr int MaxFuzzHeaders = 8;
+constexpr int MaxFuzzHeaderLength = 16;
+constexpr int MaxFuzzValueLength = 64;
+constexpr unsigned int HttpDateFuzzSeed = 12345U;
+constexpr unsigned int UrlEncodeFuzzSeed = 54321U;
+constexpr unsigned int HeaderFuzzSeed = 9999U;
+// Concurrent signing: threads and signatures per thread.
+constexpr std::size_t SigningThreads = 8;
+constexpr int SignaturesPerThread = 200;
 [[nodiscard]] std::chrono::system_clock::time_point MakeUtcTimePoint(int year, OddTimeComponent month, int day,
                                                                      OddTimeComponent hour, int minute,
                                                                      OddTimeComponent second) {
     std::tm utcTime{};
-    utcTime.tm_year = year - 1900;
+    utcTime.tm_year = year - TmEpochYear;
     utcTime.tm_mon = month.Value - 1;
     utcTime.tm_mday = day;
     utcTime.tm_hour = hour.Value;
@@ -127,7 +141,7 @@ struct OddTimeComponent {
 }
 
 [[nodiscard]] std::string RandomBytes(std::mt19937& generator, std::size_t length) {
-    std::uniform_int_distribution<int> byteDistribution(0, 255);
+    std::uniform_int_distribution<int> byteDistribution(0, MaxByteValue);
     std::string value(length, '\0');
     for (char& ch : value) {
         ch = static_cast<char>(byteDistribution(generator));
@@ -170,21 +184,22 @@ struct OddTimeComponent {
 }
 
 void RunUrlEncodeFuzzIterations(std::mt19937& generator, std::uniform_int_distribution<int>& lengthDistribution) {
-    for (int iteration = 0; iteration < 256; ++iteration) {
+    for (int iteration = 0; iteration < FuzzIterations; ++iteration) {
         const std::string value = RandomBytes(generator, static_cast<std::size_t>(lengthDistribution(generator)));
         EXPECT_TRUE(IsWellFormedPercentEncodedText(UrlEncode(value, "/")));
     }
 }
 
 [[nodiscard]] std::vector<HttpHeader> MakeRandomHeaders(std::mt19937& generator) {
-    std::uniform_int_distribution<int> headerCountDistribution(0, 8);
-    std::uniform_int_distribution<int> lengthDistribution(0, 16);
+    std::uniform_int_distribution<int> headerCountDistribution(0, MaxFuzzHeaders);
+    std::uniform_int_distribution<int> lengthDistribution(0, MaxFuzzHeaderLength);
     std::vector<HttpHeader> headers;
     const int headerCount = headerCountDistribution(generator);
     headers.reserve(static_cast<std::size_t>(headerCount));
     for (int headerIndex = 0; headerIndex < headerCount; ++headerIndex) {
-        headers.emplace_back(RandomBytes(generator, static_cast<std::size_t>(lengthDistribution(generator))),
-                             RandomBytes(generator, static_cast<std::size_t>(lengthDistribution(generator))));
+        headers.emplace_back(
+            AVEVA::HeaderName{RandomBytes(generator, static_cast<std::size_t>(lengthDistribution(generator)))},
+            AVEVA::HeaderValue{RandomBytes(generator, static_cast<std::size_t>(lengthDistribution(generator)))});
     }
     return headers;
 }
@@ -198,29 +213,15 @@ void RunUrlEncodeFuzzIterations(std::mt19937& generator, std::uniform_int_distri
     return {};
 }
 
-struct FindHeaderValueAttempt {
-    bool Threw = false;
-    std::string Value;
-};
-
-[[nodiscard]] FindHeaderValueAttempt TryFindHeaderValue(const HttpResponse& response, std::string_view query) {
-    try {
-        return {.Value = std::string{FindHeaderValue(response, query)}};
-    } catch (...) {
-        return {.Threw = true};
-    }
-}
-
 void RunFindHeaderValueFuzzIterations(std::mt19937& generator) {
-    std::uniform_int_distribution<int> lengthDistribution(0, 16);
-    for (int iteration = 0; iteration < 128; ++iteration) {
+    std::uniform_int_distribution<int> lengthDistribution(0, MaxFuzzHeaderLength);
+    for (int iteration = 0; iteration < HeaderFuzzIterations; ++iteration) {
         const std::vector<HttpHeader> headers = MakeRandomHeaders(generator);
         const std::string query = RandomBytes(generator, static_cast<std::size_t>(lengthDistribution(generator)));
         const HttpResponse response{AVEVA::HttpStatus::Ok, headers, ""};
         const std::string expected = ExpectedHeaderValueForQuery(headers, query);
-        const FindHeaderValueAttempt attempt = TryFindHeaderValue(response, query);
-        EXPECT_FALSE(attempt.Threw);
-        EXPECT_EQ(attempt.Value, expected);
+        static_assert(noexcept(FindHeaderValue(response, query)));
+        EXPECT_EQ(FindHeaderValue(response, query), expected);
     }
 }
 
@@ -228,11 +229,11 @@ void RunFindHeaderValueFuzzIterations(std::mt19937& generator) {
 CountSharedKeySignerMismatchesAcrossThreads(const AVEVA::AzureClient::Private::SharedKeySigner& signer,
                                             const AVEVA::HttpRequest& request, std::string_view expected) {
     std::vector<std::thread> threads;
-    std::vector<int> mismatches(8, 0);
+    std::vector<int> mismatches(SigningThreads, 0);
     threads.reserve(mismatches.size());
     for (int& mismatchCount : mismatches) {
         threads.emplace_back([&signer, &request, expected, &mismatchCount] {
-            for (int i = 0; i < 200; ++i) {
+            for (int i = 0; i < SignaturesPerThread; ++i) {
                 if (signer.Authorize(request) != expected) {
                     ++mismatchCount;
                 }
@@ -249,24 +250,26 @@ CountSharedKeySignerMismatchesAcrossThreads(const AVEVA::AzureClient::Private::S
 TEST(BlobRequestHelpersTests, SharedKeyAuthorization_MatchesForOwnedAndViewBodies) {
     using AVEVA::AzureClient::Private::AuthorizeRequest;
 
-    SharedKeyCredentialOptions options{.AccountName = std::string("testaccount"),
-                                       .AccountKey = std::string("MTIzNDU2")}; // base64 of "123456"
+    const AVEVA::AzureClient::Private::SharedKeySigner signer{"testaccount", "MTIzNDU2"}; // base64 of "123456"
 
     AVEVA::HttpRequest reqOwned;
     reqOwned.SetMethod(AVEVA::HttpMethod::Put);
-    reqOwned.SetUrl("https://example.com/container/blob");
-    reqOwned.AddHeader(AVEVA::HttpHeader("x-ms-date", "Mon, 01 Jan 2020 00:00:00 GMT"));
-    reqOwned.SetBody("abc");
-    AuthorizeRequest(options, reqOwned);
+    reqOwned.SetUrl(AVEVA::HttpUrl{"https://example.com/container/blob"});
+    reqOwned.AddHeader(
+        AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-date"}, AVEVA::HeaderValue{"Mon, 01 Jan 2020 00:00:00 GMT"}));
+    reqOwned.SetBody(AVEVA::HttpBody{"abc"});
+    AuthorizeRequest(signer, reqOwned);
     const std::string authOwned = FindRequestHeaderValue(reqOwned, "Authorization");
 
     AVEVA::HttpRequest reqView;
     reqView.SetMethod(AVEVA::HttpMethod::Put);
-    reqView.SetUrl("https://example.com/container/blob");
-    reqView.AddHeader(AVEVA::HttpHeader("x-ms-date", "Mon, 01 Jan 2020 00:00:00 GMT"));
-    std::vector<std::byte> buffer{std::byte('a'), std::byte('b'), std::byte('c')};
-    reqView.SetBodyView(std::span<const std::byte>(buffer.data(), buffer.size()));
-    AuthorizeRequest(options, reqView);
+    reqView.SetUrl(AVEVA::HttpUrl{"https://example.com/container/blob"});
+    reqView.AddHeader(
+        AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-date"}, AVEVA::HeaderValue{"Mon, 01 Jan 2020 00:00:00 GMT"}));
+    const auto buffer =
+        std::make_shared<const std::vector<std::byte>>(std::vector{std::byte('a'), std::byte('b'), std::byte('c')});
+    reqView.SetBody(AVEVA::HttpBody(std::span<const std::byte>(*buffer), buffer));
+    AuthorizeRequest(signer, reqView);
     const std::string authView = FindRequestHeaderValue(reqView, "Authorization");
 
     EXPECT_EQ(authOwned, authView);
@@ -344,18 +347,19 @@ TEST(BlobRequestHelpersTests, StringHelpers_AreCaseInsensitiveAndTrimAsExpected)
 
 TEST(BlobRequestHelpersTests, ParseBlobProperties_ExtractsMetadataAndHandlesUnknownValues) {
     const auto expectedTime = MakeUtcTimePoint(2015, 6, 26, 18, 59, 17);
-    const HttpResponse response{AVEVA::HttpStatus::Ok,
-                                {
-                                    {"ETag", "\"etag\""},
-                                    {"Last-Modified", "Fri, 26 Jun 2015 18:59:17 GMT"},
-                                    {"Content-Type", "application/octet-stream"},
-                                    {"Cache-Control", "max-age=60"},
-                                    {"Content-MD5", "abcd"},
-                                    {"x-ms-blob-type", "NotARealBlobType"},
-                                    {"x-ms-meta-Project", "aveva"},
-                                    {"X-Ms-MeTa-OWNER", "storage"},
-                                },
-                                ""};
+    const HttpResponse response{
+        AVEVA::HttpStatus::Ok,
+        {
+            AVEVA::HttpHeader(AVEVA::HeaderName{"ETag"}, AVEVA::HeaderValue{"\"etag\""}),
+            AVEVA::HttpHeader(AVEVA::HeaderName{"Last-Modified"}, AVEVA::HeaderValue{"Fri, 26 Jun 2015 18:59:17 GMT"}),
+            AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Type"}, AVEVA::HeaderValue{"application/octet-stream"}),
+            AVEVA::HttpHeader(AVEVA::HeaderName{"Cache-Control"}, AVEVA::HeaderValue{"max-age=60"}),
+            AVEVA::HttpHeader(AVEVA::HeaderName{"Content-MD5"}, AVEVA::HeaderValue{"abcd"}),
+            AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-blob-type"}, AVEVA::HeaderValue{"NotARealBlobType"}),
+            AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-meta-Project"}, AVEVA::HeaderValue{"aveva"}),
+            AVEVA::HttpHeader(AVEVA::HeaderName{"X-Ms-MeTa-OWNER"}, AVEVA::HeaderValue{"storage"}),
+        },
+        ""};
 
     const auto properties = ParseBlobProperties(response);
 
@@ -371,15 +375,22 @@ TEST(BlobRequestHelpersTests, ParseBlobProperties_ExtractsMetadataAndHandlesUnkn
 }
 
 TEST(BlobRequestHelpersTests, ParseBlobProperties_ZeroContentLengthIsPresentAndNotTreatedAsMissing) {
-    const HttpResponse zero{AVEVA::HttpStatus::Ok, {{"Content-Length", "0"}}, ""};
+    const HttpResponse zero{
+        AVEVA::HttpStatus::Ok, {AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Length"}, AVEVA::HeaderValue{"0"})}, ""};
     EXPECT_EQ(ParseBlobProperties(zero).ContentLength, 0U);
 
     const HttpResponse ranged{
-        AVEVA::HttpStatus::PartialContent, {{"Content-Range", "bytes 0-0/10"}, {"Content-Length", "1"}}, ""};
+        AVEVA::HttpStatus::PartialContent,
+        {AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Range"}, AVEVA::HeaderValue{"bytes 0-0/10"}),
+         AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Length"}, AVEVA::HeaderValue{"1"})},
+        ""};
     EXPECT_EQ(ParseBlobProperties(ranged).ContentLength, 10U);
 
     const HttpResponse emptyTotal{
-        AVEVA::HttpStatus::PartialContent, {{"Content-Range", "bytes 0-0/0"}, {"Content-Length", "1"}}, ""};
+        AVEVA::HttpStatus::PartialContent,
+        {AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Range"}, AVEVA::HeaderValue{"bytes 0-0/0"}),
+         AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Length"}, AVEVA::HeaderValue{"1"})},
+        ""};
     EXPECT_THROW(static_cast<void>(ParseBlobProperties(emptyTotal)), std::invalid_argument);
 }
 
@@ -391,7 +402,8 @@ TEST(BlobRequestHelpersTests, BoostUrlHelpers_PreserveExistingUrlShapes) {
     blobOptions.ContainerName = "container";
     blobOptions.BlobName = "folder name/file?.txt";
     blobOptions.SasToken = "sv=1&sig=a%2Bb";
-    EXPECT_EQ(BuildBlobUrl(blobOptions, "comp=blocklist"),
+    EXPECT_EQ(BuildBlobUrl(AVEVA::AzureClient::Private::MakeBlobTarget(blobOptions, CredentialPresence::Absent),
+                           "comp=blocklist"),
               "https://account.blob.core.windows.net/container/folder%20name/"
               "file%3F.txt?comp=blocklist&sv=1&sig=a%2Bb");
 
@@ -400,16 +412,18 @@ TEST(BlobRequestHelpersTests, BoostUrlHelpers_PreserveExistingUrlShapes) {
     containerOptions.ContainerName = "container";
     containerOptions.SasToken = "sv=1&sig=a%2Bb";
     EXPECT_EQ(
-        BuildContainerUrl(containerOptions, "comp=list&include=metadata"),
+        BuildContainerUrl(
+            AVEVA::AzureClient::Private::MakeContainerTarget(containerOptions, CredentialPresence::Absent),
+            "comp=list&include=metadata"),
         "https://account.blob.core.windows.net/container?restype=container&comp=list&include=metadata&sv=1&sig=a%2Bb");
 }
 
 TEST(BlobRequestHelpersTests, ParseHttpDateHeader_FuzzDoesNotThrow) {
-    std::seed_seq seed{12345}; // A fixed seed keeps this test deterministic.
+    std::seed_seq seed{HttpDateFuzzSeed}; // A fixed seed keeps this test deterministic.
     std::mt19937 generator(seed);
-    std::uniform_int_distribution<int> lengthDistribution(0, 64);
+    std::uniform_int_distribution<int> lengthDistribution(0, MaxFuzzValueLength);
 
-    for (int iteration = 0; iteration < 256; ++iteration) {
+    for (int iteration = 0; iteration < FuzzIterations; ++iteration) {
         const std::string value = RandomBytes(generator, static_cast<std::size_t>(lengthDistribution(generator)));
         EXPECT_NO_THROW({
             const auto parsed = ParseHttpDateHeader(value);
@@ -419,22 +433,21 @@ TEST(BlobRequestHelpersTests, ParseHttpDateHeader_FuzzDoesNotThrow) {
 }
 
 TEST(BlobRequestHelpersTests, UrlEncode_FuzzProducesWellFormedPercentEscapes) {
-    std::seed_seq seed{54321}; // A fixed seed keeps this test deterministic.
+    std::seed_seq seed{UrlEncodeFuzzSeed}; // A fixed seed keeps this test deterministic.
     std::mt19937 generator(seed);
-    std::uniform_int_distribution<int> lengthDistribution(0, 64);
+    std::uniform_int_distribution<int> lengthDistribution(0, MaxFuzzValueLength);
 
     RunUrlEncodeFuzzIterations(generator, lengthDistribution);
 }
 
 TEST(BlobRequestHelpersTests, FindHeaderValue_FuzzDoesNotThrowAndReturnsMatchingValue) {
-    std::seed_seq seed{9999}; // A fixed seed keeps this test deterministic.
+    std::seed_seq seed{HeaderFuzzSeed}; // A fixed seed keeps this test deterministic.
     std::mt19937 generator(seed);
     RunFindHeaderValueFuzzIterations(generator);
 }
 
 TEST(BlobRequestHelpersTests, SharedKeyAuthorization_KnownAnswerVectorsMatchIndependentSignatures) {
-    const SharedKeyCredentialOptions sharedKey{.AccountName = "storageaccount",
-                                               .AccountKey = "MDEyMzQ1Njc4OWFiY2RlZg=="};
+    const AVEVA::AzureClient::Private::SharedKeySigner sharedKey{"storageaccount", "MDEyMzQ1Njc4OWFiY2RlZg=="};
 
     struct KnownAnswerCase {
         const char* Name;
@@ -453,11 +466,12 @@ TEST(BlobRequestHelpersTests, SharedKeyAuthorization_KnownAnswerVectorsMatchInde
                    "cat%20photo.jpg?zeta=last&comp=metadata&Alpha=first&timeout=30",
             .Headers =
                 {
-                    {"x-ms-date", "Sun, 06 Nov 1994 08:49:37 GMT"},
-                    {"x-ms-version", "2023-11-03"},
-                    {"X-Ms-Meta-Owner", "  Alice  "},
-                    {"If-None-Match", "\"etag-123\""},
-                    {"Range", "bytes=1-3"},
+                    AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-date"},
+                                      AVEVA::HeaderValue{"Sun, 06 Nov 1994 08:49:37 GMT"}),
+                    AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-version"}, AVEVA::HeaderValue{"2023-11-03"}),
+                    AVEVA::HttpHeader(AVEVA::HeaderName{"X-Ms-Meta-Owner"}, AVEVA::HeaderValue{"  Alice  "}),
+                    AVEVA::HttpHeader(AVEVA::HeaderName{"If-None-Match"}, AVEVA::HeaderValue{"\"etag-123\""}),
+                    AVEVA::HttpHeader(AVEVA::HeaderName{"Range"}, AVEVA::HeaderValue{"bytes=1-3"}),
                 },
             .Body = "",
             .ExpectedAuthorization = "SharedKey storageaccount:RRz8HIx1QCyRXmSRoclBHAGSviMjbDbPzYyxnnl72VA=",
@@ -468,14 +482,17 @@ TEST(BlobRequestHelpersTests, SharedKeyAuthorization_KnownAnswerVectorsMatchInde
             .Url = "https://storageaccount.blob.core.windows.net/images/photo.png?timeout=30&comp=blocklist",
             .Headers =
                 {
-                    {"x-ms-date", "Sun, 06 Nov 1994 08:49:37 GMT"},
-                    {"x-ms-version", "2023-11-03"},
-                    {"X-Ms-Blob-Type", "BlockBlob"},
-                    {"x-ms-meta-Project", " AzureClient "},
-                    {"Content-MD5", "sQqNsWTgdUEFt6mb5y4/5Q=="},
-                    {"Content-Type", "application/xml; charset=utf-8"},
-                    {"If-Match", "\"match-me\""},
-                    {"If-Unmodified-Since", "Sat, 05 Nov 1994 08:49:37 GMT"},
+                    AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-date"},
+                                      AVEVA::HeaderValue{"Sun, 06 Nov 1994 08:49:37 GMT"}),
+                    AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-version"}, AVEVA::HeaderValue{"2023-11-03"}),
+                    AVEVA::HttpHeader(AVEVA::HeaderName{"X-Ms-Blob-Type"}, AVEVA::HeaderValue{"BlockBlob"}),
+                    AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-meta-Project"}, AVEVA::HeaderValue{" AzureClient "}),
+                    AVEVA::HttpHeader(AVEVA::HeaderName{"Content-MD5"}, AVEVA::HeaderValue{"sQqNsWTgdUEFt6mb5y4/5Q=="}),
+                    AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Type"},
+                                      AVEVA::HeaderValue{"application/xml; charset=utf-8"}),
+                    AVEVA::HttpHeader(AVEVA::HeaderName{"If-Match"}, AVEVA::HeaderValue{"\"match-me\""}),
+                    AVEVA::HttpHeader(AVEVA::HeaderName{"If-Unmodified-Since"},
+                                      AVEVA::HeaderValue{"Sat, 05 Nov 1994 08:49:37 GMT"}),
                 },
             .Body = R"(<?xml version="1.0" encoding="utf-8"?><BlockList><Latest>YmxvY2swMQ==</Latest></BlockList>)",
             .ExpectedAuthorization = "SharedKey storageaccount:DOD+foEtDUy9DET5eSjm+6OSomlOr0Gnxufdaj5g4I8=",
@@ -486,11 +503,13 @@ TEST(BlobRequestHelpersTests, SharedKeyAuthorization_KnownAnswerVectorsMatchInde
             .Url = "https://storageaccount.blob.core.windows.net/logs/app.log?timeout=10&comp=metadata&Alpha=first",
             .Headers =
                 {
-                    {"x-ms-date", "Sun, 06 Nov 1994 08:49:37 GMT"},
-                    {"X-Ms-Version", "2023-11-03"},
-                    {"If-Modified-Since", "Sat, 05 Nov 1994 08:49:37 GMT"},
-                    {"x-ms-meta-Zebra", " z "},
-                    {"x-ms-meta-alpha", " a "},
+                    AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-date"},
+                                      AVEVA::HeaderValue{"Sun, 06 Nov 1994 08:49:37 GMT"}),
+                    AVEVA::HttpHeader(AVEVA::HeaderName{"X-Ms-Version"}, AVEVA::HeaderValue{"2023-11-03"}),
+                    AVEVA::HttpHeader(AVEVA::HeaderName{"If-Modified-Since"},
+                                      AVEVA::HeaderValue{"Sat, 05 Nov 1994 08:49:37 GMT"}),
+                    AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-meta-Zebra"}, AVEVA::HeaderValue{" z "}),
+                    AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-meta-alpha"}, AVEVA::HeaderValue{" a "}),
                 },
             .Body = "",
             .ExpectedAuthorization = "SharedKey storageaccount:Pbn+Boe3r45lo3l+F0ymWu5xY+PPFCynbQ8nfUJi2AU=",
@@ -502,10 +521,12 @@ TEST(BlobRequestHelpersTests, SharedKeyAuthorization_KnownAnswerVectorsMatchInde
                    "cat%20photo.jpg?timeout=45&snapshot=2024-01-02T03%3A04%3A05.0000000Z",
             .Headers =
                 {
-                    {"x-ms-date", "Sun, 06 Nov 1994 08:49:37 GMT"},
-                    {"x-ms-version", "2023-11-03"},
-                    {"x-ms-delete-snapshots", "include"},
-                    {"If-Modified-Since", "Sat, 05 Nov 1994 08:49:37 GMT"},
+                    AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-date"},
+                                      AVEVA::HeaderValue{"Sun, 06 Nov 1994 08:49:37 GMT"}),
+                    AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-version"}, AVEVA::HeaderValue{"2023-11-03"}),
+                    AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-delete-snapshots"}, AVEVA::HeaderValue{"include"}),
+                    AVEVA::HttpHeader(AVEVA::HeaderName{"If-Modified-Since"},
+                                      AVEVA::HeaderValue{"Sat, 05 Nov 1994 08:49:37 GMT"}),
                 },
             .Body = "",
             .ExpectedAuthorization = "SharedKey storageaccount:/jcIn141mdTeJVNSo/mDdDy0DesOllUXRHbgKkBWAZA=",
@@ -515,8 +536,8 @@ TEST(BlobRequestHelpersTests, SharedKeyAuthorization_KnownAnswerVectorsMatchInde
     for (const auto& testCase : cases) {
         HttpRequest request;
         request.SetMethod(testCase.Method);
-        request.SetUrl(testCase.Url);
-        request.SetBody(testCase.Body);
+        request.SetUrl(AVEVA::HttpUrl{testCase.Url});
+        request.SetBody(AVEVA::HttpBody{testCase.Body});
         for (const auto& header : testCase.Headers) {
             request.AddHeader(header);
         }
@@ -556,7 +577,8 @@ TEST(BlobRequestHelpersTests, UrlBuilders_HandlePortsUnicodeLiteralPercentsAndDu
     blobOptions.BlobName = "emoji-\xF0\x9F\x98\x80-%2F.txt";
     blobOptions.SasToken = "sv=1&sig=a%2Bb";
 
-    const std::string blobUrl = BuildBlobUrl(blobOptions, "comp=metadata");
+    const std::string blobUrl = BuildBlobUrl(
+        AVEVA::AzureClient::Private::MakeBlobTarget(blobOptions, CredentialPresence::Absent), "comp=metadata");
     EXPECT_EQ(IStartsWith(blobUrl, "https://"), StringMatch::Match);
     EXPECT_NE(blobUrl.find(":8443/container/emoji-%F0%9F%98%80-%252F.txt"), std::string::npos);
     EXPECT_NE(blobUrl.find("?comp=metadata&sv=1&sig=a%2Bb"), std::string::npos);
@@ -568,15 +590,18 @@ TEST(BlobRequestHelpersTests, UrlBuilders_HandlePortsUnicodeLiteralPercentsAndDu
     BlobServiceClientOptions serviceOptions;
     serviceOptions.ServiceEndpoint = "https://account.blob.core.windows.net:9443";
     serviceOptions.SasToken = "sv=1&sig=s%2Bv";
-    EXPECT_EQ(BuildServiceUrl(serviceOptions, BuildQueryString({{"comp", "list"}, {"marker", "na\xC3\xAFve"}})),
-              "https://account.blob.core.windows.net:9443?comp=list&marker=na%C3%AFve&sv=1&sig=s%2Bv");
+    EXPECT_EQ(
+        BuildServiceUrl(*AVEVA::AzureClient::Private::MakeConnectionState(serviceOptions, CredentialPresence::Absent),
+                        BuildQueryString({{"comp", "list"}, {"marker", "na\xC3\xAFve"}})),
+        "https://account.blob.core.windows.net:9443?comp=list&marker=na%C3%AFve&sv=1&sig=s%2Bv");
 
     BlobContainerClientOptions containerOptions;
     containerOptions.ServiceEndpoint = "https://account.blob.core.windows.net";
     containerOptions.ContainerName = "images";
     containerOptions.SasToken = "sv=1&sig=abc%2B123%26x%3D1";
-    EXPECT_EQ(BuildContainerUrl(containerOptions,
-                                BuildQueryString({{"comp", "list"}, {"marker", "next+page"}, {"include", "metadata"}})),
+    EXPECT_EQ(BuildContainerUrl(
+                  AVEVA::AzureClient::Private::MakeContainerTarget(containerOptions, CredentialPresence::Absent),
+                  BuildQueryString({{"comp", "list"}, {"marker", "next+page"}, {"include", "metadata"}})),
               "https://account.blob.core.windows.net/"
               "images?restype=container&comp=list&marker=next%2Bpage&include=metadata&sv=1&sig=abc%2B123%26x%3D1");
 }
@@ -619,15 +644,15 @@ namespace {
 [[nodiscard]] AVEVA::HttpRequest MakeGoldenGetRequest() {
     AVEVA::HttpRequest request;
     request.SetMethod(AVEVA::HttpMethod::Get);
-    request.SetUrl("https://storageaccount.blob.core.windows.net/photos/"
-                   "cat%20photo.jpg?zeta=last&comp=metadata&Alpha=first&timeout=30");
+    request.SetUrl(AVEVA::HttpUrl{"https://storageaccount.blob.core.windows.net/photos/"
+                                  "cat%20photo.jpg?zeta=last&comp=metadata&Alpha=first&timeout=30"});
     for (const auto& [name, value] :
          std::vector<std::pair<std::string, std::string>>{{"x-ms-date", "Sun, 06 Nov 1994 08:49:37 GMT"},
                                                           {"x-ms-version", "2023-11-03"},
                                                           {"X-Ms-Meta-Owner", "  Alice  "},
                                                           {"If-None-Match", "\"etag-123\""},
                                                           {"Range", "bytes=1-3"}}) {
-        request.AddHeader(AVEVA::HttpHeader{name, value});
+        request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{name}, AVEVA::HeaderValue{value}));
     }
     return request;
 }
@@ -671,7 +696,8 @@ TEST(BlobRequestHelpersTests, MakeConnectionState_NormalisesOptionsOnce) {
     EXPECT_EQ(sharedKey->BasePrefix, "http://127.0.0.1:10000");
     EXPECT_EQ(sharedKey->BasePath, "/devstoreaccount1");
 
-    const auto blob = MakeBlobTarget(sharedKey, "container", "dir/blob.txt");
+    const auto blob = MakeBlobTarget(sharedKey, AVEVA::AzureClient::Private::ContainerNameText{"container"},
+                                     AVEVA::AzureClient::Private::BlobNameText{"dir/blob.txt"});
     EXPECT_EQ(blob.Connection, sharedKey) << "child targets share, not copy, the connection";
     EXPECT_EQ(BuildBlobUrl(blob), "http://127.0.0.1:10000/devstoreaccount1/container/dir/blob.txt");
 
@@ -692,8 +718,13 @@ TEST(BlobRequestHelpersTests, MakeConnectionState_NormalisesOptionsOnce) {
     badKeyOptions.SharedKey = {.AccountName = "a", .AccountKey = "not base64!"};
     EXPECT_THROW(static_cast<void>(MakeConnectionState(std::move(badKeyOptions), CredentialPresence::Absent)),
                  std::invalid_argument);
-    EXPECT_THROW(static_cast<void>(MakeBlobTarget(sharedKey, "Bad_Name", "blob")), std::invalid_argument);
-    EXPECT_THROW(static_cast<void>(MakeBlobTarget(sharedKey, "container", "")), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(MakeBlobTarget(sharedKey, AVEVA::AzureClient::Private::ContainerNameText{"Bad_Name"},
+                                                  AVEVA::AzureClient::Private::BlobNameText{"blob"})),
+                 std::invalid_argument);
+    EXPECT_THROW(
+        static_cast<void>(MakeBlobTarget(sharedKey, AVEVA::AzureClient::Private::ContainerNameText{"container"},
+                                         AVEVA::AzureClient::Private::BlobNameText{""})),
+        std::invalid_argument);
 }
 
 TEST(BlobRequestHelpersTests, BlobTarget_CachesTheEncodedResourceAndAppendsOnlyTheQuery) {
@@ -705,7 +736,8 @@ TEST(BlobRequestHelpersTests, BlobTarget_CachesTheEncodedResourceAndAppendsOnlyT
     connectionOptions.ServiceEndpoint = "https://account.blob.core.windows.net/x";
     connectionOptions.SasToken = "sv=1&sig=s";
     const auto connection = MakeConnectionState(std::move(connectionOptions), CredentialPresence::Absent);
-    const auto blob = MakeBlobTarget(connection, "container", "folder name/file?.txt");
+    const auto blob = MakeBlobTarget(connection, AVEVA::AzureClient::Private::ContainerNameText{"container"},
+                                     AVEVA::AzureClient::Private::BlobNameText{"folder name/file?.txt"});
 
     EXPECT_EQ(blob.EncodedResource, "https://account.blob.core.windows.net/x/container/folder%20name/file%3F.txt");
     EXPECT_EQ(BuildBlobUrl(blob, "comp=metadata"), blob.EncodedResource + "?comp=metadata&sv=1&sig=s");
@@ -753,7 +785,7 @@ TEST(BlobRequestHelpersTests, SharedKeyStringToSign_SupportsEveryHttpMethod) {
                                                          {HttpMethod::Connect, "CONNECT"}}) {
         AVEVA::HttpRequest request;
         request.SetMethod(method);
-        request.SetUrl("https://account.blob.core.windows.net/container/blob");
+        request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/container/blob"});
         EXPECT_TRUE(
             AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request).starts_with(verb + "\n"))
             << verb;
@@ -763,10 +795,10 @@ TEST(BlobRequestHelpersTests, SharedKeyStringToSign_SupportsEveryHttpMethod) {
 TEST(SharedKeyCanonicalizationTests, RepeatedHeadersAndQueryParametersAreGrouped) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Get);
-    request.SetUrl("https://account.blob.core.windows.net/container/blob?b=2&a=z&a=y&comp=list");
-    request.AddHeader(AVEVA::HttpHeader{"x-ms-meta-k", "v1"});
-    request.AddHeader(AVEVA::HttpHeader{"x-ms-a", "first"});
-    request.AddHeader(AVEVA::HttpHeader{"X-MS-Meta-K", " v2 "});
+    request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/container/blob?b=2&a=z&a=y&comp=list"});
+    request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-meta-k"}, AVEVA::HeaderValue{"v1"}));
+    request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-a"}, AVEVA::HeaderValue{"first"}));
+    request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{"X-MS-Meta-K"}, AVEVA::HeaderValue{" v2 "}));
 
     const std::string toSign = AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request);
     EXPECT_NE(toSign.find("x-ms-a:first\nx-ms-meta-k:v1,v2\n"), std::string::npos) << toSign;
@@ -776,11 +808,12 @@ TEST(SharedKeyCanonicalizationTests, RepeatedHeadersAndQueryParametersAreGrouped
 TEST(AS_R12_SharedKeyGoldenTests, EncodedPathPutWithEmptyBodyAndRepeatedHeaders) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Put);
-    request.SetUrl("https://account.blob.core.windows.net/cont/my%20dir%2Fblob?comp=metadata&Z=2&z=1");
-    request.AddHeader(AVEVA::HttpHeader{"x-ms-version", "2024-11-04"});
-    request.AddHeader(AVEVA::HttpHeader{"x-ms-date", "Sun, 06 Nov 1994 08:49:37 GMT"});
-    request.AddHeader(AVEVA::HttpHeader{"x-ms-meta-a", "1"});
-    request.AddHeader(AVEVA::HttpHeader{"x-ms-meta-a", "2"});
+    request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/cont/my%20dir%2Fblob?comp=metadata&Z=2&z=1"});
+    request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-version"}, AVEVA::HeaderValue{"2024-11-04"}));
+    request.AddHeader(
+        AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-date"}, AVEVA::HeaderValue{"Sun, 06 Nov 1994 08:49:37 GMT"}));
+    request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-meta-a"}, AVEVA::HeaderValue{"1"}));
+    request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-meta-a"}, AVEVA::HeaderValue{"2"}));
 
     // The path is signed in its encoded form; an empty body yields an empty Content-Length field.
     EXPECT_EQ(AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request),
@@ -794,8 +827,8 @@ TEST(AS_R06_SharedKeySignerValidationTests, RejectsXMsHeadersThatCouldBeSignedDi
              {"x-ms-a", "v\r\nx-ms-b: 1"}, {"x-ms-a\n", "v"}, {"x-ms-a:b", "v"}, {"x-ms-a", std::string("v\0w", 3)}}) {
         AVEVA::HttpRequest request;
         request.SetMethod(HttpMethod::Get);
-        request.SetUrl("https://account.blob.core.windows.net/container/blob");
-        request.AddHeader(AVEVA::HttpHeader{name, value});
+        request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/container/blob"});
+        request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{name}, AVEVA::HeaderValue{value}));
         EXPECT_THROW(static_cast<void>(AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request)),
                      std::invalid_argument);
     }
@@ -804,7 +837,7 @@ TEST(AS_R06_SharedKeySignerValidationTests, RejectsXMsHeadersThatCouldBeSignedDi
 TEST(SharedKeyCanonicalizationTests, UnparseableUrlIsRejectedInsteadOfSigningTheRootPath) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Get);
-    request.SetUrl("not a url");
+    request.SetUrl(AVEVA::HttpUrl{"not a url"});
 
     EXPECT_THROW((void)AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request),
                  std::invalid_argument);
@@ -813,8 +846,8 @@ TEST(SharedKeyCanonicalizationTests, UnparseableUrlIsRejectedInsteadOfSigningThe
 TEST(SharedKeyCanonicalizationTests, InternalWhitespaceRunsInHeaderValuesAreCollapsed) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Get);
-    request.SetUrl("https://account.blob.core.windows.net/container/blob");
-    request.AddHeader(AVEVA::HttpHeader{"x-ms-meta-k", "  a  \t b   c "});
+    request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/container/blob"});
+    request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-meta-k"}, AVEVA::HeaderValue{"  a  \t b   c "}));
 
     const std::string toSign = AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request);
     EXPECT_NE(toSign.find("x-ms-meta-k:a b c\n"), std::string::npos) << toSign;
@@ -823,13 +856,13 @@ TEST(SharedKeyCanonicalizationTests, InternalWhitespaceRunsInHeaderValuesAreColl
 TEST(SharedKeyCanonicalizationTests, StandardHeadersFillTheirSlotsCaseInsensitivelyAndFirstOneWins) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Put);
-    request.SetUrl("https://account.blob.core.windows.net/container/blob");
-    request.AddHeader(AVEVA::HttpHeader{"range", "bytes=0-1"});
-    request.AddHeader(AVEVA::HttpHeader{"IF-MATCH", "\"etag\""});
-    request.AddHeader(AVEVA::HttpHeader{"Content-Type", "text/plain"});
-    request.AddHeader(AVEVA::HttpHeader{"content-type", "ignored"});
-    request.AddHeader(AVEVA::HttpHeader{"If-Unmodified-Since", "yesterday"});
-    request.AddHeader(AVEVA::HttpHeader{"x-ms-a", "1"});
+    request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/container/blob"});
+    request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{"range"}, AVEVA::HeaderValue{"bytes=0-1"}));
+    request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{"IF-MATCH"}, AVEVA::HeaderValue{"\"etag\""}));
+    request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Type"}, AVEVA::HeaderValue{"text/plain"}));
+    request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{"content-type"}, AVEVA::HeaderValue{"ignored"}));
+    request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{"If-Unmodified-Since"}, AVEVA::HeaderValue{"yesterday"}));
+    request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-a"}, AVEVA::HeaderValue{"1"}));
 
     const std::string toSign = AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request);
     EXPECT_TRUE(toSign.starts_with("PUT\n\n\n\n\ntext/plain\n\n\n\"etag\"\n\nyesterday\nbytes=0-1\nx-ms-a:1\n"))
@@ -839,9 +872,9 @@ TEST(SharedKeyCanonicalizationTests, StandardHeadersFillTheirSlotsCaseInsensitiv
 TEST(SharedKeyCanonicalizationTests, HeadersAreOrderedWithCultureAwareRules) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Get);
-    request.SetUrl("https://account.blob.core.windows.net/container/blob");
+    request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/container/blob"});
     for (const char* name : {"x-ms-meta-a1", "x-ms-meta-b-c", "x-ms-meta-a_", "x-ms-meta-bc"}) {
-        request.AddHeader(AVEVA::HttpHeader{name, "v"});
+        request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{name}, AVEVA::HeaderValue{"v"}));
     }
 
     const std::string toSign = AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request);
@@ -852,7 +885,7 @@ TEST(SharedKeyCanonicalizationTests, HeadersAreOrderedWithCultureAwareRules) {
 TEST(SharedKeyCanonicalizationTests, ResourcePathIsUsedAsSentOnTheWire) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Get);
-    request.SetUrl("https://account.blob.core.windows.net/c/a%2Bb%20c.txt?x=1%202");
+    request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/c/a%2Bb%20c.txt?x=1%202"});
 
     const std::string toSign = AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request);
     EXPECT_NE(toSign.find("/account/c/a%2Bb%20c.txt\nx:1 2"), std::string::npos) << toSign;
@@ -861,7 +894,7 @@ TEST(SharedKeyCanonicalizationTests, ResourcePathIsUsedAsSentOnTheWire) {
 TEST(SharedKeyCanonicalizationTests, QueryKeysAreLowercasedMergedAndValuesAreDecodedAndSorted) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Get);
-    request.SetUrl("https://account.blob.core.windows.net/c/b?Comp=list&COMP=Meta&a=%26b%3Dc");
+    request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/c/b?Comp=list&COMP=Meta&a=%26b%3Dc"});
 
     const std::string toSign = AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request);
     EXPECT_TRUE(toSign.ends_with("/account/c/b\na:&b=c\ncomp:Meta,list")) << toSign;
@@ -870,7 +903,7 @@ TEST(SharedKeyCanonicalizationTests, QueryKeysAreLowercasedMergedAndValuesAreDec
 TEST(SharedKeyCanonicalizationTests, QueryParametersWithoutValuesOrWithEmptyValuesAreSignedWithEmptyValues) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Get);
-    request.SetUrl("https://account.blob.core.windows.net/c/b?flag&a=");
+    request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/c/b?flag&a="});
 
     const std::string toSign = AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request);
     EXPECT_TRUE(toSign.ends_with("/account/c/b\na:\nflag:")) << toSign;
@@ -879,7 +912,7 @@ TEST(SharedKeyCanonicalizationTests, QueryParametersWithoutValuesOrWithEmptyValu
 TEST(SharedKeyCanonicalizationTests, EmptyPathIsSignedAsTheRootResource) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Get);
-    request.SetUrl("https://account.blob.core.windows.net?comp=list");
+    request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net?comp=list"});
 
     const std::string toSign = AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request);
     EXPECT_TRUE(toSign.ends_with("/account/\ncomp:list")) << toSign;
@@ -889,7 +922,7 @@ TEST(SharedKeyCanonicalizationTests, MalformedUrlsAreRejected) {
     for (const char* url : {"", "/container/blob", "http://[::1/c", "https://account.blob.core.windows.net/c%zz"}) {
         AVEVA::HttpRequest request;
         request.SetMethod(HttpMethod::Get);
-        request.SetUrl(url);
+        request.SetUrl(AVEVA::HttpUrl{url});
 
         EXPECT_THROW((void)AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request),
                      std::invalid_argument)
@@ -900,10 +933,12 @@ TEST(SharedKeyCanonicalizationTests, MalformedUrlsAreRejected) {
 TEST(SharedKeyCanonicalizationTests, AuthorizationSupportsRootContainerUnicodeAndAzuritePathStyleEndpoints) {
     HttpRequest pathStyleRequest;
     pathStyleRequest.SetMethod(HttpMethod::Get);
-    pathStyleRequest.SetUrl("http://127.0.0.1:10000/devstoreaccount1/$root/"
-                            "caf%C3%A9%25%2Bplus%20space.txt?comp=metadata&include=snapshots&include=metadata");
-    pathStyleRequest.AddHeader({"x-ms-date", "Sun, 06 Nov 1994 08:49:37 GMT"});
-    pathStyleRequest.AddHeader({"x-ms-version", "2023-11-03"});
+    pathStyleRequest.SetUrl(
+        AVEVA::HttpUrl{"http://127.0.0.1:10000/devstoreaccount1/$root/"
+                       "caf%C3%A9%25%2Bplus%20space.txt?comp=metadata&include=snapshots&include=metadata"});
+    pathStyleRequest.AddHeader(
+        AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-date"}, AVEVA::HeaderValue{"Sun, 06 Nov 1994 08:49:37 GMT"}));
+    pathStyleRequest.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-version"}, AVEVA::HeaderValue{"2023-11-03"}));
 
     EXPECT_EQ(AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("devstoreaccount1", pathStyleRequest),
               "GET\n\n\n\n\n\n\n\n\n\n\n\n"
@@ -915,10 +950,12 @@ TEST(SharedKeyCanonicalizationTests, AuthorizationSupportsRootContainerUnicodeAn
 
     HttpRequest rootContainerRequest;
     rootContainerRequest.SetMethod(HttpMethod::Get);
-    rootContainerRequest.SetUrl(
-        "https://storageaccount.blob.core.windows.net/$root/%E6%96%87%E4%BB%B6%25%2Bname%20space.txt?comp=metadata");
-    rootContainerRequest.AddHeader({"x-ms-date", "Sun, 06 Nov 1994 08:49:37 GMT"});
-    rootContainerRequest.AddHeader({"x-ms-version", "2023-11-03"});
+    rootContainerRequest.SetUrl(AVEVA::HttpUrl{
+        "https://storageaccount.blob.core.windows.net/$root/%E6%96%87%E4%BB%B6%25%2Bname%20space.txt?comp=metadata"});
+    rootContainerRequest.AddHeader(
+        AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-date"}, AVEVA::HeaderValue{"Sun, 06 Nov 1994 08:49:37 GMT"}));
+    rootContainerRequest.AddHeader(
+        AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-version"}, AVEVA::HeaderValue{"2023-11-03"}));
 
     EXPECT_EQ(AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("storageaccount", rootContainerRequest),
               "GET\n\n\n\n\n\n\n\n\n\n\n\n"

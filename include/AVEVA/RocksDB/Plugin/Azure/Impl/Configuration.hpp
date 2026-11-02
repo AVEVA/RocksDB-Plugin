@@ -17,8 +17,6 @@ using RetryCount = Core::StrongInteger<RetryCountTag, int>;
 struct Configuration {
     struct PageBlob {
         static constexpr Core::ByteCount PageSize{512};
-        static constexpr Core::ByteCount DefaultSize = Defaults::DataFileInitialSize;
-        static constexpr Core::ByteCount DefaultBufferSize = Defaults::DataFileBufferSize;
         static constexpr Core::ByteCount MaxPageBlobSize{std::uint64_t{8} << 40};
     };
 
@@ -55,8 +53,6 @@ struct Configuration {
     // How long a reader's GetSize reuses the blob metadata it already fetched before asking the service again.
     static const constexpr std::chrono::milliseconds MetadataCacheTtl = std::chrono::milliseconds(100);
     static const constexpr std::chrono::seconds LogRateLimiterCooldown = std::chrono::seconds(30);
-    // Default cap on bytes held by prefetch buffers across all files of one filesystem.
-    static constexpr Core::ByteCount DefaultPrefetchBudgetBytes = Defaults::MaxPrefetchBytes;
     static constexpr Core::ByteCount MaxCacheSize{std::uint64_t{1024} * 1024 * 1024}; // 1GB
     static constexpr RetryCount MaxClientRetries{8};
     // Caps the backoff between retries. With 8 retries from the 800 ms default initial delay the waits total at most

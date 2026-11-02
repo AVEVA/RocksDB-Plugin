@@ -24,35 +24,50 @@
 namespace AVEVA::RocksDB::Plugin::ConsumerFixtures {
 namespace Azure = AVEVA::RocksDB::Plugin::Azure;
 
-// The registration call with each credential kind, through the single Plugin::Register entry point.
+inline Azure::Plugin::StorageAccounts ServicePrincipalAccountsLikeMain(const std::string& accountUrl) {
+    return Azure::Plugin::AccountPair<Azure::Models::ServicePrincipalStorageInfo>{
+        Azure::Models::ServicePrincipalStorageInfo{
+            Azure::Models::DbName{"mydb"}, Azure::Models::AccountUrl{accountUrl}, Azure::Models::ClientId{"client"},
+            Azure::Models::ClientSecret{"secret"}, Azure::Models::TenantId{"tenant"}},
+        std::nullopt};
+}
+
+inline Azure::Plugin::StorageAccounts ChainedCredentialAccountsLikeMain(const std::string& accountUrl) {
+    return Azure::Plugin::AccountPair<Azure::Models::ChainedCredentialInfo>{
+        Azure::Models::ChainedCredentialInfo{Azure::Models::DbName{"mydb"}, Azure::Models::AccountUrl{accountUrl},
+                                             Azure::Models::ClientId{"client"}, Azure::Models::ClientSecret{"secret"},
+                                             Azure::Models::TenantId{"tenant"}},
+        std::nullopt};
+}
+
+// The registration call with each credential kind, through the single Plugin::Register entry point. The host owns
+// the io_context and keeps it alive until it has unregistered.
 inline rocksdb::Status RegisterServicePrincipalLikeMain(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env,
                                                         std::shared_ptr<rocksdb::Env>* guard,
-                                                        std::shared_ptr<boost::asio::io_context> ioContext,
+                                                        boost::asio::io_context& ioContext,
                                                         const std::string& accountUrl) {
     auto logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
-    Azure::Models::ServicePrincipalStorageInfo primary{"mydb", accountUrl, "client", "secret", "tenant"};
     return Azure::Plugin::Register(
-        configOptions, env, guard,
-        Azure::Plugin::RegisterOptions{
-            .IoContext = std::move(ioContext),
-            .Accounts = Azure::Plugin::AccountPair<Azure::Models::ServicePrincipalStorageInfo>{std::move(primary),
-                                                                                               std::nullopt},
-            .Log = std::move(logger)});
+        configOptions, env, guard, ioContext,
+        Azure::Plugin::RegisterOptions{.Accounts = ServicePrincipalAccountsLikeMain(accountUrl),
+                                       .Log = std::move(logger)});
 }
 
 inline rocksdb::Status RegisterChainedCredentialLikeMain(rocksdb::ConfigOptions& configOptions, rocksdb::Env** env,
                                                          std::shared_ptr<rocksdb::Env>* guard,
-                                                         std::shared_ptr<boost::asio::io_context> ioContext,
+                                                         boost::asio::io_context& ioContext,
                                                          const std::string& accountUrl) {
     auto logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
-    Azure::Models::ChainedCredentialInfo primary{"mydb", accountUrl, "client", "secret", "tenant"};
     return Azure::Plugin::Register(
-        configOptions, env, guard,
-        Azure::Plugin::RegisterOptions{
-            .IoContext = std::move(ioContext),
-            .Accounts =
-                Azure::Plugin::AccountPair<Azure::Models::ChainedCredentialInfo>{std::move(primary), std::nullopt},
-            .Log = std::move(logger)});
+        configOptions, env, guard, ioContext,
+        Azure::Plugin::RegisterOptions{.Accounts = ChainedCredentialAccountsLikeMain(accountUrl),
+                                       .Log = std::move(logger)});
+}
+
+// Drops both registrations before the host destroys its io_context.
+inline void UnregisterLikeMain(const std::string& accountUrl) {
+    Azure::Plugin::Unregister(ServicePrincipalAccountsLikeMain(accountUrl));
+    Azure::Plugin::Unregister(ChainedCredentialAccountsLikeMain(accountUrl));
 }
 
 // Normal RocksDB file usage: everything goes through the rocksdb::FileSystem interface the registered filesystem

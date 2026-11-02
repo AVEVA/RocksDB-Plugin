@@ -127,10 +127,9 @@ FilesystemResult LocalFilesystem::WriteFileAtomic(const std::filesystem::path& f
     }
 }
 
-FilesystemResult LocalFilesystem::RenameFile(const std::filesystem::path& from,
-                                             const std::filesystem::path& to) noexcept {
+FilesystemResult LocalFilesystem::RenameFile(const RenameSource& from, const RenameDestination& to) noexcept {
     std::error_code ec;
-    std::filesystem::rename(from, to, ec);
+    std::filesystem::rename(from.Path(), to.Path(), ec);
     return ec ? FilesystemResult::Failed : FilesystemResult::Succeeded;
 }
 
@@ -141,7 +140,10 @@ FilesystemResult LocalFilesystem::WriteAllBytesToFile(const std::filesystem::pat
         if (!f.is_open())
             return FilesystemResult::Failed;
         f.write(contents.data(), static_cast<std::streamsize>(contents.size()));
-        return f.good() ? FilesystemResult::Succeeded : FilesystemResult::Failed;
+        // Buffered bytes reach the OS only on flush; checking before close would miss a failed final write and let
+        // WriteFileAtomic publish a truncated file.
+        f.close();
+        return f.fail() ? FilesystemResult::Failed : FilesystemResult::Succeeded;
     } catch (...) {
         return FilesystemResult::Failed;
     }

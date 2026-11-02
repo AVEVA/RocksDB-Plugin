@@ -34,10 +34,6 @@ HttpClient::HttpClient(boost::asio::io_context& context, HttpClientOptions optio
 
 HttpClient::~HttpClient() { m_impl->core->Shutdown(); }
 
-std::unique_ptr<HttpClient> HttpClient::Create(boost::asio::io_context& context, HttpClientOptions options) {
-    return std::make_unique<HttpClient>(context, std::move(options));
-}
-
 boost::asio::awaitable<HttpResult> HttpClient::SendAsync(HttpRequest request, HttpRequestOptions options) {
     // Copy the shared_ptr eagerly, before any coroutine is created, so the client can be destroyed while the request
     // is still running even though `co_spawn` does not resume this awaitable until later.

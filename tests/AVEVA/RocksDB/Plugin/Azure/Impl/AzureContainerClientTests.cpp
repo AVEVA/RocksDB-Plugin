@@ -37,6 +37,7 @@ TEST(AzureContainerClientTests, GetBlobSizeReadsTheSizeFromThePageBlobHandedOutB
 
     BasicAzureContainerClient<BlobContainerClientMock> adapter(std::make_shared<ClientRuntime>(context), container);
 
-    EXPECT_EQ(1234, adapter.GetBlobSize("000001.sst", std::stop_token{}).Value());
+    EXPECT_EQ(1234,
+              adapter.GetBlobSize(AVEVA::RocksDB::Plugin::Core::BlobName{"000001.sst"}, std::stop_token{}).Value());
     EXPECT_EQ(1, env.Blob->PropertiesRequests.Value());
 }

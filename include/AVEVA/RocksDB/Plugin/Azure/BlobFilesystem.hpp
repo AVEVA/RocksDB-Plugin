@@ -13,15 +13,14 @@
 #include <vector>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 class BlobFilesystemImpl;
+struct HandleFactory;
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
 namespace AVEVA::RocksDB::Plugin::Azure {
 class RequestFailedException;
 
 class BlobFilesystem final : public rocksdb::FileSystemWrapper {
-    // Declared first so it is released last: the filesystem below must be destroyed while its owner (e.g. a
-    // plugin-owned io_context) is still running.
-    std::shared_ptr<void> m_keepAlive;
+    friend struct Impl::HandleFactory; // the only creator: the constructor takes an implementation type
     std::unique_ptr<Impl::BlobFilesystemImpl> m_filesystem;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
     // Lock, directory and log-rate-limiter bookkeeping. Defined in the .cpp so this header needs neither the
@@ -40,11 +39,11 @@ class BlobFilesystem final : public rocksdb::FileSystemWrapper {
     rocksdb::IOStatus Guard(std::string_view operation, std::string_view path, std::string_view separator,
                             std::string_view path2, F&& f);
 
+    BlobFilesystem(
+        std::shared_ptr<rocksdb::FileSystem> rocksdbFs, std::unique_ptr<Impl::BlobFilesystemImpl> filesystem,
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger);
+
   public:
-    // `keepAlive` is released after the filesystem is destroyed; it holds whatever the filesystem's I/O depends on.
-    BlobFilesystem(std::shared_ptr<rocksdb::FileSystem> rocksdbFs, std::unique_ptr<Impl::BlobFilesystemImpl> filesystem,
-                   std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-                   std::shared_ptr<void> keepAlive = nullptr);
     virtual ~BlobFilesystem() override;
     BlobFilesystem(const BlobFilesystem&) = delete;
     BlobFilesystem& operator=(const BlobFilesystem&) = delete;

@@ -7,6 +7,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/AsyncReadRequest.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/HandleFactory.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LogRateLimiter.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/LockFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Logger.hpp"
@@ -64,20 +65,20 @@ std::string NormalizePath(std::string_view path) {
 
 std::string FormatRequestFailedLogMessage(const RequestFailedException& ex, const std::string_view path = {}) {
     std::ostringstream formattedMessage;
-    formattedMessage << "[" << ex.ErrorCode << "]" << " (Status Code: " << ex.StatusCode.Value() << ") ";
+    formattedMessage << "[" << ex.ErrorCode().Value() << "]" << " (Status Code: " << ex.StatusCode().Value() << ") ";
 
     if (!path.empty()) {
-        if (ex.StatusCode == HttpStatus::NotFound) {
+        if (ex.StatusCode() == HttpStatus::NotFound) {
             formattedMessage << "Blob/path '" << path << "' not found. ";
         } else {
             formattedMessage << "Blob/path '" << path << "'. ";
         }
     }
 
-    formattedMessage << ex.Message;
+    formattedMessage << ex.Message().Value();
     // The request id is what Azure support asks for, so it belongs in the filesystem-level log too.
-    if (!ex.RequestId.empty()) {
-        formattedMessage << " (request id: " << ex.RequestId << ")";
+    if (!ex.RequestId().Value().empty()) {
+        formattedMessage << " (request id: " << ex.RequestId().Value() << ")";
     }
     return formattedMessage.str();
 }
@@ -85,14 +86,13 @@ std::string FormatRequestFailedLogMessage(const RequestFailedException& ex, cons
 
 BlobFilesystem::BlobFilesystem(
     std::shared_ptr<rocksdb::FileSystem> rocksdbFs, std::unique_ptr<Impl::BlobFilesystemImpl> filesystem,
-    std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-    std::shared_ptr<void> keepAlive)
-    : rocksdb::FileSystemWrapper(std::move(rocksdbFs)), m_keepAlive(std::move(keepAlive)),
-      m_filesystem(std::move(filesystem)), m_logger(std::move(logger)), m_state(std::make_unique<State>()) {}
+    std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
+    : rocksdb::FileSystemWrapper(std::move(rocksdbFs)), m_filesystem(std::move(filesystem)),
+      m_logger(std::move(logger)), m_state(std::make_unique<State>()) {}
 
 void BlobFilesystem::LogRequestFailed(const RequestFailedException& ex, std::string_view path) {
-    if (ex.ErrorCode == "BlobNotFound") {
-        const auto result = m_state->BlobNotFoundRateLimiter.CheckAndRecord(ex.ErrorCode.c_str());
+    if (ex.ErrorCode().Value() == "BlobNotFound") {
+        const auto result = m_state->BlobNotFoundRateLimiter.CheckAndRecord(ex.ErrorCode().Value().c_str());
         if (result.decision == Impl::RateDecision::Suppress) {
             return;
         }
@@ -130,7 +130,7 @@ template <class F> rocksdb::IOStatus BlobFilesystem::Guard(std::string_view oper
     } catch (...) {
         // Everything else (invalid arguments, cancellation, fencing, generic and unknown exceptions) shares the
         // translator's mapping so that filesystem-level and file-level operations report the same statuses.
-        return AzureErrorTranslator::FromCurrentException(*m_logger, operation);
+        return AzureErrorTranslator::FromException(*m_logger, std::current_exception(), operation);
     }
 }
 
@@ -225,7 +225,7 @@ rocksdb::IOStatus BlobFilesystem::NewDirectory(const std::string& name, const ro
                                                std::unique_ptr<rocksdb::FSDirectory>* result,
                                                rocksdb::IODebugContext*) {
     return Guard("NewDirectory", name, [&]() -> rocksdb::IOStatus {
-        *result = std::unique_ptr<rocksdb::FSDirectory>(new Directory(m_filesystem->CreateDirectory(name), m_logger));
+        *result = Impl::HandleFactory::Create<Directory>(m_filesystem->CreateDirectory(name), m_logger);
         return rocksdb::IOStatus::OK();
     });
 }
@@ -378,7 +378,7 @@ rocksdb::IOStatus BlobFilesystem::LockFile(const std::string& f, const rocksdb::
                     << "Could not release the lease on '" << f << "' after wrapping it failed";
             }
         }};
-        auto lockFileWrapper = std::make_unique<Plugin::Azure::LockFile>(lock);
+        auto lockFileWrapper = Impl::HandleFactory::Create<Plugin::Azure::LockFile>(lock);
         std::scoped_lock _(m_state->LockFilesMutex);
         m_state->LockFiles.push_back(std::move(lockFileWrapper));
         *l = m_state->LockFiles.back().get();
@@ -414,8 +414,8 @@ rocksdb::IOStatus BlobFilesystem::GetTestDirectory(const rocksdb::IOOptions& opt
 rocksdb::IOStatus BlobFilesystem::NewLogger(const std::string& fname, const rocksdb::IOOptions&,
                                             std::shared_ptr<rocksdb::Logger>* result, rocksdb::IODebugContext*) {
     return Guard("NewLogger", fname, [&]() -> rocksdb::IOStatus {
-        auto impl = m_filesystem->CreateLogger(fname, rocksdb::Logger::kDefaultLogLevel);
-        *result = std::shared_ptr<rocksdb::Logger>(new Plugin::Azure::Logger(std::move(impl), m_logger));
+        auto impl = m_filesystem->CreateLogger(fname);
+        *result = Impl::HandleFactory::Create<Plugin::Azure::Logger>(std::move(impl), m_logger);
         return rocksdb::IOStatus::OK();
     });
 }

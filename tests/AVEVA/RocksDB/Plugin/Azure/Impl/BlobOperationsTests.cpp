@@ -20,6 +20,7 @@
 #include <boost/asio/thread_pool.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/use_future.hpp>
+#include <cstdint>
 
 #include <gtest/gtest.h>
 
@@ -37,6 +38,7 @@
 #include <vector>
 
 namespace BlobOperations = AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations;
+using AVEVA::RocksDB::Plugin::Azure::Impl::LeaseOwnerId;
 using ServerSideCopy = BlobOperations::ServerSideCopy;
 using AVEVA::HttpResponse;
 using AVEVA::AzureClient::Tests::FakeHttpClient;
@@ -47,6 +49,13 @@ using AVEVA::RocksDB::Plugin::Azure::RequestFailedException;
 using AVEVA::RocksDB::Plugin::Azure::Impl::SignedBytes;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobEnvironment;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobServer;
+using AVEVA::RocksDB::Plugin::Core::ByteCount;
+using AVEVA::RocksDB::Plugin::Core::ByteOffset;
+
+namespace {
+// Test sizes are small non-negative literals or products of the chunk size.
+ByteCount Bytes(const int64_t size) { return ByteCount{static_cast<uint64_t>(size)}; }
+} // namespace
 
 namespace {
 // Runs the real PageBlobClient against scripted HTTP responses.
@@ -63,20 +72,36 @@ class BlobOperationsTests : public ::testing::Test {
 };
 } // namespace
 
+TEST_F(BlobOperationsTests, BlockingFromAnIoThreadIsRefusedWithoutSendingARequest) {
+    std::promise<std::exception_ptr> outcome;
+    boost::asio::post(m_blob->get_executor(), [&] {
+        try {
+            (void)BlobOperations::GetInfo(*m_blob);
+            outcome.set_value(nullptr);
+        } catch (...) {
+            outcome.set_value(std::current_exception());
+        }
+    });
+
+    const auto error = outcome.get_future().get();
+    ASSERT_TRUE(error);
+    EXPECT_THROW(std::rethrow_exception(error), AVEVA::RocksDB::Plugin::Azure::BlockingOnIoThreadException);
+    EXPECT_EQ(m_httpClient.RequestCount(), 0U);
+}
+
 TEST_F(BlobOperationsTests, DownloadToFileWithZeroLengthCreatesEmptyFileWithoutRequest) {
-    const auto path = std::filesystem::temp_directory_path() /
-                      ("aveva-blobops-empty-test-" + std::to_string(std::random_device{}()) + ".bin");
+    const AVEVA::RocksDB::Plugin::Core::Mocks::TempDirectory directory{"blobops-empty"};
+    const auto path = directory.Path() / "empty.bin";
     {
         std::ofstream stale(path, std::ios::binary);
         stale << "stale contents";
     }
 
-    BlobOperations::DownloadToFile(*m_blob, path, 0, 0);
+    BlobOperations::DownloadToFile(*m_blob, path, ByteOffset{0}, ByteCount{0});
 
     EXPECT_TRUE(std::filesystem::exists(path));
     EXPECT_EQ(0U, std::filesystem::file_size(path));
-    EXPECT_TRUE(m_httpClient.NoRequestMade());
-    std::filesystem::remove(path);
+    EXPECT_EQ(m_httpClient.RequestCount(), 0U);
 }
 
 TEST_F(BlobOperationsTests, DownloadLargerThanTheBufferFailsWithoutWritingPastIt) {
@@ -86,7 +111,8 @@ TEST_F(BlobOperationsTests, DownloadLargerThanTheBufferFailsWithoutWritingPastIt
                      std::string(16, 'x')});
 
     std::vector<char> storage(16, '#');
-    EXPECT_ANY_THROW((void)BlobOperations::DownloadToBuffer(*m_blob, std::span<char>(storage).first(8), 0, 16));
+    EXPECT_ANY_THROW((void)BlobOperations::DownloadToBuffer(*m_blob, std::span<char>(storage).first(8), ByteOffset{0},
+                                                            ByteCount{16}));
     EXPECT_EQ(std::string(8, '#'), std::string(storage.begin() + 8, storage.end()));
 }
 
@@ -95,7 +121,8 @@ TEST_F(BlobOperationsTests, DownloadToBufferRejectsPartialContentWithoutContentR
         HttpResponse{::AVEVA::HttpStatus::PartialContent, MakeCanonicalSuccessHeaders({}), std::string(4, 'y')});
 
     std::vector<char> buffer(8);
-    EXPECT_ANY_THROW((void)BlobOperations::DownloadToBuffer(*m_blob, std::span<char>(buffer), 0, 4));
+    EXPECT_ANY_THROW(
+        (void)BlobOperations::DownloadToBuffer(*m_blob, std::span<char>(buffer), ByteOffset{0}, ByteCount{4}));
 }
 
 TEST_F(BlobOperationsTests, DownloadToBufferAcceptsPartialContentWithMatchingContentRange) {
@@ -104,7 +131,8 @@ TEST_F(BlobOperationsTests, DownloadToBufferAcceptsPartialContentWithMatchingCon
                                               std::string(4, 'y')});
 
     std::vector<char> buffer(8);
-    EXPECT_EQ(4, BlobOperations::DownloadToBuffer(*m_blob, std::span<char>(buffer), 0, 4));
+    EXPECT_EQ(ByteCount{4},
+              BlobOperations::DownloadToBuffer(*m_blob, std::span<char>(buffer), ByteOffset{0}, ByteCount{4}));
 }
 
 TEST_F(BlobOperationsTests, DownloadAsyncRejectsBodyShorterThanContentRange) {
@@ -114,7 +142,8 @@ TEST_F(BlobOperationsTests, DownloadAsyncRejectsBodyShorterThanContentRange) {
 
     std::promise<std::exception_ptr> done;
     AVEVA::RocksDB::Plugin::Azure::Impl::StartOperation(
-        m_blob->get_executor(), BlobOperations::DownloadForReadAsync(*m_blob, 0, 8, std::string()), std::stop_token{},
+        m_blob->get_executor(),
+        BlobOperations::DownloadForReadAsync(*m_blob, ByteOffset{0}, ByteCount{8}, std::string()), std::stop_token{},
         [&](std::exception_ptr error, BlobOperations::DownloadedBytes) { done.set_value(error); });
 
     auto result = done.get_future();
@@ -123,8 +152,8 @@ TEST_F(BlobOperationsTests, DownloadAsyncRejectsBodyShorterThanContentRange) {
 }
 
 TEST_F(BlobOperationsTests, StopRequestCancelsAnAcceptedStalledCall) {
-    m_httpClient.EnqueueDeferredResponse(
-        HttpResponse{::AVEVA::HttpStatus::Ok, MakeCanonicalSuccessHeaders({}), std::string()});
+    m_httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::Ok, MakeCanonicalSuccessHeaders({}), std::string()},
+                                 {}, AVEVA::AzureClient::Tests::Delivery::Deferred);
     std::stop_source stop;
     std::promise<void> finished;
     std::thread caller([&] {
@@ -137,7 +166,7 @@ TEST_F(BlobOperationsTests, StopRequestCancelsAnAcceptedStalledCall) {
     stop.request_stop();
     EXPECT_EQ(std::future_status::ready, done.wait_for(std::chrono::seconds(10)));
     if (done.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
-        EXPECT_TRUE(m_httpClient.CompleteNext());
+        EXPECT_EQ(m_httpClient.CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     }
     caller.join();
 }
@@ -147,16 +176,18 @@ TEST_F(BlobOperationsTests, AlreadyStoppedTokenCancelsWithoutStartingARequest) {
     stop.request_stop();
 
     EXPECT_THROW((void)BlobOperations::GetInfo(*m_blob, stop.get_token()), std::system_error);
-    EXPECT_TRUE(m_httpClient.NoRequestMade());
+    EXPECT_EQ(m_httpClient.RequestCount(), 0U);
 }
 
 TEST_F(BlobOperationsTests, DownloadToBufferWithZeroLengthReturnsZeroWithoutRequest) {
     std::vector<char> buffer(8);
-    EXPECT_EQ(0, BlobOperations::DownloadToBuffer(*m_blob, std::span<char>(buffer), 0, 0));
-    EXPECT_TRUE(m_httpClient.NoRequestMade());
+    EXPECT_EQ(ByteCount{0},
+              BlobOperations::DownloadToBuffer(*m_blob, std::span<char>(buffer), ByteOffset{0}, ByteCount{0}));
+    EXPECT_EQ(m_httpClient.RequestCount(), 0U);
 }
 
 namespace {
+using AVEVA::RocksDB::Plugin::Azure::Impl::ConcurrencyLimit;
 using AVEVA::RocksDB::Plugin::Azure::Impl::TaskGroup;
 
 // Runs a coroutine on a small thread pool so children genuinely overlap, and returns its outcome.
@@ -165,7 +196,9 @@ template <typename TBody> void RunOnPool(TBody body) {
     boost::asio::co_spawn(pool, std::move(body), boost::asio::use_future).get();
 }
 
-boost::asio::awaitable<void> Occupy(std::atomic<int>& running, std::atomic<int>& peak, const bool fail) {
+enum class ChildOutcome : std::uint8_t { Succeed, Fail };
+
+boost::asio::awaitable<void> Occupy(std::atomic<int>& running, std::atomic<int>& peak, const ChildOutcome outcome) {
     const auto now = running.fetch_add(1) + 1;
     auto seen = peak.load();
     while (now > seen && !peak.compare_exchange_weak(seen, now)) {
@@ -173,7 +206,7 @@ boost::asio::awaitable<void> Occupy(std::atomic<int>& running, std::atomic<int>&
     boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor, std::chrono::milliseconds(20));
     co_await timer.async_wait(boost::asio::use_awaitable);
     running.fetch_sub(1);
-    if (fail) {
+    if (outcome == ChildOutcome::Fail) {
         throw std::runtime_error("child failed");
     }
 }
@@ -183,10 +216,10 @@ TEST(TaskGroupTests, NeverRunsMoreChildrenThanTheLimitAndWaitsForAllOfThem) {
     std::atomic<int> running{0};
     std::atomic<int> peak{0};
     RunOnPool([&]() -> boost::asio::awaitable<void> {
-        TaskGroup group(co_await boost::asio::this_coro::executor, 2);
+        TaskGroup group(co_await boost::asio::this_coro::executor, ConcurrencyLimit{2});
         co_await group.Scope([&](TaskGroup& tasks) -> boost::asio::awaitable<void> {
             for (int i = 0; i < 8; ++i) {
-                co_await tasks.Spawn(Occupy(running, peak, false));
+                co_await tasks.Spawn(Occupy(running, peak, ChildOutcome::Succeed));
             }
         });
     });
@@ -199,12 +232,12 @@ TEST(TaskGroupTests, RethrowsTheFirstChildFailureOnlyAfterEveryChildHasFinished)
     std::atomic<int> peak{0};
     std::atomic<bool> threwOnlyWhenIdle{false};
     RunOnPool([&]() -> boost::asio::awaitable<void> {
-        TaskGroup group(co_await boost::asio::this_coro::executor, 4);
+        TaskGroup group(co_await boost::asio::this_coro::executor, ConcurrencyLimit{4});
         try {
             co_await group.Scope([&](TaskGroup& tasks) -> boost::asio::awaitable<void> {
-                co_await tasks.Spawn(Occupy(running, peak, true));
-                co_await tasks.Spawn(Occupy(running, peak, false));
-                co_await tasks.Spawn(Occupy(running, peak, false));
+                co_await tasks.Spawn(Occupy(running, peak, ChildOutcome::Fail));
+                co_await tasks.Spawn(Occupy(running, peak, ChildOutcome::Succeed));
+                co_await tasks.Spawn(Occupy(running, peak, ChildOutcome::Succeed));
             });
         } catch (const std::runtime_error&) {
             threwOnlyWhenIdle = running.load() == 0;
@@ -218,12 +251,12 @@ TEST(TaskGroupTests, AFailedChildStopsFurtherChildrenFromStarting) {
     std::atomic<int> peak{0};
     std::atomic<int> started{0};
     RunOnPool([&]() -> boost::asio::awaitable<void> {
-        TaskGroup group(co_await boost::asio::this_coro::executor, 1);
+        TaskGroup group(co_await boost::asio::this_coro::executor, ConcurrencyLimit{1});
         try {
             co_await group.Scope([&](TaskGroup& tasks) -> boost::asio::awaitable<void> {
                 for (int i = 0; i < 10; ++i) {
                     ++started;
-                    co_await tasks.Spawn(Occupy(running, peak, true));
+                    co_await tasks.Spawn(Occupy(running, peak, ChildOutcome::Fail));
                 }
             });
         } catch (const std::runtime_error&) {
@@ -247,14 +280,14 @@ TEST_F(BlobOperationsFakeBlobTests, GetEtagReadsThePropertiesOfTheBlob) {
 }
 
 TEST_F(BlobOperationsFakeBlobTests, SetCapacityResizesTheBlobToTheRequestedSize) {
-    BlobOperations::SetCapacity(*m_env.Runtime, *m_env.Client, 1024);
+    BlobOperations::SetCapacity(m_env.Runtime, *m_env.Client, ByteCount{1024});
 
     EXPECT_EQ((std::vector<int64_t>{1024}), m_env.Blob->CapacityWrites);
     EXPECT_EQ(1024, BlobOperations::GetInfo(*m_env.Client).Capacity);
 }
 
 TEST_F(BlobOperationsFakeBlobTests, SetSizeRecordsTheSizeInTheBlobMetadata) {
-    BlobOperations::SetSize(*m_env.Runtime, *m_env.Client, 77);
+    BlobOperations::SetSize(m_env.Runtime, *m_env.Client, ByteCount{77});
 
     EXPECT_EQ(77, BlobOperations::GetInfo(*m_env.Client).Size);
     EXPECT_EQ((std::vector<int64_t>{77}), m_env.Blob->SizeWrites);
@@ -287,7 +320,7 @@ TEST_F(BlobOperationsFakeBlobTests, UploadPagesStoresTheBytesAtTheOffset) {
     // A real page blob rejects writes past its capacity (the old hand-written fake grew silently).
     m_env.Blob->SetCapacity(1024);
 
-    BlobOperations::UploadPages(*m_env.Runtime, *m_env.Client, page, 512);
+    BlobOperations::UploadPages(m_env.Runtime, *m_env.Client, page, ByteOffset{512});
 
     ASSERT_EQ(1U, m_env.Blob->Uploads.size());
     EXPECT_EQ(512, m_env.Blob->Uploads[0].Offset);
@@ -309,7 +342,8 @@ TEST_F(BlobOperationsFakeBlobTests, CopyPagesTransfersOnlyThePopulatedRanges) {
     const auto destinationBlob = MakeDestination(4096);
     auto& destination = *destinationBlob;
 
-    BlobOperations::CopyPages(*m_env.Runtime, *m_env.Client, *destination.Client, 4096, m_env.Blob->ETag());
+    BlobOperations::CopyPages(m_env.Runtime, BlobOperations::Source(*m_env.Client),
+                              BlobOperations::Destination(*destination.Client), Bytes(4096), m_env.Blob->ETag());
 
     EXPECT_EQ(m_env.Blob->Bytes(), destination.Blob->Bytes());
     ASSERT_EQ(2U, destination.Blob->Uploads.size());
@@ -328,7 +362,8 @@ TEST_F(BlobOperationsFakeBlobTests, CopyPagesKeepsMoreThanOneUploadInFlight) {
     destination.Blob->DeferUploads = true;
 
     auto copy = std::async(std::launch::async, [&] {
-        BlobOperations::CopyPages(*m_env.Runtime, *m_env.Client, *destination.Client, 4096, m_env.Blob->ETag());
+        BlobOperations::CopyPages(m_env.Runtime, BlobOperations::Source(*m_env.Client),
+                                  BlobOperations::Destination(*destination.Client), Bytes(4096), m_env.Blob->ETag());
     });
 
     // Both uploads are held at once: the second started before the first finished.
@@ -345,7 +380,8 @@ TEST_F(BlobOperationsFakeBlobTests, CopyPagesOfAnEmptyBlobTransfersNothing) {
     const auto destinationBlob = MakeDestination(2048);
     auto& destination = *destinationBlob;
 
-    BlobOperations::CopyPages(*m_env.Runtime, *m_env.Client, *destination.Client, 0, m_env.Blob->ETag());
+    BlobOperations::CopyPages(m_env.Runtime, BlobOperations::Source(*m_env.Client),
+                              BlobOperations::Destination(*destination.Client), Bytes(0), m_env.Blob->ETag());
 
     EXPECT_TRUE(destination.Blob->Uploads.empty());
     EXPECT_TRUE(m_env.Blob->Downloads.empty());
@@ -357,7 +393,8 @@ TEST_F(BlobOperationsFakeBlobTests, CopyPagesClipsToTheLogicalSizeAndPadsTheLast
     const auto destinationBlob = MakeDestination(2048);
     auto& destination = *destinationBlob;
 
-    BlobOperations::CopyPages(*m_env.Runtime, *m_env.Client, *destination.Client, 700, m_env.Blob->ETag());
+    BlobOperations::CopyPages(m_env.Runtime, BlobOperations::Source(*m_env.Client),
+                              BlobOperations::Destination(*destination.Client), Bytes(700), m_env.Blob->ETag());
 
     ASSERT_EQ(1U, destination.Blob->Uploads.size());
     ASSERT_EQ(1024U, destination.Blob->Uploads[0].Data.size());
@@ -373,7 +410,9 @@ TEST_F(BlobOperationsFakeBlobTests, CopyPagesSplitsRangesLargerThanTheCopyChunk)
     const auto destinationBlob = MakeDestination(chunk + 1024);
     auto& destination = *destinationBlob;
 
-    BlobOperations::CopyPages(*m_env.Runtime, *m_env.Client, *destination.Client, chunk + 1024, m_env.Blob->ETag());
+    BlobOperations::CopyPages(m_env.Runtime, BlobOperations::Source(*m_env.Client),
+                              BlobOperations::Destination(*destination.Client), Bytes(chunk + 1024),
+                              m_env.Blob->ETag());
 
     ASSERT_EQ(2U, destination.Blob->Uploads.size());
     EXPECT_EQ(chunk, static_cast<int64_t>(destination.Blob->Uploads[0].Data.size()));
@@ -387,9 +426,10 @@ TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyTransfersOnlyThePopulatedRange
     m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin() + 2048, 1024, 'b'); });
     const auto destination = m_env.Blob->AddBlob("copy.sst", 4096);
 
-    EXPECT_EQ(
-        BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, 4096, m_env.Blob->ETag()),
-        ServerSideCopy::Done);
+    EXPECT_EQ(BlobOperations::CopyPagesServerSide(m_env.Runtime, BlobOperations::Source(*m_env.Client),
+                                                  BlobOperations::Destination(*destination), Bytes(4096),
+                                                  m_env.Blob->ETag()),
+              ServerSideCopy::Done);
 
     EXPECT_EQ(m_env.Blob->Bytes(), m_env.Blob->BlobBytes("copy.sst"));
     ASSERT_EQ(2U, m_env.Blob->PageCopies.size());
@@ -405,7 +445,9 @@ TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyOfAnEmptyBlobSendsNothing) {
     m_env.Fill(2048, '\0');
     const auto destination = m_env.Blob->AddBlob("copy.sst", 2048);
 
-    EXPECT_EQ(BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, 0, m_env.Blob->ETag()),
+    EXPECT_EQ(BlobOperations::CopyPagesServerSide(m_env.Runtime, BlobOperations::Source(*m_env.Client),
+                                                  BlobOperations::Destination(*destination), Bytes(0),
+                                                  m_env.Blob->ETag()),
               ServerSideCopy::Done);
 
     EXPECT_TRUE(m_env.Blob->PageCopies.empty());
@@ -415,7 +457,9 @@ TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyRoundsTheLastChunkUpToAWholePa
     m_env.Fill(2048, 'z');
     const auto destination = m_env.Blob->AddBlob("copy.sst", 2048);
 
-    EXPECT_EQ(BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, 700, m_env.Blob->ETag()),
+    EXPECT_EQ(BlobOperations::CopyPagesServerSide(m_env.Runtime, BlobOperations::Source(*m_env.Client),
+                                                  BlobOperations::Destination(*destination), Bytes(700),
+                                                  m_env.Blob->ETag()),
               ServerSideCopy::Done);
 
     ASSERT_EQ(1U, m_env.Blob->PageCopies.size());
@@ -428,9 +472,10 @@ TEST_F(BlobOperationsFakeBlobTests, ServerSideCopySplitsRangesLargerThanTheCopyC
     m_env.Fill(total, 'c');
     const auto destination = m_env.Blob->AddBlob("copy.sst", total);
 
-    EXPECT_EQ(
-        BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, total, m_env.Blob->ETag()),
-        ServerSideCopy::Done);
+    EXPECT_EQ(BlobOperations::CopyPagesServerSide(m_env.Runtime, BlobOperations::Source(*m_env.Client),
+                                                  BlobOperations::Destination(*destination), Bytes(total),
+                                                  m_env.Blob->ETag()),
+              ServerSideCopy::Done);
 
     EXPECT_EQ(7U, m_env.Blob->PageCopies.size());
     EXPECT_EQ(m_env.Blob->Bytes(), m_env.Blob->BlobBytes("copy.sst"));
@@ -441,9 +486,10 @@ TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyReportsAnUnauthorizedSourceSoT
     m_env.Blob->RequireCopySourceAuthorization = true;
     const auto destination = m_env.Blob->AddBlob("copy.sst", 1024);
 
-    EXPECT_EQ(
-        BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, 1024, m_env.Blob->ETag()),
-        ServerSideCopy::Declined);
+    EXPECT_EQ(BlobOperations::CopyPagesServerSide(m_env.Runtime, BlobOperations::Source(*m_env.Client),
+                                                  BlobOperations::Destination(*destination), Bytes(1024),
+                                                  m_env.Blob->ETag()),
+              ServerSideCopy::Declined);
 
     EXPECT_EQ(1U, m_env.Blob->PageCopies.size());
 }
@@ -459,7 +505,9 @@ TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyIsSkippedWhenNeitherSideCanAut
     FakeBlobServer::BlobClientType destination(m_env.Http, sharedKeyOptions);
     const auto requestsBefore = m_env.Blob->PageCopies.size();
 
-    EXPECT_EQ(BlobOperations::CopyPagesServerSide(*m_env.Runtime, source, destination, 1024, m_env.Blob->ETag()),
+    EXPECT_EQ(BlobOperations::CopyPagesServerSide(m_env.Runtime, BlobOperations::Source(source),
+                                                  BlobOperations::Destination(destination), Bytes(1024),
+                                                  m_env.Blob->ETag()),
               ServerSideCopy::Declined);
 
     EXPECT_EQ(requestsBefore, m_env.Blob->PageCopies.size());
@@ -471,13 +519,16 @@ TEST_F(BlobOperationsFakeBlobTests, ServerSideCopySendsNothingWhenPlanningExhaus
     m_env.Blob->Fault =
         [this](const FakeBlobServer::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
         if (operation == FakeBlobServer::Operation::GetPageRanges) {
-            m_env.Runtime->SetLeaseDeadline(this, std::chrono::steady_clock::now() - std::chrono::seconds(1));
+            m_env.Runtime->Fence().SetLeaseDeadline(LeaseOwnerId{this},
+                                                    std::chrono::steady_clock::now() - std::chrono::seconds(1));
         }
         return std::nullopt;
     };
-    m_env.Runtime->SetLeaseDeadline(this, std::chrono::steady_clock::now() + std::chrono::minutes(5));
+    m_env.Runtime->Fence().SetLeaseDeadline(LeaseOwnerId{this},
+                                            std::chrono::steady_clock::now() + std::chrono::minutes(5));
 
-    EXPECT_THROW((void)BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, 4096,
+    EXPECT_THROW((void)BlobOperations::CopyPagesServerSide(m_env.Runtime, BlobOperations::Source(*m_env.Client),
+                                                           BlobOperations::Destination(*destination), Bytes(4096),
                                                            m_env.Blob->ETag()),
                  AVEVA::RocksDB::Plugin::Azure::WritesFencedException);
 
@@ -488,20 +539,23 @@ TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyBoundsLaterRequestsByTheRemain
     const auto chunk = SignedBytes(AVEVA::RocksDB::Plugin::Azure::Impl::Configuration::Transfer::MaxCopyChunkSize);
     m_env.Fill(chunk * 3, 'q');
     const auto destination = m_env.Blob->AddBlob("copy.sst", chunk * 3);
-    m_env.Runtime->SetLeaseDeadline(this, std::chrono::steady_clock::now() + std::chrono::minutes(5));
+    m_env.Runtime->Fence().SetLeaseDeadline(LeaseOwnerId{this},
+                                            std::chrono::steady_clock::now() + std::chrono::minutes(5));
     // The first copy shrinks the lease budget, as a slow earlier request would.
     int copies = 0;
     m_env.Blob->Fault =
         [&](const FakeBlobServer::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
         if (operation == FakeBlobServer::Operation::UploadPagesFromUrl && ++copies == 1) {
-            m_env.Runtime->SetLeaseDeadline(this, std::chrono::steady_clock::now() + std::chrono::seconds(2));
+            m_env.Runtime->Fence().SetLeaseDeadline(LeaseOwnerId{this},
+                                                    std::chrono::steady_clock::now() + std::chrono::seconds(2));
         }
         return std::nullopt;
     };
 
-    EXPECT_EQ(
-        BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, chunk * 3, m_env.Blob->ETag()),
-        ServerSideCopy::Done);
+    EXPECT_EQ(BlobOperations::CopyPagesServerSide(m_env.Runtime, BlobOperations::Source(*m_env.Client),
+                                                  BlobOperations::Destination(*destination), Bytes(chunk * 3),
+                                                  m_env.Blob->ETag()),
+              ServerSideCopy::Done);
 
     ASSERT_EQ(3U, m_env.Blob->PageCopies.size());
     EXPECT_GT(m_env.Blob->PageCopies[0].Timeout, std::chrono::seconds(2));
@@ -513,9 +567,10 @@ TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyFailsWhenTheSourceChangedSince
     m_env.Fill(1024, 'q');
     const auto destination = m_env.Blob->AddBlob("copy.sst", 1024);
 
-    EXPECT_THROW(
-        (void)BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, 1024, "\"stale\""),
-        RequestFailedException);
+    EXPECT_THROW((void)BlobOperations::CopyPagesServerSide(m_env.Runtime, BlobOperations::Source(*m_env.Client),
+                                                           BlobOperations::Destination(*destination), Bytes(1024),
+                                                           "\"stale\""),
+                 RequestFailedException);
 }
 
 TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyFailsWhenTheSourceChangesMidCopy) {
@@ -531,7 +586,8 @@ TEST_F(BlobOperationsFakeBlobTests, ServerSideCopyFailsWhenTheSourceChangesMidCo
     };
     const auto destination = m_env.Blob->AddBlob("copy.sst", chunk * 2);
 
-    EXPECT_THROW((void)BlobOperations::CopyPagesServerSide(*m_env.Runtime, *m_env.Client, *destination, chunk * 2,
+    EXPECT_THROW((void)BlobOperations::CopyPagesServerSide(m_env.Runtime, BlobOperations::Source(*m_env.Client),
+                                                           BlobOperations::Destination(*destination), Bytes(chunk * 2),
                                                            m_env.Blob->ETag()),
                  RequestFailedException);
 }
@@ -541,7 +597,8 @@ TEST_F(BlobOperationsFakeBlobTests, CopyPagesFailsWhenTheSourceChangedSincePlann
     const auto destinationBlob = MakeDestination(1024);
     auto& destination = *destinationBlob;
 
-    EXPECT_THROW(BlobOperations::CopyPages(*m_env.Runtime, *m_env.Client, *destination.Client, 1024, "\"stale\""),
+    EXPECT_THROW(BlobOperations::CopyPages(m_env.Runtime, BlobOperations::Source(*m_env.Client),
+                                           BlobOperations::Destination(*destination.Client), Bytes(1024), "\"stale\""),
                  RequestFailedException);
     EXPECT_TRUE(destination.Blob->Uploads.empty());
 }
@@ -560,9 +617,10 @@ TEST_F(BlobOperationsFakeBlobTests, CopyPagesFailsWhenTheSourceChangesMidCopy) {
     const auto destinationBlob = MakeDestination(1024);
     auto& destination = *destinationBlob;
 
-    EXPECT_THROW(
-        BlobOperations::CopyPages(*m_env.Runtime, *m_env.Client, *destination.Client, 1024, m_env.Blob->ETag()),
-        RequestFailedException);
+    EXPECT_THROW(BlobOperations::CopyPages(m_env.Runtime, BlobOperations::Source(*m_env.Client),
+                                           BlobOperations::Destination(*destination.Client), Bytes(1024),
+                                           m_env.Blob->ETag()),
+                 RequestFailedException);
 }
 
 namespace {
@@ -590,7 +648,7 @@ TEST_F(DownloadToFileTests, FullBlobIsWrittenToTheFile) {
     m_env.Fill(4096, 'f');
     const auto path = m_dir.Path() / "full.sst";
 
-    BlobOperations::DownloadToFile(*m_env.Client, path, 0, 4096);
+    BlobOperations::DownloadToFile(*m_env.Client, path, ByteOffset{0}, ByteCount{4096});
 
     EXPECT_EQ(std::string(4096, 'f'), ReadAll(path));
 }
@@ -600,7 +658,7 @@ TEST_F(DownloadToFileTests, OnlyTheRequestedRangeIsWritten) {
     m_env.Blob->WithPrimaryBlob([](auto& b) { std::fill(b.Data.begin() + 1024, b.Data.begin() + 2048, 'b'); });
     const auto path = m_dir.Path() / "range.sst";
 
-    BlobOperations::DownloadToFile(*m_env.Client, path, 1024, 1024);
+    BlobOperations::DownloadToFile(*m_env.Client, path, ByteOffset{1024}, ByteCount{1024});
 
     EXPECT_EQ(std::string(1024, 'b'), ReadAll(path));
 }
@@ -616,7 +674,8 @@ TEST_F(DownloadToFileTests, MissingBlobThrowsAndLeavesNoFile) {
     };
     const auto path = m_dir.Path() / "missing.sst";
 
-    EXPECT_THROW(BlobOperations::DownloadToFile(*m_env.Client, path, 0, 1024), RequestFailedException);
+    EXPECT_THROW(BlobOperations::DownloadToFile(*m_env.Client, path, ByteOffset{0}, ByteCount{1024}),
+                 RequestFailedException);
     EXPECT_FALSE(std::filesystem::exists(path));
     EXPECT_EQ(0U, FilesInDirectory());
 }
@@ -626,7 +685,7 @@ TEST_F(DownloadToFileTests, ShortBodyThrowsAndDoesNotLeaveATruncatedFile) {
     m_env.Blob->DownloadOverride = [](const FakeBlobServer::DownloadRequest&) { return std::string(100, 'x'); };
     const auto path = m_dir.Path() / "short.sst";
 
-    EXPECT_ANY_THROW(BlobOperations::DownloadToFile(*m_env.Client, path, 0, 4096));
+    EXPECT_ANY_THROW(BlobOperations::DownloadToFile(*m_env.Client, path, ByteOffset{0}, ByteCount{4096}));
     EXPECT_FALSE(std::filesystem::exists(path));
     EXPECT_EQ(0U, FilesInDirectory());
 }
@@ -643,11 +702,11 @@ TEST_F(DownloadToFileTests, TransientServerErrorIsRetriedAndTheDownloadSucceeds)
     };
     const auto path = m_dir.Path() / "retried.sst";
     auto options = MakeBlobClientOptions("files", "test.sst");
-    options.Retry.MaxRetries = 2;
+    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{2U};
     options.Retry.InitialDelay = std::chrono::milliseconds{0};
     FakeBlobServer::BlobClientType retrying(m_env.Http, options);
 
-    BlobOperations::DownloadToFile(retrying, path, 0, 2048);
+    BlobOperations::DownloadToFile(retrying, path, ByteOffset{0}, ByteCount{2048});
 
     EXPECT_GE(attempts.load(), 2);
     EXPECT_EQ(std::string(2048, 'r'), ReadAll(path));
@@ -805,20 +864,22 @@ TEST(DownloadBufferPoolTests, OversizedBuffersAreNotRetained) {
 }
 
 TEST_F(BlobOperationsTests, DownloadAsyncStopAfterAcceptanceCancelsTheDeferredTransferExactlyOnce) {
-    m_httpClient.EnqueueDeferredResponse(HttpResponse{::AVEVA::HttpStatus::PartialContent,
-                                                      MakeCanonicalSuccessHeaders({{"Content-Range", "bytes 0-7/8"}}),
-                                                      std::string(8, 'z')});
+    m_httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::PartialContent,
+                                              MakeCanonicalSuccessHeaders({{"Content-Range", "bytes 0-7/8"}}),
+                                              std::string(8, 'z')},
+                                 {}, AVEVA::AzureClient::Tests::Delivery::Deferred);
     std::stop_source source;
     std::atomic<int> completions{0};
     std::promise<std::exception_ptr> done;
     AVEVA::RocksDB::Plugin::Azure::Impl::StartOperation(
-        m_blob->get_executor(), BlobOperations::DownloadForReadAsync(*m_blob, 0, 8, std::string()), source.get_token(),
+        m_blob->get_executor(),
+        BlobOperations::DownloadForReadAsync(*m_blob, ByteOffset{0}, ByteCount{8}, std::string()), source.get_token(),
         [&](std::exception_ptr error, BlobOperations::DownloadedBytes) {
             if (completions.fetch_add(1) == 0) {
                 done.set_value(error);
             }
         });
-    ASSERT_TRUE(m_httpClient.WaitForRequest(1));
+    ASSERT_EQ(m_httpClient.WaitForRequest(1), AVEVA::AzureClient::Tests::WaitOutcome::Done);
 
     source.request_stop();
 
@@ -836,7 +897,8 @@ TEST_F(BlobOperationsTests, DownloadAsyncCompletingBeforeTheStopIsRequestedLeave
     std::stop_source source;
     std::promise<std::exception_ptr> done;
     AVEVA::RocksDB::Plugin::Azure::Impl::StartOperation(
-        m_blob->get_executor(), BlobOperations::DownloadForReadAsync(*m_blob, 0, 8, std::string()), source.get_token(),
+        m_blob->get_executor(),
+        BlobOperations::DownloadForReadAsync(*m_blob, ByteOffset{0}, ByteCount{8}, std::string()), source.get_token(),
         [&](std::exception_ptr error, BlobOperations::DownloadedBytes) { done.set_value(error); });
     auto result = done.get_future();
     ASSERT_EQ(std::future_status::ready, result.wait_for(std::chrono::seconds(10)));

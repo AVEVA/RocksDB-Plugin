@@ -9,12 +9,34 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>
 namespace AVEVA::RocksDB::Plugin::Core {
 /// <summary>Whether a filesystem operation did what was asked.</summary>
 enum class FilesystemResult : std::uint8_t {
     Succeeded,
     Failed,
 };
+
+/// <summary>
+/// A path with a role of its own, so the two ends of a rename cannot be swapped. Construction is explicit.
+/// </summary>
+template <typename Tag> class RolePath {
+  public:
+    explicit RolePath(std::filesystem::path path) : m_path(std::move(path)) {}
+
+    // The path lives as long as this object.
+    [[nodiscard]] const std::filesystem::path& Path() const noexcept { return m_path; }
+
+  private:
+    std::filesystem::path m_path;
+};
+
+struct RenameSourceTag;
+struct RenameDestinationTag;
+/// <summary>The existing file a rename moves.</summary>
+using RenameSource = RolePath<RenameSourceTag>;
+/// <summary>Where a rename moves the file to.</summary>
+using RenameDestination = RolePath<RenameDestinationTag>;
 
 class Filesystem {
   public:
@@ -45,7 +67,6 @@ class Filesystem {
     /// <summary>
     /// Renames <paramref name="from"/> to <paramref name="to"/>.
     /// </summary>
-    virtual FilesystemResult RenameFile(const std::filesystem::path& from,
-                                        const std::filesystem::path& to) noexcept = 0;
+    virtual FilesystemResult RenameFile(const RenameSource& from, const RenameDestination& to) noexcept = 0;
 };
 } // namespace AVEVA::RocksDB::Plugin::Core

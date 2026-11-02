@@ -21,7 +21,7 @@ class FilesystemMock : public Filesystem {
                 (noexcept, override));
     MOCK_METHOD(FilesystemResult, WriteFileAtomic,
                 (const std::filesystem::path& finalPath, std::span<const char> contents), (noexcept, override));
-    MOCK_METHOD(FilesystemResult, RenameFile, (const std::filesystem::path& from, const std::filesystem::path& to),
+    MOCK_METHOD(FilesystemResult, RenameFile, (const RenameSource& from, const RenameDestination& to),
                 (noexcept, override));
 };
 } // namespace AVEVA::RocksDB::Plugin::Core::Mocks

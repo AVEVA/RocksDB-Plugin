@@ -29,10 +29,13 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <future>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -123,7 +126,8 @@ class Loopback {
                 return;
             }
             m_context.restart();
-            m_context.run_one_for(std::chrono::milliseconds{50});
+            constexpr std::chrono::milliseconds pollSlice{50};
+            m_context.run_one_for(pollSlice);
         }
     }
 
@@ -147,21 +151,23 @@ constexpr const char* TestSasToken = "sv=2025-01-05&sig=fake";
     return options;
 }
 
-// Free coroutine taking a pointer rather than a capturing coroutine lambda, so the coroutine
-// frame never outlives captured references (cppcoreguidelines-avoid-capturing-lambda-coroutines).
-template <class TResult> boost::asio::awaitable<void> AwaitHasValue(bool* out, bool* done, TResult result) {
-    *out = (co_await std::move(result)).has_value();
-    *done = true;
+// What a detached operation reported; Pending until it completes.
+enum class Observed : std::uint8_t { Pending, Value, Error };
+
+// Free coroutine sharing ownership of its result slot rather than pointing into the caller's stack, so a coroutine
+// still running after a watchdog timeout never writes to a dead frame.
+template <class TResult>
+boost::asio::awaitable<void> AwaitHasValue(std::shared_ptr<std::atomic<Observed>> observed, TResult result) {
+    observed->store((co_await std::move(result)).has_value() ? Observed::Value : Observed::Error);
 }
 
 // Runs one operation of client by co_awaiting it in a coroutine on the client's executor.
 template <class TClient, class TOperation>
 void ExerciseOperation(Loopback& http, TClient& client, TOperation operation) {
-    bool ok = false;
-    bool done = false;
-    boost::asio::co_spawn(client.get_executor(), AwaitHasValue(&ok, &done, operation(client)), boost::asio::detached);
-    http.RunUntil([&] { return done; });
-    EXPECT_TRUE(ok);
+    const auto observed = std::make_shared<std::atomic<Observed>>(Observed::Pending);
+    boost::asio::co_spawn(client.get_executor(), AwaitHasValue(observed, operation(client)), boost::asio::detached);
+    http.RunUntil([&] { return observed->load() != Observed::Pending; });
+    EXPECT_EQ(observed->load(), Observed::Value);
 }
 } // namespace
 

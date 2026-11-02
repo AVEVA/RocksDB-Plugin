@@ -4,6 +4,9 @@
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LogRateLimiter.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
+
+#include <rocksdb/env.h>
+
 #include <chrono>
 #include <cstdarg>
 #include <memory>
@@ -34,23 +37,18 @@ template <typename TFile> class FileLogSink final : public LogSink {
 
 class LoggerImpl {
     std::unique_ptr<LogSink> m_file;
-    int m_logLevel;
     std::vector<char> m_buffer;
     std::unique_ptr<LogRateLimiter> m_rateLimiter;
     // Heap-allocated so that the logger stays movable. RocksDB calls Logv from many threads.
     std::unique_ptr<std::mutex> m_mutex = std::make_unique<std::mutex>();
 
   public:
-    // Constructs a logger with no rate limiting.
-    LoggerImpl(std::unique_ptr<LogSink> file, int logLevel);
-    LoggerImpl(std::unique_ptr<WriteableFileImpl> file, int logLevel);
+    // Writes to `sink`; a null `rateLimiter` disables rate limiting. Messages are not filtered by level: RocksDB has
+    // already filtered them by the info log level it was configured with.
+    explicit LoggerImpl(std::unique_ptr<LogSink> sink, std::unique_ptr<LogRateLimiter> rateLimiter = nullptr);
 
-    // Constructs a logger with an injected rate limiter.
-    LoggerImpl(std::unique_ptr<LogSink> file, int logLevel, std::unique_ptr<LogRateLimiter> rateLimiter);
-    LoggerImpl(std::unique_ptr<WriteableFileImpl> file, int logLevel, std::unique_ptr<LogRateLimiter> rateLimiter);
-
-    void Logv(int logLevel, const char* format, ...);
-    void Logv(int logLevel, const char* format, va_list ap);
+    void Logv(rocksdb::InfoLogLevel logLevel, const char* format, ...);
+    void Logv(rocksdb::InfoLogLevel logLevel, const char* format, va_list ap);
     void Flush();
     void Close();
 };

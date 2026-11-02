@@ -38,7 +38,7 @@ class LocalFilesystem final : public Filesystem {
                                      std::span<const char> contents) noexcept override;
 
     /// <summary>Renames <paramref name="from"/> to <paramref name="to"/>.</summary>
-    FilesystemResult RenameFile(const std::filesystem::path& from, const std::filesystem::path& to) noexcept override;
+    FilesystemResult RenameFile(const RenameSource& from, const RenameDestination& to) noexcept override;
 
   private:
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;

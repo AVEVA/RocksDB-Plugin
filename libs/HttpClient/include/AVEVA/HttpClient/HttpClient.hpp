@@ -5,6 +5,7 @@
 
 #include <AVEVA/HttpClient/HttpClientError.hpp>
 #include <AVEVA/HttpClient/HttpClientOptions.hpp>
+#include <AVEVA/HttpClient/HttpFailure.hpp>
 #include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
@@ -14,17 +15,9 @@
 
 #include <gsl/pointers>
 
-#include <expected>
 #include <memory>
-#include <system_error>
 
 namespace AVEVA {
-/// <summary>
-/// The outcome of a request: the response, or the transport-level error. An HTTP error status is a response, not
-/// an error.
-/// </summary>
-using HttpResult = std::expected<HttpResponse, std::error_code>;
-
 /// <summary>
 /// Asynchronous HTTP client, used from C++20 coroutines. Non-copyable and non-movable. Each request is a single
 /// coroutine, so cancelling the awaiting coroutine cancels the request.
@@ -54,14 +47,6 @@ class HttpClient {
     ~HttpClient();
 
     /// <summary>
-    /// Creates a client held through a <c>std::unique_ptr</c>.
-    /// </summary>
-    /// <param name="context">The io_context the client runs on; see the constructor.</param>
-    /// <param name="options">The client-wide settings to apply.</param>
-    /// <returns>The new client.</returns>
-    static std::unique_ptr<HttpClient> Create(boost::asio::io_context& context, HttpClientOptions options = {});
-
-    /// <summary>
     /// The executor associated with this client (used as the default executor for completion tokens that do
     /// not carry their own associated executor).
     /// </summary>
@@ -77,7 +62,7 @@ class HttpClient {
     /// </summary>
     /// <param name="request">The request to send.</param>
     /// <param name="options">The per-request settings to apply.</param>
-    /// <returns>The response, or the transport-level error.</returns>
+    /// <returns>The response, or why there is none.</returns>
     [[nodiscard]] boost::asio::awaitable<HttpResult> SendAsync(HttpRequest request, HttpRequestOptions options);
 
   private:

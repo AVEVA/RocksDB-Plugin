@@ -58,7 +58,7 @@ struct RetryOptions {
     /// <summary>
     /// Number of retry attempts after the initial attempt (0 disables retries).
     /// </summary>
-    int MaxRetries = 3;
+    RetryCount MaxRetries{3};
 
     /// <summary>
     /// The backoff before the first retry, doubled for each further one.

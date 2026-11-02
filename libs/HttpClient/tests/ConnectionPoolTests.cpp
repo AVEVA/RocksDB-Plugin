@@ -116,13 +116,13 @@ constexpr std::chrono::seconds LongTimeout{300};
 constexpr std::chrono::seconds ShortTimeout{30};
 
 TEST(ConnectionPool, AcquireOnEmptyPoolReturnsNothing) {
-    Pool pool(4, LongTimeout);
+    Pool pool(AVEVA::ConnectionCount{4}, AVEVA::Timeout{LongTimeout});
     EXPECT_FALSE(pool.Acquire(MakeKey("example.com")).has_value());
 }
 
 TEST(ConnectionPool, ReleasedConnectionIsReusedForTheSameOrigin) {
     int live = 0;
-    Pool pool(4, LongTimeout);
+    Pool pool(AVEVA::ConnectionCount{4}, AVEVA::Timeout{LongTimeout});
     pool.Release(MakeKey("example.com"), MakeConnection(1, live));
 
     auto acquired = pool.Acquire(MakeKey("example.com"));
@@ -135,7 +135,7 @@ TEST(ConnectionPool, ReleasedConnectionIsReusedForTheSameOrigin) {
 
 TEST(ConnectionPool, ConnectionsAreNotSharedAcrossOrigins) {
     int live = 0;
-    Pool pool(4, LongTimeout);
+    Pool pool(AVEVA::ConnectionCount{4}, AVEVA::Timeout{LongTimeout});
     pool.Release(MakeKey("example.com"), MakeConnection(1, live));
 
     EXPECT_FALSE(pool.Acquire(MakeKey("other.com")).has_value());
@@ -145,7 +145,7 @@ TEST(ConnectionPool, ConnectionsAreNotSharedAcrossOrigins) {
 
 TEST(ConnectionPool, AcquireReturnsTheMostRecentlyReleasedConnection) {
     int live = 0;
-    Pool pool(4, LongTimeout);
+    Pool pool(AVEVA::ConnectionCount{4}, AVEVA::Timeout{LongTimeout});
     const auto key = MakeKey("example.com");
     pool.Release(key, MakeConnection(1, live));
     pool.Release(key, MakeConnection(2, live));
@@ -165,7 +165,7 @@ TEST(ConnectionPool, AcquireReturnsTheMostRecentlyReleasedConnection) {
 
 TEST(ConnectionPool, ExceedingTheIdleLimitEvictsTheOldestConnection) {
     int live = 0;
-    Pool pool(2, LongTimeout);
+    Pool pool(AVEVA::ConnectionCount{2}, AVEVA::Timeout{LongTimeout});
     const auto key = MakeKey("example.com");
     pool.Release(key, MakeConnection(1, live));
     pool.Release(key, MakeConnection(2, live));
@@ -183,7 +183,7 @@ TEST(ConnectionPool, ExceedingTheIdleLimitEvictsTheOldestConnection) {
 
 TEST(ConnectionPool, ZeroIdleLimitDisablesPooling) {
     int live = 0;
-    Pool pool(0, LongTimeout);
+    Pool pool(AVEVA::ConnectionCount{0}, AVEVA::Timeout{LongTimeout});
     const auto key = MakeKey("example.com");
     pool.Release(key, MakeConnection(1, live));
 
@@ -193,7 +193,7 @@ TEST(ConnectionPool, ZeroIdleLimitDisablesPooling) {
 
 TEST(ConnectionPool, ExpiredConnectionsAreClosedInsteadOfReused) {
     int live = 0;
-    FakePool pool(4, ShortTimeout);
+    FakePool pool(AVEVA::ConnectionCount{4}, AVEVA::Timeout{ShortTimeout});
     const auto key = MakeKey("example.com");
     pool.Release(key, MakeConnection(1, live));
     ASSERT_EQ(live, 1);
@@ -206,7 +206,7 @@ TEST(ConnectionPool, ExpiredConnectionsAreClosedInsteadOfReused) {
 
 TEST(ConnectionPool, ExpiredConnectionsOfOtherOriginsAreReclaimed) {
     int live = 0;
-    FakePool pool(4, ShortTimeout);
+    FakePool pool(AVEVA::ConnectionCount{4}, AVEVA::Timeout{ShortTimeout});
     pool.Release(MakeKey("stale.com"), MakeConnection(1, live));
     ASSERT_EQ(live, 1);
 
@@ -221,7 +221,7 @@ TEST(ConnectionPool, ExpiredConnectionsOfOtherOriginsAreReclaimed) {
 
 TEST(ConnectionPool, SweepClosesExpiredConnectionsWithoutAnyRequest) {
     int live = 0;
-    FakePool pool(4, ShortTimeout);
+    FakePool pool(AVEVA::ConnectionCount{4}, AVEVA::Timeout{ShortTimeout});
     pool.Release(MakeKey("a.com"), MakeConnection(1, live));
     FakeClock::Advance(ShortTimeout / 2);
     pool.Release(MakeKey("b.com"), MakeConnection(2, live));
@@ -237,7 +237,7 @@ TEST(ConnectionPool, SweepClosesExpiredConnectionsWithoutAnyRequest) {
 
 TEST(ConnectionPool, TotalIdleCapEvictsTheOldestAcrossOrigins) {
     int live = 0;
-    Pool pool(4, LongTimeout, 2);
+    Pool pool(AVEVA::ConnectionCount{4}, AVEVA::Timeout{LongTimeout}, AVEVA::Private::TotalIdleCap{2});
     pool.Release(MakeKey("a.com"), MakeConnection(1, live));
     pool.Release(MakeKey("b.com"), MakeConnection(2, live));
     pool.Release(MakeKey("c.com"), MakeConnection(3, live));
@@ -254,7 +254,8 @@ constexpr int ManyOrigins = 512;
 
 TEST(ConnectionPool, SweepAfterOriginMapRehashClosesEveryExpiredConnection) {
     int live = 0;
-    FakePool pool(4, ShortTimeout, ManyOrigins * 2);
+    FakePool pool(AVEVA::ConnectionCount{4}, AVEVA::Timeout{ShortTimeout},
+                  AVEVA::Private::TotalIdleCap{ManyOrigins * 2});
     for (int i = 0; i < ManyOrigins; ++i) {
         pool.Release(MakeKey("host" + std::to_string(i)), MakeConnection(i, live));
     }
@@ -275,7 +276,7 @@ TEST(ConnectionPool, SweepAfterOriginMapRehashClosesEveryExpiredConnection) {
 TEST(ConnectionPool, GlobalCapEvictionAfterOriginMapRehashKeepsAccountingExact) {
     int live = 0;
     constexpr std::size_t cap = 4;
-    Pool pool(4, LongTimeout, cap);
+    Pool pool(AVEVA::ConnectionCount{4}, AVEVA::Timeout{LongTimeout}, AVEVA::Private::TotalIdleCap{cap});
     for (int i = 0; i < ManyOrigins; ++i) {
         pool.Release(MakeKey("host" + std::to_string(i)), MakeConnection(i, live));
         ASSERT_LE(live, static_cast<int>(cap));
@@ -294,7 +295,7 @@ TEST(ConnectionPool, GlobalCapEvictionAfterOriginMapRehashKeepsAccountingExact) 
 
 TEST(ConnectionPool, ZeroTotalIdleLimitDisablesPooling) {
     int live = 0;
-    Pool pool(4, LongTimeout, 0);
+    Pool pool(AVEVA::ConnectionCount{4}, AVEVA::Timeout{LongTimeout}, AVEVA::Private::TotalIdleCap{0});
     const auto key = MakeKey("example.com");
     pool.Release(key, MakeConnection(1, live));
 
@@ -312,8 +313,9 @@ struct CountingNotifier {
 TEST(ConnectionPool, NotifiesOnEverySuccessfulRelease) {
     int live = 0;
     int notifications = 0;
-    ConnectionPool<TrackedStream, std::chrono::steady_clock, CountingNotifier> pool(4, LongTimeout, 256,
-                                                                                    CountingNotifier{&notifications});
+    ConnectionPool<TrackedStream, std::chrono::steady_clock, CountingNotifier> pool(
+        AVEVA::ConnectionCount{4}, AVEVA::Timeout{LongTimeout}, AVEVA::Private::TotalIdleCap{256},
+        CountingNotifier{&notifications});
 
     pool.Release(MakeKey("a.com"), MakeConnection(1, live));
     pool.Release(MakeKey("b.com"), MakeConnection(2, live));
@@ -328,7 +330,7 @@ TEST(ConnectionPool, NotifiesOnEverySuccessfulRelease) {
 TEST(ConnectionPool, DestroyingThePoolClosesIdleConnections) {
     int live = 0;
     {
-        Pool pool(4, LongTimeout);
+        Pool pool(AVEVA::ConnectionCount{4}, AVEVA::Timeout{LongTimeout});
         pool.Release(MakeKey("example.com"), MakeConnection(1, live));
         pool.Release(MakeKey("other.com"), MakeConnection(2, live));
         ASSERT_EQ(live, 2);
@@ -338,7 +340,7 @@ TEST(ConnectionPool, DestroyingThePoolClosesIdleConnections) {
 
 TEST(ConnectionPool, RepeatedAcquireReleaseCyclesStayConsistent) {
     int live = 0;
-    Pool pool(2, LongTimeout);
+    Pool pool(AVEVA::ConnectionCount{2}, AVEVA::Timeout{LongTimeout});
     const auto first = MakeKey("first.com");
     const auto second = MakeKey("second.com");
 
@@ -372,7 +374,7 @@ std::size_t CountSerialCycleAllocations(Pool& pool, const Key& key, int cycles, 
 
 TEST(ConnectionPool, SerialKeepAliveRequestsDoNotAllocateAfterWarmUp) {
     int live = 0;
-    Pool pool(4, LongTimeout);
+    Pool pool(AVEVA::ConnectionCount{4}, AVEVA::Timeout{LongTimeout});
     const auto key = MakeKey("a-host-name-too-long-for-small-string-optimisation.example.com");
     CountSerialCycleAllocations(pool, key, 2, live);
 
@@ -381,7 +383,7 @@ TEST(ConnectionPool, SerialKeepAliveRequestsDoNotAllocateAfterWarmUp) {
 
 TEST(ConnectionPool, DormantOriginsAreBoundedWhenManyOriginsAreTouched) {
     int live = 0;
-    Pool pool(4, LongTimeout);
+    Pool pool(AVEVA::ConnectionCount{4}, AVEVA::Timeout{LongTimeout});
     for (int origin = 0; origin < 1000; ++origin) {
         const auto key = MakeKey("origin-" + std::to_string(origin) + ".example.com");
         pool.Release(key, MakeConnection(origin, live));
@@ -397,7 +399,7 @@ TEST(ConnectionPool, DormantOriginsAreBoundedWhenManyOriginsAreTouched) {
 }
 
 TEST(ConnectionPool, ReleasingAnEmptyConnectionIsIgnored) {
-    Pool pool(4, LongTimeout);
+    Pool pool(AVEVA::ConnectionCount{4}, AVEVA::Timeout{LongTimeout});
     const auto key = MakeKey("example.com");
     pool.Release(key, PooledConnection<TrackedStream>{});
     EXPECT_FALSE(pool.Acquire(key).has_value());
@@ -408,7 +410,7 @@ class ConnectionPoolAllocationFailure : public ::testing::TestWithParam<int> {};
 
 TEST_P(ConnectionPoolAllocationFailure, ReleaseThatRunsOutOfMemoryLeavesThePoolConsistent) {
     int live = 0;
-    Pool pool(4, LongTimeout);
+    Pool pool(AVEVA::ConnectionCount{4}, AVEVA::Timeout{LongTimeout});
     const auto kept = MakeKey("kept.com");
     const auto failing = MakeKey("failing.com");
     pool.Release(kept, MakeConnection(1, live));
@@ -456,7 +458,7 @@ TEST(ConnectionPool, RealSocketLivenessCheckDiscardsPeerClosedConnection) {
     server.close(ignored);
     AVEVA::Private::beast::get_lowest_layer(stream).socket().wait(Tcp::socket::wait_read, ignored);
 
-    ConnectionPool<PlainStream, FakeClock> pool(4, LongTimeout);
+    ConnectionPool<PlainStream, FakeClock> pool(AVEVA::ConnectionCount{4}, AVEVA::Timeout{LongTimeout});
     const ConnectionKey<PlainStream> key{"127.0.0.1", "80"};
     pool.Release(key, PooledConnection<PlainStream>{std::make_unique<PlainStream>(std::move(stream)), {}});
     // Connections idle for less than the probe threshold are handed out unchecked, so age it past that.
@@ -467,7 +469,7 @@ TEST(ConnectionPool, RealSocketLivenessCheckDiscardsPeerClosedConnection) {
 
 TEST(ConnectionPool, SweepHandsExpiredSocketsToTheirExecutorInsteadOfClosingThemInline) {
     asio::io_context context;
-    ConnectionPool<PlainStream, FakeClock> pool(4, ShortTimeout);
+    ConnectionPool<PlainStream, FakeClock> pool(AVEVA::ConnectionCount{4}, AVEVA::Timeout{ShortTimeout});
     pool.Release({"127.0.0.1", "80"}, PooledConnection<PlainStream>{std::make_unique<PlainStream>(context), {}});
     FakeClock::Advance(ShortTimeout * 2);
 
@@ -478,7 +480,7 @@ TEST(ConnectionPool, SweepHandsExpiredSocketsToTheirExecutorInsteadOfClosingThem
 
 TEST(ConnectionPool, AcquireDropsExpiredSocketsThroughTheirExecutorToo) {
     asio::io_context context;
-    ConnectionPool<PlainStream, FakeClock> pool(4, ShortTimeout);
+    ConnectionPool<PlainStream, FakeClock> pool(AVEVA::ConnectionCount{4}, AVEVA::Timeout{ShortTimeout});
     const ConnectionKey<PlainStream> key{"127.0.0.1", "80"};
     pool.Release(key, PooledConnection<PlainStream>{std::make_unique<PlainStream>(context), {}});
     FakeClock::Advance(ShortTimeout * 2);
@@ -489,7 +491,7 @@ TEST(ConnectionPool, AcquireDropsExpiredSocketsThroughTheirExecutorToo) {
 
 TEST(ConnectionPool, EvictionOnReleaseHandsTheEvictedSocketToItsExecutor) {
     asio::io_context context;
-    ConnectionPool<PlainStream, FakeClock> pool(1, LongTimeout);
+    ConnectionPool<PlainStream, FakeClock> pool(AVEVA::ConnectionCount{1}, AVEVA::Timeout{LongTimeout});
     const ConnectionKey<PlainStream> key{"127.0.0.1", "80"};
     EXPECT_EQ(pool.Release(key, PooledConnection<PlainStream>{std::make_unique<PlainStream>(context), {}}),
               PoolAdmission::Retained);
@@ -504,7 +506,7 @@ TEST(ConnectionPool, EvictionOnReleaseHandsTheEvictedSocketToItsExecutor) {
 
 TEST(ConnectionPool, ReleaseLeavesAConnectionItDidNotTakeWithTheCaller) {
     asio::io_context context;
-    ConnectionPool<PlainStream, FakeClock> disabled(0, LongTimeout);
+    ConnectionPool<PlainStream, FakeClock> disabled(AVEVA::ConnectionCount{0}, AVEVA::Timeout{LongTimeout});
     PooledConnection<PlainStream> connection{std::make_unique<PlainStream>(context), {}};
 
     EXPECT_EQ(disabled.Release({"127.0.0.1", "80"}, std::move(connection)), PoolAdmission::Declined);
@@ -513,7 +515,7 @@ TEST(ConnectionPool, ReleaseLeavesAConnectionItDidNotTakeWithTheCaller) {
 
 TEST(ConnectionPool, ReleaseAfterClearDeclinesTheConnection) {
     int live = 0;
-    Pool pool(4, LongTimeout);
+    Pool pool(AVEVA::ConnectionCount{4}, AVEVA::Timeout{LongTimeout});
     pool.Clear();
 
     auto connection = MakeConnection(1, live);
@@ -525,7 +527,8 @@ TEST(ConnectionPool, ReleaseAfterClearDeclinesTheConnection) {
 
 TEST(ConnectionPool, DestroyingThePoolFromAnotherThreadHandsIdleSocketsToTheirExecutor) {
     asio::io_context context;
-    auto pool = std::make_unique<ConnectionPool<PlainStream, FakeClock>>(4, LongTimeout);
+    auto pool = std::make_unique<ConnectionPool<PlainStream, FakeClock>>(AVEVA::ConnectionCount{4},
+                                                                         AVEVA::Timeout{LongTimeout});
     pool->Release({"127.0.0.1", "80"}, PooledConnection<PlainStream>{std::make_unique<PlainStream>(context), {}});
     pool->Release({"127.0.0.2", "80"}, PooledConnection<PlainStream>{std::make_unique<PlainStream>(context), {}});
 
@@ -575,7 +578,7 @@ TEST(ConnectionPool, ConcurrentAcquireReleaseAcrossThreadsStaysConsistent) {
 
     std::atomic<int> live{0};
     std::atomic<int> nextIdentity{1};
-    ConcurrentPool pool(8, LongTimeout, 16);
+    ConcurrentPool pool(AVEVA::ConnectionCount{8}, AVEVA::Timeout{LongTimeout}, AVEVA::Private::TotalIdleCap{16});
     const std::array<ConcurrentKey, 2> keys{ConcurrentKey{"a.example", "80"}, ConcurrentKey{"b.example", "80"}};
 
     constexpr int ThreadCount = 8;

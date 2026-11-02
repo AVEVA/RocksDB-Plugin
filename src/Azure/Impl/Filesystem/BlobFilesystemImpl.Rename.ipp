@@ -43,11 +43,14 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
     WithContainer(prefixAccountTo, [&](auto& container) {
         auto srcClient = container.GetPageBlobClient(std::string(realPathFrom));
         auto destClient = container.GetPageBlobClient(std::string(realPathTo));
+        // Copied, because the clients move into the rename below.
+        const std::string srcUrl = srcClient.ResourceUrl();
+        const std::string destUrl = destClient.ResourceUrl();
         // Whatever happens below, a cached copy of either name may no longer match its blob: a failed commit can
         // leave the destination emptied or partly written, and a failed source delete leaves both names holding data.
         boost::scope::scope_exit dropCached{[&] {
-            m_runtime->InvalidateBlobSize(srcClient.ResourceUrl());
-            m_runtime->InvalidateBlobSize(destClient.ResourceUrl());
+            m_runtime->MetadataCache().Invalidate(srcUrl);
+            m_runtime->MetadataCache().Invalidate(destUrl);
             if (const auto cache = m_fileCaches.find(prefixAccountTo); cache != m_fileCaches.end()) {
                 cache->second->RemoveFile(std::string(realPathFrom));
                 cache->second->RemoveFile(std::string(realPathTo));
@@ -56,15 +59,24 @@ void BasicBlobFilesystemImpl<THttp>::RenameFile(const std::string& fromFilePath,
 
         // One blocking call for the whole rename: the steps below are coroutines, so the sequencing reads top to
         // bottom.
-        Block(srcClient, RenameBlobAsync(container, srcClient, destClient, realPathFrom, realPathTo));
+        auto tempName = std::string(realPathTo) + std::string(BlobFilesystemDetail::RenameTempMarker) +
+                        boost::uuids::to_string(boost::uuids::random_generator()());
+        auto tempClient = container.GetPageBlobClient(tempName);
+        Block(container, RenameBlobAsync(RenameBlobs{.Source = std::move(srcClient),
+                                                     .Destination = std::move(destClient),
+                                                     .Temporary = std::move(tempClient),
+                                                     .SourceName = std::string(realPathFrom),
+                                                     .DestinationName = std::string(realPathTo),
+                                                     .TemporaryName = std::move(tempName)}));
     });
 }
 
 template <typename THttp>
-boost::asio::awaitable<void>
-BasicBlobFilesystemImpl<THttp>::RenameBlobAsync(BlobContainerClientOn<THttp>& container, BlobClient& srcClient,
-                                                BlobClient& destClient, const std::string_view realPathFrom,
-                                                const std::string_view realPathTo) const {
+boost::asio::awaitable<void> BasicBlobFilesystemImpl<THttp>::RenameBlobAsync(RenameBlobs blobs) const {
+    auto& srcClient = blobs.Source;
+    auto& destClient = blobs.Destination;
+    const std::string& realPathFrom = blobs.SourceName;
+    const std::string& realPathTo = blobs.DestinationName;
     const auto [size, cap, etag, modified] = co_await BlobOperations::GetInfoAsync(srcClient);
 
     // The cleanup of a failed step awaits, which a catch handler cannot do, so each step records its failure, cleans
@@ -80,91 +92,98 @@ BasicBlobFilesystemImpl<THttp>::RenameBlobAsync(BlobContainerClientOn<THttp>& co
         // The download overwrites [0, size); only the page-alignment tail needs zeroing.
         const auto data = std::make_unique_for_overwrite<char[]>(paddedSize);
         const std::span<char> buffer(data.get(), paddedSize);
-        if (size > 0 && co_await BlobOperations::DownloadAsync(srcClient, buffer.first(static_cast<size_t>(size)), 0,
-                                                               size, etag) != size) {
-            throw std::runtime_error("Unexpected end of blob while renaming '" + std::string(realPathFrom) + "'");
+        if (size > 0 && co_await BlobOperations::DownloadAsync(srcClient, buffer.first(static_cast<size_t>(size)),
+                                                               Core::ByteOffset{}, CountFromSigned(size),
+                                                               etag) != CountFromSigned(size)) {
+            throw std::runtime_error("Unexpected end of blob while renaming '" + realPathFrom + "'");
         }
         std::ranges::fill(buffer.subspan(static_cast<size_t>(size)), '\0');
 
-        const auto created = co_await BlobOperations::CreateIfNotExistsAsync(*m_runtime, destClient, cap);
+        const auto created =
+            co_await BlobOperations::CreateIfNotExistsAsync(m_runtime, destClient, CountFromSigned(cap));
         if (created == BlobOperations::CreateOutcome::AlreadyExisted) {
-            co_await BlobOperations::CreateOrReplaceAsync(*m_runtime, destClient, cap);
+            co_await BlobOperations::CreateOrReplaceAsync(m_runtime, destClient, CountFromSigned(cap));
         }
         try {
             if (paddedSize != 0) {
-                co_await BlobOperations::UploadPagesAsync(*m_runtime, destClient, std::span<const char>(buffer), 0);
+                co_await BlobOperations::UploadPagesAsync(m_runtime, destClient, std::span<const char>(buffer),
+                                                          Core::ByteOffset{});
             }
-            co_await BlobOperations::SetSizeAsync(*m_runtime, destClient, size);
+            co_await BlobOperations::SetSizeAsync(m_runtime, destClient, CountFromSigned(size));
         } catch (...) {
             failure = std::current_exception();
         }
         // A destination that existed keeps whatever was written; only one created here is removed again.
         if (failure && created == BlobOperations::CreateOutcome::Created) {
-            co_await DeleteQuietlyAsync(destClient, realPathTo);
+            co_await DeleteQuietlyAsync(BlobOperations::Destination(destClient), realPathTo);
         }
-    } else if (co_await BlobOperations::CreateIfNotExistsAsync(*m_runtime, destClient, cap) ==
+    } else if (co_await BlobOperations::CreateIfNotExistsAsync(m_runtime, destClient, CountFromSigned(cap)) ==
                BlobOperations::CreateOutcome::Created) {
         // Nothing to lose at the destination, so write it in place and remove the partial blob on failure.
         try {
-            co_await CopyIntoAsync(srcClient, destClient, size, etag, realPathFrom);
+            co_await CopyIntoAsync(BlobOperations::Source(srcClient), BlobOperations::Destination(destClient),
+                                   CountFromSigned(size), etag, realPathFrom);
         } catch (...) {
             failure = std::current_exception();
         }
         if (failure) {
-            co_await DeleteQuietlyAsync(destClient, realPathTo);
+            co_await DeleteQuietlyAsync(BlobOperations::Destination(destClient), realPathTo);
         }
     } else {
-        const auto tempName = std::string(realPathTo) + std::string(BlobFilesystemDetail::RenameTempMarker) +
-                              boost::uuids::to_string(boost::uuids::random_generator()());
-        auto tempClient = container.GetPageBlobClient(tempName);
-        co_await BlobOperations::CreateOrReplaceAsync(*m_runtime, tempClient, cap);
+        auto& tempClient = blobs.Temporary;
+        co_await BlobOperations::CreateOrReplaceAsync(m_runtime, tempClient, CountFromSigned(cap));
         try {
             // Commit: replace the destination from the fully written temporary blob.
             // The ETag from the temporary blob's final write conditions the copy. The destination's logical size
             // stays 0 until the last step.
-            const auto tempEtag = co_await CopyIntoAsync(srcClient, tempClient, size, etag, realPathFrom);
-            co_await BlobOperations::CreateOrReplaceAsync(*m_runtime, destClient, cap);
-            co_await CopyBlobPagesAsync(tempClient, destClient, size, tempEtag, realPathFrom);
-            co_await BlobOperations::SetSizeAsync(*m_runtime, destClient, size);
+            const auto tempEtag =
+                co_await CopyIntoAsync(BlobOperations::Source(srcClient), BlobOperations::Destination(tempClient),
+                                       CountFromSigned(size), etag, realPathFrom);
+            co_await BlobOperations::CreateOrReplaceAsync(m_runtime, destClient, CountFromSigned(cap));
+            co_await CopyBlobPagesAsync(BlobOperations::Source(tempClient), BlobOperations::Destination(destClient),
+                                        CountFromSigned(size), tempEtag, realPathFrom);
+            co_await BlobOperations::SetSizeAsync(m_runtime, destClient, CountFromSigned(size));
         } catch (...) {
             failure = std::current_exception();
         }
-        co_await DeleteQuietlyAsync(tempClient, tempName);
+        co_await DeleteQuietlyAsync(BlobOperations::Destination(tempClient), blobs.TemporaryName);
     }
     if (failure) {
         std::rethrow_exception(failure);
     }
 
-    co_await BlobOperations::DeleteAsync(*m_runtime, srcClient);
+    co_await BlobOperations::DeleteAsync(m_runtime, srcClient);
 }
 
 template <typename THttp>
-boost::asio::awaitable<void>
-BasicBlobFilesystemImpl<THttp>::CopyBlobPagesAsync(BlobClient& source, BlobClient& target, const int64_t size,
-                                                   const std::string& etag, const std::string_view name) const {
+boost::asio::awaitable<void> BasicBlobFilesystemImpl<THttp>::CopyBlobPagesAsync(
+    const BlobOperations::Source<BlobClient> source, const BlobOperations::Destination<BlobClient> target,
+    const Core::ByteCount size, const std::string etag, const std::string name) const {
     // Server-side copy comes first; it needs the source to be readable by the service with the client's credential.
-    if (co_await BlobOperations::CopyPagesServerSideAsync(*m_runtime, source, target, size, etag) ==
+    if (co_await BlobOperations::CopyPagesServerSideAsync(m_runtime, source, target, size, etag) ==
         BlobOperations::ServerSideCopy::Declined) {
         BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
             << "Server-side copy of " << name
             << " was refused (the source could not be authorized); copying through the client instead";
-        co_await BlobOperations::CopyPagesAsync(*m_runtime, source, target, size, etag);
+        co_await BlobOperations::CopyPagesAsync(m_runtime, source, target, size, etag);
     }
 }
 
 template <typename THttp>
 boost::asio::awaitable<std::string>
-BasicBlobFilesystemImpl<THttp>::CopyIntoAsync(BlobClient& source, BlobClient& target, const int64_t size,
-                                              const std::string& etag, const std::string_view name) const {
-    co_await CopyBlobPagesAsync(source, target, size, etag, name);
-    co_return co_await BlobOperations::SetSizeAsync(*m_runtime, target, size);
+BasicBlobFilesystemImpl<THttp>::CopyIntoAsync(const BlobOperations::Source<BlobClient> source,
+                                              const BlobOperations::Destination<BlobClient> target,
+                                              const Core::ByteCount size, std::string etag, std::string name) const {
+    co_await CopyBlobPagesAsync(source, target, size, std::move(etag), std::move(name));
+    co_return co_await BlobOperations::SetSizeAsync(m_runtime, target.Blob(), size);
 }
 
 template <typename THttp>
-boost::asio::awaitable<void> BasicBlobFilesystemImpl<THttp>::DeleteQuietlyAsync(BlobClient& blob,
-                                                                                const std::string_view name) const {
+boost::asio::awaitable<void>
+BasicBlobFilesystemImpl<THttp>::DeleteQuietlyAsync(const BlobOperations::Destination<BlobClient> blob,
+                                                   const std::string name) const {
     try {
-        co_await BlobOperations::DeleteAsync(*m_runtime, blob);
+        co_await BlobOperations::DeleteAsync(m_runtime, blob.Blob());
     } catch (const std::exception& e) {
         BOOST_LOG_SEV(*m_logger, boost::log::trivial::severity_level::warning)
             << "Could not delete '" << name << "' while rolling back a rename: " << e.what();

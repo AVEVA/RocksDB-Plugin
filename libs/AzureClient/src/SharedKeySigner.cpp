@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <gsl/util>
@@ -95,7 +96,9 @@ constexpr std::array<int, 128> CultureTableLevel0{
 constexpr std::array<int, 128> CultureTableLevel2 = MakeCultureTableLevel2();
 constexpr std::array<int, 128> CultureTableLevel4 = MakeCultureTableLevel4();
 
-[[nodiscard]] bool CultureAwareLess(std::string_view lhs, std::string_view rhs) {
+// Orders header names the way Shared Key canonicalization expects: a multi-level weight comparison (the culture-aware
+// ordering the Azure SDKs use), not a plain byte comparison.
+[[nodiscard]] std::weak_ordering CultureAwareCompare(std::string_view lhs, std::string_view rhs) {
     const std::array<const std::array<int, 128>*, 3> tables{&CultureTableLevel0, &CultureTableLevel2,
                                                             &CultureTableLevel4};
     const auto weightAt = [](const std::array<int, 128>& table, std::string_view text, std::size_t position) {
@@ -111,7 +114,7 @@ constexpr std::array<int, 128> CultureTableLevel4 = MakeCultureTableLevel4();
     std::size_t j = 0;
     while (level < tables.size()) {
         if (level == tables.size() - 1 && i != j) {
-            return i > j;
+            return i > j ? std::weak_ordering::less : std::weak_ordering::greater;
         }
         const int weight1 = weightAt(*tables.at(level), lhs, i);
         const int weight2 = weightAt(*tables.at(level), rhs, j);
@@ -127,10 +130,10 @@ constexpr std::array<int, 128> CultureTableLevel4 = MakeCultureTableLevel4();
         } else if (weight2 == 0) {
             ++j;
         } else {
-            return weight1 < weight2;
+            return weight1 <=> weight2;
         }
     }
-    return false;
+    return std::weak_ordering::equivalent;
 }
 
 [[nodiscard]] char ToLowerAsciiChar(char character) noexcept {
@@ -297,7 +300,7 @@ std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpR
         return allNames.substr(entry.Offset, entry.Length);
     };
     std::ranges::stable_sort(entries, [&nameOf](const CanonicalizedHeader& lhs, const CanonicalizedHeader& rhs) {
-        return CultureAwareLess(nameOf(lhs), nameOf(rhs));
+        return CultureAwareCompare(nameOf(lhs), nameOf(rhs)) < 0;
     });
 
     std::ranges::sort(parsedUrl.Query, [&parsedUrl](const auto& lhs, const auto& rhs) {
@@ -306,7 +309,7 @@ std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpR
         return lhsName != rhsName ? lhsName < rhsName : parsedUrl.Value(lhs) < parsedUrl.Value(rhs);
     });
 
-    const std::size_t bodySize = request.GetBodySize();
+    const std::size_t bodySize = request.GetBody().Size().Value();
     const std::string_view method = MethodToString(request.GetMethod());
     constexpr std::size_t ContentLengthField = 2;
 

@@ -195,7 +195,8 @@ inline constexpr std::uint64_t MaxBufferedDownloadBytes = BlobTransferLimits::Ma
 /// <param name="error">The transport error of the request, if any.</param>
 /// <param name="response">The response received, consulted for the service's error status.</param>
 /// <returns>The failure to report, or nothing when the request succeeded.</returns>
-[[nodiscard]] std::optional<BlobStorageError> ToFailure(std::error_code error, const HttpResponse& response);
+[[nodiscard]] std::optional<BlobStorageError> ToFailure(const std::optional<HttpFailure>& error,
+                                                        const HttpResponse& response);
 
 /// <summary>Moves the body out of a response, leaving its headers in place.</summary>
 /// <param name="response">The response whose body is taken.</param>
@@ -260,8 +261,8 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
                    AzureRequestOptions requestOptions, TSink sink, std::chrono::steady_clock::time_point start)
         : m_httpClient(httpClient), m_target(target), m_options(std::move(options)),
           m_requestOptions(std::move(requestOptions)), m_deadline(m_requestOptions, start), m_sink(std::move(sink)),
-          m_chunkSize(m_options.ChunkSize == 0U ? DefaultDownloadChunkSize : m_options.ChunkSize),
-          m_concurrency(std::min(std::max<std::size_t>(1U, m_options.Concurrency),
+          m_chunkSize(m_options.ChunkSize.Value()),
+          m_concurrency(std::min(m_options.Concurrency.Value(),
                                  std::max<std::size_t>(1U, MaxBufferedDownloadBytes / m_chunkSize))) {}
 
     /// <summary>Runs the download to completion; failures are returned in the outcome rather than thrown.</summary>
@@ -374,10 +375,10 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
     /// <summary>Separates a transport outcome into the error and the response, so both can be inspected
     /// uniformly.</summary>
     /// <param name="sent">The transport outcome.</param>
-    /// <returns>The error (empty on success) and the response (empty on a transport error).</returns>
-    static std::pair<std::error_code, HttpResponse> Split(HttpResult sent) {
+    /// <returns>The failure (empty on success) and the response (empty on a transport failure).</returns>
+    static std::pair<std::optional<HttpFailure>, HttpResponse> Split(HttpResult sent) {
         if (sent) {
-            return {std::error_code{}, std::move(*sent)};
+            return {std::nullopt, std::move(*sent)};
         }
         return {sent.error(), HttpResponse{}};
     }

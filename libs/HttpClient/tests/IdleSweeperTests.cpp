@@ -31,7 +31,8 @@ template <typename Predicate> bool WaitUntil(Predicate done) {
 
 struct SweeperFixture {
     SweeperFixture(asio::io_context& context, std::chrono::milliseconds interval)
-        : sweeper(IdleSweeper::Create(4, interval, PlainConnectionPool::DefaultProbeThreshold, MinInterval)),
+        : sweeper(IdleSweeper::Create(AVEVA::ConnectionCount{4}, AVEVA::Timeout{interval},
+                                      PlainConnectionPool::DefaultProbeThreshold, nullptr, MinInterval)),
           plain(sweeper->PlainPool()), tls(sweeper->TlsPool()), context(context) {}
 
     void AddIdleConnection() {

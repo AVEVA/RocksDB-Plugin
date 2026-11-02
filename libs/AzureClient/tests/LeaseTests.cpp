@@ -10,6 +10,7 @@
 #include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <AVEVA/HttpClient/HttpResponse.hpp>
 #include <gtest/gtest.h>
+#include <stdexcept>
 
 #include <chrono>
 #include <optional>
@@ -41,13 +42,17 @@ using namespace std::chrono_literals;
 
 [[nodiscard]] HttpResponse LeaseResponse(AVEVA::HttpStatusCode status, std::string leaseId) {
     std::vector<HttpHeader> headers = MakeCanonicalSuccessHeaders();
-    headers.emplace_back("x-ms-lease-id", std::move(leaseId));
+    headers.emplace_back(AVEVA::HeaderName{"x-ms-lease-id"}, AVEVA::HeaderValue{std::move(leaseId)});
     return HttpResponse{status, std::move(headers), ""};
 }
 
 [[nodiscard]] BlobRequestConditions IfUnmodifiedSince() {
     BlobRequestConditions conditions;
-    conditions.IfUnmodifiedSince = std::chrono::sys_days{std::chrono::year{2015} / 6 / 26} + 18h + 59min + 17s;
+    // The date in the service documentation's example, so the expected header can be compared with it.
+    constexpr std::chrono::year_month_day documentedDate{std::chrono::year{2015}, std::chrono::June,
+                                                         std::chrono::day{26}};
+    constexpr std::chrono::hh_mm_ss<std::chrono::seconds> documentedTime{18h + 59min + 17s};
+    conditions.IfUnmodifiedSince = std::chrono::sys_days{documentedDate} + documentedTime.to_duration();
     return conditions;
 }
 
@@ -81,7 +86,7 @@ TEST(LeaseTests, BlobRenewReleaseRejectEmptyLeaseIds) {
     ASSERT_FALSE(release.has_value());
     EXPECT_EQ(renew.error().Code, std::make_error_code(std::errc::invalid_argument));
     EXPECT_EQ(release.error().Code, std::make_error_code(std::errc::invalid_argument));
-    EXPECT_TRUE(httpClient.NoRequestMade());
+    EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 
 TEST(LeaseTests, BlobRenewAndReleaseSendLeaseActionAndConditions) {
@@ -102,23 +107,16 @@ TEST(LeaseTests, BlobRenewAndReleaseSendLeaseActionAndConditions) {
 }
 
 TEST(LeaseTests, BlobAcquireLeaseValidatesDuration) {
-    FakeHttpClient httpClient;
-    BlobClient client{httpClient, MakeBlobClientOptions()};
-
-    const auto result = RunAwaitable(httpClient, client.AcquireLeaseAsync(AcquireLeaseOptions{
-                                                     .Conditions = {}, .ProposedLeaseId = {}, .Duration = 5s}));
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
-    EXPECT_EQ(httpClient.RequestCount(), 0U);
+    EXPECT_THROW((void)AVEVA::AzureClient::LeaseDuration{5s}, std::invalid_argument);
 }
 
 TEST(LeaseTests, BlobAcquireLeaseRetryReusesGeneratedProposedLeaseId) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{AVEVA::HttpStatus::ServiceUnavailable, MakeCanonicalSuccessHeaders(), ""});
-    httpClient.EnqueueResponse(LeaseResponse(AVEVA::HttpStatusCode{201}, "lease-a"));
+    httpClient.EnqueueResponse(LeaseResponse(::AVEVA::HttpStatus::Created, "lease-a"));
 
     auto options = MakeBlobClientOptions();
-    options.Retry.MaxRetries = 1;
+    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{1U};
     options.Retry.InitialDelay = 0ms;
     BlobClient client{httpClient, options};
 

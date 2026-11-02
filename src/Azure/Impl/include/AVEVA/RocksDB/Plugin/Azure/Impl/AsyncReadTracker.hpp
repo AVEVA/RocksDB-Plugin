@@ -50,6 +50,13 @@ class AsyncReadTracker : public std::enable_shared_from_this<AsyncReadTracker> {
 
     [[nodiscard]] size_t InFlight() const;
 
+    /// <summary>
+    /// Shared state an owner gives up on before its reads have ended: it is released only after the last read ends,
+    /// from the fresh task End runs in, so a late completion never drops the last reference to the HTTP client it is
+    /// running inside of. Released at once when no read is in flight.
+    /// </summary>
+    void RetainUntilIdle(std::shared_ptr<const void> state);
+
   private:
     struct Registration;
 
@@ -59,5 +66,7 @@ class AsyncReadTracker : public std::enable_shared_from_this<AsyncReadTracker> {
     mutable std::mutex m_mutex;
     std::condition_variable m_idle;
     std::atomic<size_t> m_inFlight{0};
+    // Guarded by m_mutex.
+    std::shared_ptr<const void> m_retained;
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

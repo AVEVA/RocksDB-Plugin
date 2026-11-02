@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "AVEVA/RocksDB/Plugin/Core/Units.hpp"
+
 #include <boost/container/static_vector.hpp>
 
 #include <algorithm>
@@ -17,6 +19,11 @@
 #include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
+/// <summary>The bytes allocated for a pooled buffer, which can exceed the bytes a caller asked for.</summary>
+using BufferCapacity = Core::StrongInteger<struct BufferCapacityTag, std::size_t>;
+/// <summary>The bytes of a pooled buffer that a caller asked for.</summary>
+using BufferLength = Core::StrongInteger<struct BufferLengthTag, std::size_t>;
+
 /// <summary>Production hooks: none. Tests substitute a static type to pause a return at a precise point.</summary>
 struct NoDownloadBufferPoolHooks {
     // Runs after a returned buffer is published and its bytes are accounted, with no lock held.
@@ -48,8 +55,9 @@ template <typename Hooks = NoDownloadBufferPoolHooks> class BasicDownloadBufferP
     /// <summary>A buffer on loan from the pool; it returns itself when the last owner lets go.</summary>
     class Lease {
       public:
-        Lease(BasicDownloadBufferPool& pool, std::unique_ptr<char[]> buffer, std::size_t capacity, std::size_t size)
-            : m_pool(&pool), m_buffer(std::move(buffer)), m_capacity(capacity), m_size(size) {}
+        Lease(BasicDownloadBufferPool& pool, std::unique_ptr<char[]> buffer, const BufferCapacity capacity,
+              const BufferLength size)
+            : m_pool(&pool), m_buffer(std::move(buffer)), m_capacity(capacity.Value()), m_size(size.Value()) {}
         Lease(const Lease&) = delete;
         Lease& operator=(const Lease&) = delete;
         ~Lease() { m_pool->Return(std::move(m_buffer), m_capacity); }
@@ -105,7 +113,8 @@ template <typename Hooks = NoDownloadBufferPoolHooks> class BasicDownloadBufferP
         if (!buffer) {
             buffer = std::make_unique_for_overwrite<char[]>(capacity);
         }
-        return std::allocate_shared<Lease>(BlockAllocator<Lease>(this), *this, std::move(buffer), capacity, size);
+        return std::allocate_shared<Lease>(BlockAllocator<Lease>(this), *this, std::move(buffer),
+                                           BufferCapacity{capacity}, BufferLength{size});
     }
 
     /// <summary>Bytes currently held for reuse (for tests and diagnostics).</summary>
@@ -134,6 +143,8 @@ template <typename Hooks = NoDownloadBufferPoolHooks> class BasicDownloadBufferP
       public:
         using value_type = T;
         explicit BlockAllocator(BasicDownloadBufferPool* pool) noexcept : m_pool(pool) {}
+        // Implicit by necessity: the Allocator requirements make std::allocate_shared rebind and convert an
+        // allocator to its control-block type without naming the conversion.
         template <typename U> BlockAllocator(const BlockAllocator<U>& other) noexcept : m_pool(other.m_pool) {}
 
         [[nodiscard]] T* allocate(const std::size_t count) {

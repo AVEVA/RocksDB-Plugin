@@ -36,22 +36,22 @@ LocalFile::~LocalFile() {
     }
 }
 
-ByteCount LocalFile::Read(char* buffer, const ByteOffset offset, const ByteCount length) {
+ByteCount LocalFile::Read(const std::span<char> buffer, const ByteOffset offset) {
     if (m_handle == INVALID_HANDLE_VALUE) {
         throw std::runtime_error("Cannot read: the file could not be opened.");
     }
 
     std::uint64_t total = 0;
-    while (total < length.Value()) {
+    while (total < buffer.size()) {
         const auto chunk =
-            static_cast<DWORD>(std::min<std::uint64_t>(length.Value() - total, std::numeric_limits<DWORD>::max()));
+            static_cast<DWORD>(std::min<std::uint64_t>(buffer.size() - total, std::numeric_limits<DWORD>::max()));
         // An explicit offset makes the read independent of the file pointer, so concurrent reads do not interfere.
         OVERLAPPED position{};
         const auto at = offset.Value() + total;
         position.Offset = static_cast<DWORD>(at & 0xFFFFFFFFu);
         position.OffsetHigh = static_cast<DWORD>(at >> 32);
         DWORD read = 0;
-        if (!::ReadFile(m_handle, buffer + total, chunk, &read, &position)) {
+        if (!::ReadFile(m_handle, buffer.data() + total, chunk, &read, &position)) {
             const DWORD error = ::GetLastError();
             if (error == ERROR_HANDLE_EOF) {
                 break;
@@ -74,15 +74,15 @@ LocalFile::~LocalFile() {
     }
 }
 
-ByteCount LocalFile::Read(char* buffer, const ByteOffset offset, const ByteCount length) {
+ByteCount LocalFile::Read(const std::span<char> buffer, const ByteOffset offset) {
     if (m_fd < 0) {
         throw std::runtime_error("Cannot read: the file could not be opened.");
     }
 
     std::uint64_t total = 0;
-    while (total < length.Value()) {
-        const ssize_t read = ::pread(m_fd, buffer + total, static_cast<size_t>(length.Value() - total),
-                                     static_cast<off_t>(offset.Value() + total));
+    while (total < buffer.size()) {
+        const ssize_t read =
+            ::pread(m_fd, buffer.data() + total, buffer.size() - total, static_cast<off_t>(offset.Value() + total));
         if (read < 0) {
             if (errno == EINTR) {
                 continue;

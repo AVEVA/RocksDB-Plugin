@@ -36,8 +36,10 @@ TEST(ResponseTests, DefaultConstructedResponseHasDefaultState) {
 TEST(ResponseTests, MoveConstructionPreservesValueRawResponseAndError) {
     Response<std::vector<int>> original{
         std::vector<int>{1, 2, 3},
-        HttpResponse{AVEVA::HttpStatus::PartialContent, {{"x-ms-request-id", "req-1"}}, "body"},
-        BlobStorageError{.StatusCode = AVEVA::HttpStatusCode{409},
+        HttpResponse{AVEVA::HttpStatus::PartialContent,
+                     {AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-request-id"}, AVEVA::HeaderValue{"req-1"})},
+                     "body"},
+        BlobStorageError{.StatusCode = ::AVEVA::HttpStatus::Conflict,
                          .ErrorCode = "Conflict",
                          .Message = "message",
                          .RequestId = "req-1"}};
@@ -52,20 +54,24 @@ TEST(ResponseTests, MoveConstructionPreservesValueRawResponseAndError) {
 }
 
 TEST(ResponseTests, RvalueQualifiedValueMovesOutLargePayloads) {
-    Response<std::unique_ptr<int>> response{std::make_unique<int>(42), HttpResponse{AVEVA::HttpStatus::Ok, {}, ""}};
+    constexpr int Payload = 42;
+    Response<std::unique_ptr<int>> response{std::make_unique<int>(Payload),
+                                            HttpResponse{AVEVA::HttpStatus::Ok, {}, ""}};
 
     std::unique_ptr<int> const value = std::move(response).Value();
 
     ASSERT_TRUE(value);
-    EXPECT_EQ(*value, 42);
+    EXPECT_EQ(*value, Payload);
 }
 
 TEST(ResponseTests, RvalueQualifiedRawResponseAndErrorMoveOutWithoutRelyingOnSource) {
     const auto makeResponse = [] {
         return Response<std::string>{
             "value",
-            HttpResponse{AVEVA::HttpStatus::PartialContent, {{"x-ms-request-id", "req-1"}}, "large-body-payload"},
-            BlobStorageError{.StatusCode = AVEVA::HttpStatusCode{409},
+            HttpResponse{AVEVA::HttpStatus::PartialContent,
+                         {AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-request-id"}, AVEVA::HeaderValue{"req-1"})},
+                         "large-body-payload"},
+            BlobStorageError{.StatusCode = ::AVEVA::HttpStatus::Conflict,
                              .ErrorCode = "Conflict",
                              .Message = "message",
                              .RequestId = "req-1"}};
@@ -84,8 +90,11 @@ TEST(ResponseTests, RvalueQualifiedRawResponseAndErrorMoveOutWithoutRelyingOnSou
 
 TEST(ResponseTests, MutableLvalueAccessorsAllowInPlaceModificationAndMoveOut) {
     Response<std::string> response{
-        "value", HttpResponse{AVEVA::HttpStatus::PartialContent, {{"x-ms-request-id", "req-1"}}, "body"},
-        BlobStorageError{.StatusCode = AVEVA::HttpStatusCode{409}, .ErrorCode = "Conflict"}};
+        "value",
+        HttpResponse{AVEVA::HttpStatus::PartialContent,
+                     {AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-request-id"}, AVEVA::HeaderValue{"req-1"})},
+                     "body"},
+        BlobStorageError{.StatusCode = ::AVEVA::HttpStatus::Conflict, .ErrorCode = "Conflict"}};
 
     response.Value() = "changed";
     response.Error().reset();
@@ -131,8 +140,11 @@ TEST(ResponseTests, ErrorCodesCompareEqualToDocumentedPortableConditions) {
 TEST(ResponseTests, MovingMembersOutInDifferentOrdersLeavesEachIntact) {
     const auto makeResponse = [] {
         return Response<std::string>{
-            "value", HttpResponse{AVEVA::HttpStatus::PartialContent, {{"x-ms-request-id", "req-1"}}, "body"},
-            BlobStorageError{.StatusCode = AVEVA::HttpStatusCode{409}, .ErrorCode = "Conflict"}};
+            "value",
+            HttpResponse{AVEVA::HttpStatus::PartialContent,
+                         {AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-request-id"}, AVEVA::HeaderValue{"req-1"})},
+                         "body"},
+            BlobStorageError{.StatusCode = ::AVEVA::HttpStatus::Conflict, .ErrorCode = "Conflict"}};
     };
 
     Response<std::string> first = makeResponse();

@@ -6,6 +6,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntimeTransport.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/ReadableFile.hpp"
+#include "AVEVA/RocksDB/Plugin/Support/TempDirectory.hpp"
 #include "BasicReadableFile.hpp"
 #include "IntegrationTestHelpers.hpp"
 
@@ -51,10 +52,11 @@ class BlobFilesystemIntegrationTests : public AzureIntegrationTestBase {
             return;
         }
         {
-            m_filesystem = std::make_unique<BlobFilesystemImpl>(m_ioContext.Get(), *m_credentials,
-                                                                std::nullopt, // No backup credentials for tests
-                                                                Configuration::PageBlob::DefaultSize,
-                                                                Configuration::PageBlob::DefaultBufferSize, m_logger);
+            m_filesystem = std::make_unique<BlobFilesystemImpl>(
+                m_ioContext.Get(), *m_credentials,
+                std::nullopt, // No backup credentials for tests
+                ::AVEVA::RocksDB::Plugin::Azure::Defaults::DataFileInitialSize,
+                ::AVEVA::RocksDB::Plugin::Azure::Defaults::DataFileBufferSize, m_logger);
         }
     }
 };
@@ -736,7 +738,7 @@ TEST_F(BlobFilesystemIntegrationTests, CreateLogger_CreatesLogFile) {
     std::string logFileName = m_containerPrefix + "/" + m_blobName;
 
     // Act
-    auto logger = m_filesystem->CreateLogger(logFileName, 1);
+    auto logger = m_filesystem->CreateLogger(logFileName);
 
     // Assert
     EXPECT_TRUE(Exists(logFileName));
@@ -787,7 +789,7 @@ TEST_F(BlobFilesystemIntegrationTests, GetChildren_WithSizeHint_ReturnsResults) 
     }
 
     // Act
-    auto children = m_filesystem->GetChildren(dirPrefix, 3);
+    auto children = m_filesystem->GetChildren(dirPrefix, BlobFilesystemImpl::ListPageSize{3});
 
     // Assert - Should return all files even with small size hint
     // Now that pagination is properly implemented, all 5 files should be returned
@@ -1439,20 +1441,10 @@ TEST_F(BlobFilesystemIntegrationTests, Prefetch_ThenRead_ReturnsPrefetchedData) 
 
 TEST_F(BlobFilesystemIntegrationTests, ReadableFile_CachedSst_IsServedFromCacheAfterBlobDeleted) {
     // Arrange - Only SST files are cached, and the cache downloads a file in the background on its second access.
-    const auto cacheDir = std::filesystem::temp_directory_path() / ("aveva_cache_hit_" + GenerateRandomBlobName());
-    std::filesystem::create_directories(cacheDir);
-    struct CacheDirCleanup {
-        std::filesystem::path Path;
-        ~CacheDirCleanup() {
-            std::error_code ec;
-            std::filesystem::remove_all(Path, ec);
-        }
-    } cleanup{cacheDir};
-
-    const auto cacheDirString = cacheDir.string();
-    BlobFilesystemImpl filesystem(m_ioContext.Get(), *m_credentials, std::nullopt, Configuration::PageBlob::DefaultSize,
-                                  Configuration::PageBlob::DefaultBufferSize, m_logger,
-                                  std::string_view(cacheDirString));
+    const AVEVA::RocksDB::Plugin::Core::Mocks::TempDirectory cacheDir("cache_hit");
+    BlobFilesystemImpl filesystem(
+        m_ioContext.Get(), *m_credentials, std::nullopt, ::AVEVA::RocksDB::Plugin::Azure::Defaults::DataFileInitialSize,
+        ::AVEVA::RocksDB::Plugin::Azure::Defaults::DataFileBufferSize, m_logger, cacheDir.Path());
 
     const auto blobName = GenerateRandomBlobName("cache-hit") + ".sst";
     const auto path = m_containerPrefix + "/" + blobName;

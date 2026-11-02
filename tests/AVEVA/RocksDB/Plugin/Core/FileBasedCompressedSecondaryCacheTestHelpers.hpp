@@ -131,10 +131,7 @@ class FileBasedCompressedSecondaryCacheTests : public ::testing::Test {
             m_cacheDir, m_fs, FileBasedCompressedSecondaryCache::kDefaultCapacity, MakeNullLogger());
     }
 
-    void TearDown() override {
-        m_cache.reset();
-        std::filesystem::remove_all(m_cacheDir);
-    }
+    void TearDown() override { m_cache.reset(); }
 
     static rocksdb::Slice MakeKey(const std::string& s) { return rocksdb::Slice(s); }
 };

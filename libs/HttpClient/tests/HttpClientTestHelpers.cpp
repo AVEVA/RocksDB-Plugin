@@ -176,10 +176,10 @@ void ScriptedServer::ReadNext(const std::shared_ptr<Connection>& connection) {
             }
             m_requests.push_back(connection->Request);
             auto action = std::make_shared<ServerAction>(m_behavior(connection->Index, connection->Request));
-            if (action->Hold) {
+            if (action->Reply == ServerReply::Hold) {
                 return;
             }
-            if (action->Drop) {
+            if (action->Reply == ServerReply::Drop) {
                 boost::system::error_code ignored;
                 connection->Socket.shutdown(Tcp::socket::shutdown_both, ignored);
                 connection->Socket.close(ignored);
@@ -201,7 +201,7 @@ void ScriptedServer::ReadNext(const std::shared_ptr<Connection>& connection) {
                                           }
                                           return;
                                       }
-                                      if (action->CloseAfterWrite) {
+                                      if (action->Reply == ServerReply::RespondAndClose) {
                                           boost::system::error_code ignored;
                                           connection->Socket.shutdown(Tcp::socket::shutdown_both, ignored);
                                           connection->Socket.close(ignored);
@@ -223,24 +223,23 @@ std::string ClosedLocalUrl() {
 }
 
 ExchangeResult Exchange(AVEVA::HttpRequest request, std::string wireResponse, AVEVA::HttpRequestOptions options,
-                        bool holdResponse) {
+                        ServerReply reply) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     // Most callers are not about timeouts, so a stuck exchange should fail in seconds rather than at the 30 s default.
     constexpr std::chrono::seconds ExchangeTimeout{2};
     if (options.GetTimeout() == AVEVA::HttpRequestOptions{}.GetTimeout()) {
-        options.SetTimeout(ExchangeTimeout);
+        options.SetTimeout(AVEVA::Timeout{ExchangeTimeout});
     }
     ScriptedServer server(context, [&](int, const http::request<http::string_body>&) {
         ServerAction action;
         action.Wire = std::move(wireResponse);
-        action.CloseAfterWrite = true;
-        action.Hold = holdResponse;
+        action.Reply = reply;
         return action;
     });
     ExchangeResult result;
     result.authority = server.Authority();
-    request.SetUrl("http://" + result.authority + request.GetUrl());
+    request.SetUrl(AVEVA::HttpUrl{"http://" + result.authority + request.GetUrl()});
     int completions = 0;
     HttpClientTests::SendWith(*client, std::move(request), options,
                               [&](std::error_code error, AVEVA::HttpResponse response) {

@@ -34,10 +34,10 @@ AsyncReadRequest::AsyncReadRequest(const rocksdb::FSReadRequest& request, Callba
     : m_offset(request.offset), m_length(request.len), m_scratch(request.scratch), m_callback(std::move(callback)),
       m_callbackArg(callbackArg), m_signal(std::move(signal)), m_completionExecutor(std::move(completionExecutor)) {}
 
-void AsyncReadRequest::AssertWaitCannotDeadlock() {
+void AsyncReadRequest::ThrowIfWaitWouldDeadlock() {
     // A finished request is never waited on, so polling it from any thread is fine.
     if (m_completionExecutor && Finished() == Completion::Pending) {
-        AssertNotRunningOn(*m_completionExecutor);
+        ThrowIfRunningOn(*m_completionExecutor);
     }
 }
 
@@ -164,7 +164,7 @@ rocksdb::IOStatus PollAsyncReads(const std::vector<void*>& ioHandles) {
             continue;
         }
 
-        asyncHandle->Request->AssertWaitCannotDeadlock();
+        asyncHandle->Request->ThrowIfWaitWouldDeadlock();
         asyncHandle->Request->Wait();
         asyncHandle->Request->DeliverCallback();
     }

@@ -184,14 +184,16 @@ class AttemptFactory {
     /// <summary>
     /// Builds one attempt's request, stamped with the current date.
     /// </summary>
-    /// <param name="reuse">Whether the request may be moved out instead of copied; a request whose body was already
-    /// shared by an earlier attempt is copied regardless.</param>
+    /// <param name="reuse">Whether the request may be moved out instead of copied.</param>
     /// <returns>The attempt's request.</returns>
     [[nodiscard]] HttpRequest Build(Reuse reuse) {
-        HttpRequest attempt = reuse == Reuse::MayMove && !m_sharedBody ? std::move(m_request) : Copy();
+        // Copying shares the body, so only the headers are duplicated.
+        HttpRequest attempt = reuse == Reuse::MayMove ? std::move(m_request) : m_request;
         // Stamped right before signing, so a request that waited for a token or a backoff never carries a stale
         // date that the service would reject as clock skew.
-        StampDate(attempt, BuildDateHeaderValue(std::chrono::system_clock::now()));
+        attempt.RemoveHeaders(HeaderName{std::string{XMsDateHeaderName}});
+        attempt.AddHeader(HttpHeader(HeaderName{std::string{XMsDateHeaderName}},
+                                     HeaderValue{BuildDateHeaderValue(std::chrono::system_clock::now())}));
         return attempt;
     }
 
@@ -202,75 +204,16 @@ class AttemptFactory {
     [[nodiscard]] const HttpRequest& Original() const noexcept { return m_request; }
 
   private:
-    /// <summary>
-    /// Copies the request for one attempt, moving an owned body into shared storage the first time so later attempts
-    /// view it instead of copying it.
-    /// </summary>
-    /// <returns>A copy of the request that shares the body.</returns>
-    [[nodiscard]] HttpRequest Copy() {
-        HttpRequest attempt;
-        attempt.SetMethod(m_request.GetMethod());
-        attempt.SetUrl(m_request.GetUrl());
-        attempt.SetHeaders(m_request.GetHeaders());
-        if (m_request.GetBodyStorage() == BodyStorage::View) {
-            attempt.SetBodyView(m_request.GetBodyView(), m_request.GetBodyKeepAlive());
-        } else {
-            // An owned body is moved into shared storage once; every attempt then views it instead of
-            // copying it, and the HTTP operation of a timed-out attempt keeps it alive until it is done.
-            if (!m_sharedBody && !m_request.GetBody().empty()) {
-                m_sharedBody = std::make_shared<const std::string>(m_request.ReleaseBody());
-            }
-            if (m_sharedBody) {
-                attempt.SetBodyView(std::as_bytes(std::span{m_sharedBody->data(), m_sharedBody->size()}), m_sharedBody);
-            }
-        }
-        return attempt;
-    }
-
-    /// <summary>
-    /// Every attempt copies the same header list, so the date header's position (or its absence) is learned once
-    /// and later attempts skip the rescan. A hit is re-validated, so a stale index only costs the scan.
-    /// </summary>
-    /// <param name="request">The attempt's request; gets the date header added when it has none.</param>
-    /// <param name="now">The date header value.</param>
-    void StampDate(HttpRequest& request, const std::string& now) {
-        auto& headers = request.GetHeaders();
-        if (m_dateHeaderIndex < headers.size() &&
-            IEquals(headers[m_dateHeaderIndex].GetName(), XMsDateHeaderName) == StringMatch::Match) {
-            headers[m_dateHeaderIndex].SetValue(now);
-            return;
-        }
-        if (m_dateHeaderScan == DateHeaderScan::Pending) {
-            m_dateHeaderScan = DateHeaderScan::Done;
-            const auto found = std::ranges::find_if(headers, [](const HttpHeader& header) {
-                return IEquals(header.GetName(), XMsDateHeaderName) == StringMatch::Match;
-            });
-            if (found != headers.end()) {
-                m_dateHeaderIndex = static_cast<std::size_t>(found - headers.begin());
-                found->SetValue(now);
-                return;
-            }
-        }
-        request.AddHeader(HttpHeader{std::string{XMsDateHeaderName}, now});
-    }
-
-    /// <summary>Whether the position of the date header has been looked up.</summary>
-    enum class DateHeaderScan : std::uint8_t { Pending, Done };
-
     HttpRequest m_request;
-    std::shared_ptr<const std::string> m_sharedBody;
-    std::size_t m_dateHeaderIndex = std::numeric_limits<std::size_t>::max();
-    DateHeaderScan m_dateHeaderScan = DateHeaderScan::Pending;
 };
-
 /// <summary>
 /// Turns a retry count into an attempt count, without overflowing.
 /// </summary>
-/// <param name="maxRetries">The retries after the first attempt; a negative count is treated as zero.</param>
+/// <param name="maxRetries">The retries after the first attempt.</param>
 /// <returns>The number of attempts, saturated at the largest int.</returns>
-[[nodiscard]] constexpr int ComputeMaxAttempts(int maxRetries) noexcept {
-    return maxRetries >= std::numeric_limits<int>::max() - 1 ? std::numeric_limits<int>::max()
-                                                             : std::max(0, maxRetries) + 1;
+[[nodiscard]] constexpr int ComputeMaxAttempts(RetryCount maxRetries) noexcept {
+    constexpr auto Largest = static_cast<RetryCount::ValueType>(std::numeric_limits<int>::max());
+    return maxRetries.Value() >= Largest ? std::numeric_limits<int>::max() : static_cast<int>(maxRetries.Value()) + 1;
 }
 
 /// <summary>
@@ -339,40 +282,41 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
 
             auto request = co_await PrepareAttempt();
             if (!request) {
-                co_return std::unexpected(request.error());
+                co_return std::unexpected(HttpFailure{request.error()});
             }
             auto options = AttemptOptions();
             if (!options) {
-                co_return std::unexpected(options.error());
+                co_return std::unexpected(HttpFailure{options.error()});
             }
 
             auto sent = co_await m_http.SendAsync(std::move(*request), std::move(*options));
-            const std::error_code error = sent ? std::error_code{} : sent.error();
+            const std::error_code error = sent ? std::error_code{} : sent.error().Error();
             HttpResponse response = sent ? std::move(*sent) : HttpResponse{};
 
             if (error && DeadlineStatus() == DeadlineState::Expired) {
-                co_return std::unexpected(std::make_error_code(std::errc::timed_out));
+                co_return std::unexpected(HttpFailure{std::make_error_code(std::errc::timed_out)});
             }
 
             switch (RefreshTokenAfter401(error, response)) {
             case Refresh::Retry:
                 continue;
             case Refresh::DeadlinePassed:
-                co_return std::unexpected(std::make_error_code(std::errc::timed_out));
+                co_return std::unexpected(HttpFailure{std::make_error_code(std::errc::timed_out)});
             case Refresh::NotApplicable:
                 break;
             }
 
             const auto delay = BackoffBeforeRetry(error, response);
             if (!delay) {
-                if (error) {
-                    co_return std::unexpected(error);
+                if (!sent) {
+                    // Keeps the transport cause, which tells a certificate rejection from a refused connection.
+                    co_return std::unexpected(sent.error());
                 }
                 co_return std::move(response);
             }
             if (m_totalDeadline && Remaining() <= *delay) {
                 // The backoff alone would outlast the deadline, so another attempt can never be made.
-                co_return std::unexpected(std::make_error_code(std::errc::timed_out));
+                co_return std::unexpected(HttpFailure{std::make_error_code(std::errc::timed_out)});
             }
 
             typename RetryTimerFor<THttp>::type timer(m_http.get_executor());
@@ -450,7 +394,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
     /// <returns>The credential's result; <c>std::errc::timed_out</c> when the limit won the race.</returns>
     boost::asio::awaitable<TokenResult> AcquireToken() {
         using namespace boost::asio::experimental::awaitable_operators;
-        auto limit = m_requestOptions.GetTimeout();
+        auto limit = m_requestOptions.GetTimeout().Value();
         if (m_totalDeadline) {
             limit = std::min(limit, std::max(Remaining(), std::chrono::milliseconds{0}));
         }
@@ -521,7 +465,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
                 // The deadline has passed: never start a fresh attempt.
                 return std::unexpected(std::make_error_code(std::errc::timed_out));
             }
-            options.SetTimeout(std::min(options.GetTimeout(), left));
+            options.SetTimeout(std::min(options.GetTimeout(), Timeout{left}));
         }
         return options;
     }

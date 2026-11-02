@@ -36,6 +36,7 @@ using HttpClientTests::Exchange;
 using HttpClientTests::RunBounded;
 using HttpClientTests::ScriptedServer;
 using HttpClientTests::ServerAction;
+using HttpClientTests::ServerReply;
 using HttpResult = AVEVA::HttpResult;
 using Tcp = asio::ip::tcp;
 
@@ -44,7 +45,7 @@ constexpr const char* const OkResponse = "HTTP/1.1 200 OK\r\nContent-Length: 2\r
 
 TEST(HttpClientRequest, InvalidRequestCompletesAsynchronously) {
     boost::asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     const std::vector<std::string> invalidUrls{"/relative",
                                                "ftp://example.com/file",
                                                "http:///missing-host",
@@ -55,7 +56,7 @@ TEST(HttpClientRequest, InvalidRequestCompletesAsynchronously) {
     std::size_t completions = 0;
     for (const auto& url : invalidUrls) {
         AVEVA::HttpRequest request;
-        request.SetUrl(url);
+        request.SetUrl(AVEVA::HttpUrl{url});
         HttpClientTests::SendWith(*client, std::move(request), AVEVA::HttpRequestOptions{},
                                   [&](std::error_code error, AVEVA::HttpResponse response) {
                                       ++completions;
@@ -67,24 +68,17 @@ TEST(HttpClientRequest, InvalidRequestCompletesAsynchronously) {
     }
 
     AVEVA::HttpRequest request;
-    request.SetUrl("http://127.0.0.1/");
-    request.AddHeader({"X-Test", "value\r\nInjected: true"});
+    request.SetUrl(AVEVA::HttpUrl{"http://127.0.0.1/"});
+    request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{"X-Test"}, AVEVA::HeaderValue{"value\r\nInjected: true"}));
     HttpClientTests::SendWith(*client, request, AVEVA::HttpRequestOptions{},
                               [&](std::error_code error, AVEVA::HttpResponse) {
                                   ++completions;
                                   EXPECT_EQ(error, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidRequest));
                               });
-    request.GetHeaders().clear();
-
-    AVEVA::HttpRequestOptions options;
-    options.SetTimeout(std::chrono::milliseconds(0));
-    HttpClientTests::SendWith(*client, request, options, [&](std::error_code error, AVEVA::HttpResponse) {
-        ++completions;
-        EXPECT_EQ(error, AVEVA::make_error_code(AVEVA::HttpClientError::InvalidRequest));
-    });
+    request.RemoveHeaders(AVEVA::HeaderName{"X-Test"});
 
     request.SetMethod(AVEVA::HttpMethod::Trace);
-    request.SetBody("not-allowed");
+    request.SetBody(AVEVA::HttpBody{"not-allowed"});
     HttpClientTests::SendWith(*client, request, AVEVA::HttpRequestOptions{},
                               [&](std::error_code error, AVEVA::HttpResponse) {
                                   ++completions;
@@ -93,20 +87,20 @@ TEST(HttpClientRequest, InvalidRequestCompletesAsynchronously) {
 
     EXPECT_EQ(completions, 0u);
     RunBounded(context);
-    EXPECT_EQ(completions, invalidUrls.size() + 3);
+    EXPECT_EQ(completions, invalidUrls.size() + 2);
 }
 
 TEST(HttpClientRequest, OversizedHeadersFailWithInvalidRequest) {
     boost::asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     std::size_t completions = 0;
 
     AVEVA::HttpRequest longValue;
-    longValue.SetUrl("http://127.0.0.1/");
-    longValue.AddHeader({"X-Test", std::string(70000, 'a')});
+    longValue.SetUrl(AVEVA::HttpUrl{"http://127.0.0.1/"});
+    longValue.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{"X-Test"}, AVEVA::HeaderValue{std::string(70000, 'a')}));
     AVEVA::HttpRequest longName;
-    longName.SetUrl("http://127.0.0.1/");
-    longName.AddHeader({std::string(70000, 'a'), "value"});
+    longName.SetUrl(AVEVA::HttpUrl{"http://127.0.0.1/"});
+    longName.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{std::string(70000, 'a')}, AVEVA::HeaderValue{"value"}));
     for (auto* request : {&longValue, &longName}) {
         HttpClientTests::SendWith(*client, std::move(*request), AVEVA::HttpRequestOptions{},
                                   [&](std::error_code error, AVEVA::HttpResponse) {
@@ -121,14 +115,14 @@ TEST(HttpClientRequest, OversizedHeadersFailWithInvalidRequest) {
 
 TEST(HttpClientRequest, HeaderControlCharactersFailWithInvalidRequest) {
     boost::asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     std::size_t completions = 0;
 
     for (const std::string& value :
          {std::string{"bad\0value", 9}, std::string{"bad\x1Fvalue", 9}, std::string{"bad\x7Fvalue", 9}}) {
         AVEVA::HttpRequest request;
-        request.SetUrl("http://127.0.0.1/");
-        request.AddHeader({"X-Test", value});
+        request.SetUrl(AVEVA::HttpUrl{"http://127.0.0.1/"});
+        request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{"X-Test"}, AVEVA::HeaderValue{value}));
         HttpClientTests::SendWith(*client, std::move(request), AVEVA::HttpRequestOptions{},
                                   [&](std::error_code error, AVEVA::HttpResponse) {
                                       ++completions;
@@ -142,13 +136,13 @@ TEST(HttpClientRequest, HeaderControlCharactersFailWithInvalidRequest) {
 
 asio::awaitable<HttpResult> SendInvalid(AVEVA::HttpClient& client) {
     AVEVA::HttpRequest request;
-    request.SetUrl("ftp://example.com/file");
+    request.SetUrl(AVEVA::HttpUrl{"ftp://example.com/file"});
     co_return co_await client.SendAsync(std::move(request), AVEVA::HttpRequestOptions{});
 }
 
 TEST(HttpClientRequest, CoroutineSendAsyncReportsErrorsThroughUseFuture) {
     boost::asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
 
     auto future = asio::co_spawn(context, SendInvalid(*client), asio::use_future);
 
@@ -156,14 +150,14 @@ TEST(HttpClientRequest, CoroutineSendAsyncReportsErrorsThroughUseFuture) {
 
     auto result = future.get();
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), AVEVA::make_error_code(AVEVA::HttpClientError::InvalidUrl));
+    EXPECT_EQ(result.error().Error(), AVEVA::make_error_code(AVEVA::HttpClientError::InvalidUrl));
 }
 
 asio::awaitable<void> SendInvalidOnStrand(AVEVA::HttpClient& client,
                                           asio::strand<asio::io_context::executor_type> strand, bool& ranOnStrand,
                                           bool& completed) {
     AVEVA::HttpRequest request;
-    request.SetUrl("ftp://example.com/file");
+    request.SetUrl(AVEVA::HttpUrl{"ftp://example.com/file"});
     (void)co_await client.SendAsync(std::move(request), AVEVA::HttpRequestOptions{});
     ranOnStrand = strand.running_in_this_thread();
     completed = true;
@@ -171,7 +165,7 @@ asio::awaitable<void> SendInvalidOnStrand(AVEVA::HttpClient& client,
 
 TEST(HttpClientRequest, CoroutineResumesOnTheAwaitingStrand) {
     boost::asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     auto strand = asio::make_strand(context);
 
     bool ranOnStrand = false;
@@ -187,13 +181,15 @@ TEST(HttpClientRequest, CoroutineResumesOnTheAwaitingStrand) {
 TEST(HttpClientRequest, HttpErrorPreservesRequestFraming) {
     AVEVA::HttpRequest request;
     request.SetMethod(AVEVA::HttpMethod::Post);
-    request.SetUrl("/some%20path?key=value#not-sent");
-    request.SetBody(std::string("one\0two", 7));
-    request.SetHeaders({{"X-Test", "one"},
-                        {"X-Test", "two"},
-                        {"Host", "wrong.example"},
-                        {"Content-Length", "999"},
-                        {"Transfer-Encoding", "chunked"}});
+    request.SetUrl(AVEVA::HttpUrl{"/some%20path?key=value#not-sent"});
+    request.SetBody(AVEVA::HttpBody{std::string("one\0two", 7)});
+    for (const auto& [name, value] : {std::pair{"X-Test", "one"},
+                                      {"X-Test", "two"},
+                                      {"Host", "wrong.example"},
+                                      {"Content-Length", "999"},
+                                      {"Transfer-Encoding", "chunked"}}) {
+        request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{name}, AVEVA::HeaderValue{value}));
+    }
     const std::string responseBody("a\0b", 3);
     auto result = Exchange(request, "HTTP/1.1 404 Not Found\r\nSet-Cookie: first=1\r\nSet-Cookie: second=2\r\n"
                                     "Content-Length: 3\r\nConnection: close\r\n\r\n" +
@@ -206,7 +202,7 @@ TEST(HttpClientRequest, HttpErrorPreservesRequestFraming) {
     EXPECT_EQ(result.response.GetHeaders()[0].GetValue(), "first=1");
     EXPECT_EQ(result.response.GetHeaders()[1].GetValue(), "second=2");
     EXPECT_EQ(result.received.method(), http::verb::post);
-    EXPECT_EQ(result.received.body(), request.GetBody());
+    EXPECT_EQ(result.received.body(), std::string("one\0two", 7));
     EXPECT_EQ(result.received.target(), "/some%20path?key=value");
     EXPECT_EQ(result.received[http::field::host], result.authority);
     EXPECT_EQ(result.received[http::field::content_length], "7");
@@ -232,19 +228,21 @@ TEST(HttpClientRequest, ContentLengthIsSentOnlyWhenAppropriate) {
     }
     AVEVA::HttpRequest withBody;
     withBody.SetMethod(AVEVA::HttpMethod::Delete);
-    withBody.SetBody("x");
+    withBody.SetBody(AVEVA::HttpBody{"x"});
     auto result = Exchange(withBody, ok);
     EXPECT_EQ(result.received[http::field::content_length], "1");
 }
 
-TEST(HttpClientRequest, SetBodyViewTransmitsTheReferencedBytes) {
-    std::vector<std::byte> payload{std::byte{'v'}, std::byte{'i'}, std::byte{'e'}, std::byte{'w'}, std::byte{'!'}};
+TEST(HttpClientRequest, BorrowedBodyTransmitsTheReferencedBytes) {
+    auto payload = std::make_shared<const std::vector<std::byte>>(
+        std::vector<std::byte>{std::byte{'v'}, std::byte{'i'}, std::byte{'e'}, std::byte{'w'}, std::byte{'!'}});
 
     AVEVA::HttpRequest request;
     request.SetMethod(AVEVA::HttpMethod::Post);
-    request.SetBodyView(payload);
-    EXPECT_EQ(request.GetBodyStorage(), AVEVA::BodyStorage::View);
-    EXPECT_EQ(request.GetBodySize(), payload.size());
+    request.SetBody(AVEVA::HttpBody(*payload, payload));
+    EXPECT_EQ(request.GetBody().Size(), AVEVA::ByteCount{payload->size()});
+    const auto body = request.GetBody();
+    EXPECT_EQ(body.Bytes().data(), payload->data());
 
     auto result = Exchange(request, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
 
@@ -255,7 +253,7 @@ TEST(HttpClientRequest, SetBodyViewTransmitsTheReferencedBytes) {
 
 TEST(HttpClientRequest, IPv6LiteralHostHeaderKeepsBrackets) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
 
     boost::system::error_code ipv6Error;
     (void)asio::ip::make_address("::1", ipv6Error);
@@ -264,11 +262,15 @@ TEST(HttpClientRequest, IPv6LiteralHostHeaderKeepsBrackets) {
     }
 
     ScriptedServer server(
-        context, [](int, const http::request<http::string_body>&) { return ServerAction{OkNoBody, true}; }, "::1");
+        context,
+        [](int, const http::request<http::string_body>&) {
+            return ServerAction{OkNoBody, ServerReply::RespondAndClose};
+        },
+        "::1");
 
     AVEVA::HttpRequest request;
     const auto authority = server.Authority(); // the acceptor is closed by the time the test checks
-    request.SetUrl(server.Url("/ipv6"));
+    request.SetUrl(AVEVA::HttpUrl{server.Url("/ipv6")});
     std::error_code result;
     HttpClientTests::SendWith(*client, std::move(request), AVEVA::HttpRequestOptions{},
                               [&](std::error_code error, AVEVA::HttpResponse) {
@@ -282,27 +284,24 @@ TEST(HttpClientRequest, IPv6LiteralHostHeaderKeepsBrackets) {
     EXPECT_EQ(server.Received().front().base()[http::field::host], authority);
 }
 
-// Proves SetBodyView() is genuinely non-owning (unlike SetBody(), which copies
-// synchronously): the request completes asynchronously, so mutating the referenced buffer
-// after SendAsync() returns but before the completion handler runs changes what is
-// transmitted on the wire. This is the documented lifetime contract on SetBodyView() -- if a
-// future change accidentally made the body path copy eagerly, this test would start failing
-// because the server would observe the *original* bytes instead.
-TEST(HttpClientRequest, SetBodyViewReadsTheBufferLazilyNotAtCallTime) {
+// Proves a borrowed body is genuinely zero-copy: the request completes asynchronously, so mutating the owner's buffer
+// after SendAsync() returns but before the exchange runs changes what is transmitted. If the body path started copying
+// eagerly, the server would observe the original bytes instead.
+TEST(HttpClientRequest, BorrowedBodyIsReadLazilyNotAtCallTime) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     ScriptedServer server(context, [](int, const http::request<http::string_body>&) {
         ServerAction action;
-        action.Drop = true;
+        action.Reply = ServerReply::Drop;
         return action;
     });
 
-    std::vector<std::byte> mutableBuffer{std::byte{'A'}, std::byte{'A'}, std::byte{'A'}, std::byte{'A'}};
+    auto mutableBuffer = std::make_shared<std::vector<std::byte>>(4, std::byte{'A'});
 
     AVEVA::HttpRequest request;
     request.SetMethod(AVEVA::HttpMethod::Post);
-    request.SetUrl(server.Url());
-    request.SetBodyView(mutableBuffer);
+    request.SetUrl(AVEVA::HttpUrl{server.Url()});
+    request.SetBody(AVEVA::HttpBody(*mutableBuffer, mutableBuffer));
 
     bool completed = false;
     HttpClientTests::SendWith(*client, std::move(request), AVEVA::HttpRequestOptions{},
@@ -314,10 +313,7 @@ TEST(HttpClientRequest, SetBodyViewReadsTheBufferLazilyNotAtCallTime) {
     // Not yet run: proves the send is asynchronous and nothing has been read/copied yet.
     EXPECT_FALSE(completed);
 
-    // Mutate the referenced buffer's content after initiating the send but before letting
-    // the io_context process anything. If SetBodyView() had copied at call time, the server
-    // would still see "AAAA".
-    std::fill(mutableBuffer.begin(), mutableBuffer.end(), std::byte{'B'});
+    std::fill(mutableBuffer->begin(), mutableBuffer->end(), std::byte{'B'});
 
     RunBounded(context);
 
@@ -341,12 +337,12 @@ TEST(HttpClientRequest, ReusesConnectionForKeepAliveRequests) {
     ScriptedServer server(context,
                           [](int, const http::request<http::string_body>&) { return ServerAction{OkResponse}; });
 
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     const std::string authority = server.Authority();
     int completions = 0;
 
     AVEVA::HttpRequest request1;
-    request1.SetUrl("http://" + authority + "/first");
+    request1.SetUrl(AVEVA::HttpUrl{"http://" + authority + "/first"});
     HttpClientTests::SendWith(
         *client, request1, AVEVA::HttpRequestOptions{}, [&](std::error_code error, AVEVA::HttpResponse response) {
             ++completions;
@@ -354,7 +350,7 @@ TEST(HttpClientRequest, ReusesConnectionForKeepAliveRequests) {
             EXPECT_EQ(response.GetStatus(), AVEVA::HttpStatusCode{200});
 
             AVEVA::HttpRequest request2;
-            request2.SetUrl("http://" + authority + "/second");
+            request2.SetUrl(AVEVA::HttpUrl{"http://" + authority + "/second"});
             HttpClientTests::SendWith(*client, request2, AVEVA::HttpRequestOptions{},
                                       [&](std::error_code error2, AVEVA::HttpResponse response2) {
                                           ++completions;
@@ -373,7 +369,7 @@ TEST(HttpClientRequest, ReusesConnectionForKeepAliveRequests) {
 TEST(HttpClientRequest, ReadsLargeBodyIntact) {
     const std::string body(4 * 1024 * 1024, 'x');
     AVEVA::HttpRequest request;
-    request.SetUrl("/");
+    request.SetUrl(AVEVA::HttpUrl{"/"});
     AVEVA::HttpRequestOptions options;
     options.SetResponseBodyLimit(AVEVA::ByteCount{body.size() + 1});
     auto result = Exchange(
@@ -384,12 +380,12 @@ TEST(HttpClientRequest, ReadsLargeBodyIntact) {
 
 TEST(HttpClientRequest, CancellationRightAfterStartCompletesWithOperationCanceled) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     asio::cancellation_signal cancellation;
     AVEVA::HttpRequestOptions options;
 
     AVEVA::HttpRequest request;
-    request.SetUrl(HttpClientTests::ClosedLocalUrl());
+    request.SetUrl(AVEVA::HttpUrl{HttpClientTests::ClosedLocalUrl()});
 
     int completions = 0;
     HttpClientTests::SendWith(
@@ -412,7 +408,7 @@ TEST(HttpClientRequest, CancellationRightAfterStartCompletesWithOperationCancele
 
 TEST(HttpClientRequest, CancellationMidFlightCompletesWithOperationCanceled) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     bool requestRead = false;
     asio::cancellation_signal cancellation;
     ScriptedServer server(context, [&](int, const http::request<http::string_body>&) {
@@ -420,15 +416,15 @@ TEST(HttpClientRequest, CancellationMidFlightCompletesWithOperationCanceled) {
         // The server has the request and never answers: cancel now rather than after a fixed delay.
         cancellation.emit(asio::cancellation_type::terminal);
         ServerAction action;
-        action.Hold = true;
+        action.Reply = ServerReply::Hold;
         return action;
     });
 
     AVEVA::HttpRequestOptions options;
-    options.SetTimeout(std::chrono::seconds(5));
+    options.SetTimeout(AVEVA::Timeout{std::chrono::seconds(5)});
 
     AVEVA::HttpRequest request;
-    request.SetUrl(server.Url());
+    request.SetUrl(AVEVA::HttpUrl{server.Url()});
 
     int completions = 0;
     HttpClientTests::SendWith(
@@ -448,7 +444,7 @@ TEST(HttpClientRequest, CancellationMidFlightCompletesWithOperationCanceled) {
 
 TEST(HttpClientRequest, CancellingAfterCompletionIsANoop) {
     asio::io_context context;
-    auto client = AVEVA::HttpClient::Create(context);
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
     ScriptedServer server(context,
                           [](int, const http::request<http::string_body>&) { return ServerAction{OkResponse}; });
 
@@ -456,7 +452,7 @@ TEST(HttpClientRequest, CancellingAfterCompletionIsANoop) {
     AVEVA::HttpRequestOptions options;
 
     AVEVA::HttpRequest request;
-    request.SetUrl(server.Url());
+    request.SetUrl(AVEVA::HttpUrl{server.Url()});
 
     int completions = 0;
     HttpClientTests::SendWith(
@@ -478,36 +474,27 @@ TEST(HttpClientRequest, CancellingAfterCompletionIsANoop) {
     EXPECT_EQ(completions, 1);
 }
 
-TEST(HttpClientRequest, ReleaseBodyMovesTheOwnedBodyOut) {
-    AVEVA::HttpRequest request;
-    request.SetBody("payload");
-
-    EXPECT_EQ(request.ReleaseBody(), "payload");
-    EXPECT_TRUE(request.GetBody().empty());
-    EXPECT_EQ(request.GetBodySize(), 0u);
-}
-
-TEST(HttpClientRequest, BodyViewKeepAliveIsSharedByCopiesAndDroppedByReplacingTheBody) {
+TEST(HttpClientRequest, BodyOwnerIsSharedByCopiesAndDroppedByReplacingTheBody) {
     auto owner = std::make_shared<const std::string>("shared payload");
     const std::weak_ptr<const std::string> weak = owner;
     AVEVA::HttpRequest request;
-    request.SetBodyView(std::as_bytes(std::span{owner->data(), owner->size()}), owner);
+    request.SetBody(AVEVA::HttpBody(std::as_bytes(std::span{owner->data(), owner->size()}), owner));
     owner.reset();
 
     AVEVA::HttpRequest copy = request;
-    request.SetBody("other");
+    request.SetBody(AVEVA::HttpBody{"other"});
     EXPECT_FALSE(weak.expired());
-    EXPECT_EQ(copy.GetBodySize(), 14u);
+    EXPECT_EQ(copy.GetBody().Size(), AVEVA::ByteCount{14});
 
-    copy.SetBody({});
+    copy.SetBody(AVEVA::HttpBody{});
     EXPECT_TRUE(weak.expired());
 }
 
-TEST(HttpClientRequest, SharedBodyViewIsTransmitted) {
+TEST(HttpClientRequest, SharedBodyIsTransmittedAfterTheCallerDropsIt) {
     auto owner = std::make_shared<const std::string>("shared payload");
     AVEVA::HttpRequest request;
     request.SetMethod(AVEVA::HttpMethod::Post);
-    request.SetBodyView(std::as_bytes(std::span{owner->data(), owner->size()}), owner);
+    request.SetBody(AVEVA::HttpBody(std::as_bytes(std::span{owner->data(), owner->size()}), owner));
     owner.reset();
 
     auto result = Exchange(request, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");

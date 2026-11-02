@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/FileCacheTestAccess.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/Mocks/ContainerClientMock.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/Mocks/FileMock.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/Mocks/FilesystemMock.hpp"
@@ -21,6 +22,7 @@ using AVEVA::RocksDB::Plugin::Core::ByteCount;
 using AVEVA::RocksDB::Plugin::Core::ByteOffset;
 using AVEVA::RocksDB::Plugin::Core::CachePresence;
 using AVEVA::RocksDB::Plugin::Core::FileCache;
+using AVEVA::RocksDB::Plugin::Core::FileCacheTestAccess;
 using AVEVA::RocksDB::Plugin::Core::FilesystemResult;
 using AVEVA::RocksDB::Plugin::Core::IdleWaitResult;
 using AVEVA::RocksDB::Plugin::Core::Mocks::ContainerClientMock;
@@ -86,11 +88,11 @@ class FileCacheTests : public ::testing::Test {
         // The first access only records interest and the second queues the download, so a few reads suffice.
         constexpr int maxAttempts = 4;
         for (int attempt = 0; attempt < maxAttempts; ++attempt) {
-            const auto bytesRead = m_cache.ReadFile(filePath, kStart, kNoBytes, nullptr);
+            const auto bytesRead = m_cache.ReadFile(filePath, kStart, {});
             if (bytesRead) {
                 return;
             }
-            m_cache.WaitUntilIdle();
+            FileCacheTestAccess::WaitUntilIdle(m_cache);
         }
         FAIL() << "'" << filePath << "' did not become readable from cache";
     }
@@ -100,12 +102,12 @@ class FileCacheTests : public ::testing::Test {
         // The first access only records interest and the second queues the download, so a few reads suffice.
         constexpr int maxAttempts = 4;
         for (int attempt = 0; attempt < maxAttempts; ++attempt) {
-            const auto bytesRead = m_cache.ReadFile(filePath, kStart, kOneByte, buffer);
+            const auto bytesRead = m_cache.ReadFile(filePath, kStart, buffer);
             if (bytesRead) {
                 ASSERT_EQ(expectedCacheSize, m_cache.CacheSize());
                 return;
             }
-            m_cache.WaitUntilIdle();
+            FileCacheTestAccess::WaitUntilIdle(m_cache);
         }
         FAIL() << "'" << filePath << "' did not become readable from cache";
     }
@@ -134,7 +136,7 @@ TEST_F(FileCacheTests, ReadEvenSpaced256MbFiles) {
     EnsureReadFromCache("5.sst", fileSize + fileSize + fileSize + fileSize);
 
     // Assert
-    m_cache.WaitUntilIdle();
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
     std::unordered_set<std::string> expectedFiles = {"1.sst", "2.sst", "3.sst", "4.sst", "5.sst"};
 
     EXPECT_EQ(1, m_removedFiles.size());
@@ -182,7 +184,7 @@ TEST_F(FileCacheTests, ReadRandomLargeFiles_EvictionWorks) {
     EnsureReadFromCache("6.sst", fileSize3 + fileSize4 + fileSize5 + fileSize6);
 
     // Assert
-    m_cache.WaitUntilIdle();
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
     std::unordered_set<std::string> expectedFiles = {"1.sst", "2.sst", "3.sst", "4.sst", "5.sst", "6.sst"};
 
     for (const auto& removed : m_removedFiles) {
@@ -219,7 +221,7 @@ TEST_F(FileCacheTests, ReadFileFromCache) {
     // Act
     std::vector<char> buffer;
     buffer.resize(fileData.size());
-    const auto bytesRead = m_cache.ReadFile("1.sst", kStart, ByteCount{fileData.size()}, buffer.data());
+    const auto bytesRead = m_cache.ReadFile("1.sst", kStart, buffer);
 
     // Assert
     ASSERT_TRUE(bytesRead);
@@ -272,7 +274,7 @@ TEST_F(FileCacheTests, CacheSizeExceeded) {
     m_cache.SetCacheSize(fileSize);
 
     // Assert
-    m_cache.WaitUntilIdle();
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
     ASSERT_EQ(fileSize, m_cache.CacheSize());
     ASSERT_EQ(3, m_removedFiles.size());
 }
@@ -292,19 +294,19 @@ TEST_F(FileCacheTests, FreshDownload_IsNotTheFirstEntryEvicted) {
     });
     char buffer[1];
     // 4.sst is first seen before the others are used, so it holds the oldest LRU position when it is queued.
-    EXPECT_FALSE(m_cache.ReadFile("4.sst", kStart, kOneByte, buffer));
+    EXPECT_FALSE(m_cache.ReadFile("4.sst", kStart, buffer));
     EnsureReadFromCache("1.sst");
     EnsureReadFromCache("2.sst");
     EnsureReadFromCache("3.sst");
-    EXPECT_FALSE(m_cache.ReadFile("4.sst", kStart, kOneByte, buffer));
-    m_cache.WaitUntilIdle();
+    EXPECT_FALSE(m_cache.ReadFile("4.sst", kStart, buffer));
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
     ASSERT_EQ(threeFiles + fileSize, m_cache.CacheSize());
 
     // Act - make room for exactly one eviction.
     m_cache.SetCacheSize(threeFiles);
 
     // Assert - the oldest previously-active file goes, not the download that just finished.
-    m_cache.WaitUntilIdle();
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
     EXPECT_EQ(CachePresence::Absent, m_cache.HasFile("1.sst"));
     EXPECT_EQ(CachePresence::Present, m_cache.HasFile("4.sst"));
     EXPECT_EQ(threeFiles, m_cache.CacheSize());
@@ -362,8 +364,8 @@ TEST_F(FileCacheTests, ReadFile_FirstAccess_DoesNotStartDownload) {
 
     // Act
     char buffer[1];
-    const auto bytesRead = m_cache.ReadFile("1.sst", kStart, kOneByte, buffer);
-    m_cache.WaitUntilIdle();
+    const auto bytesRead = m_cache.ReadFile("1.sst", kStart, buffer);
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
 
     // Assert
     EXPECT_FALSE(bytesRead);
@@ -377,8 +379,8 @@ TEST_F(FileCacheTests, ReadFile_SecondAccess_QueuesAndDownloads) {
 
     // First access should only record stale metadata.
     char buffer[1];
-    const auto bytesReadOnFirstAccess = m_cache.ReadFile("1.sst", kStart, kOneByte, buffer);
-    m_cache.WaitUntilIdle();
+    const auto bytesReadOnFirstAccess = m_cache.ReadFile("1.sst", kStart, buffer);
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
     ASSERT_TRUE(::testing::Mock::VerifyAndClearExpectations(m_containerClient.get()));
 
     EXPECT_CALL(*m_containerClient, GetBlobSize("1.sst"))
@@ -399,9 +401,9 @@ TEST_F(FileCacheTests, ReadFile_SecondAccess_QueuesAndDownloads) {
         });
 
     // Act
-    const auto bytesReadOnSecondAccess = m_cache.ReadFile("1.sst", kStart, kOneByte, buffer);
+    const auto bytesReadOnSecondAccess = m_cache.ReadFile("1.sst", kStart, buffer);
     EnsureReadFromCache("1.sst");
-    const auto bytesReadOnceCached = m_cache.ReadFile("1.sst", kStart, kOneByte, buffer);
+    const auto bytesReadOnceCached = m_cache.ReadFile("1.sst", kStart, buffer);
 
     // Assert
     EXPECT_EQ(kOneByte, bytesReadOnceCached);
@@ -424,8 +426,8 @@ TEST_F(FileCacheTests, ReadFile_ShortReadFromTheCachedFile_FallsBackAndDropsTheE
     char buffer[8];
 
     // Act
-    const auto bytesRead = m_cache.ReadFile("1.sst", kStart, ByteCount{8}, buffer);
-    m_cache.WaitUntilIdle();
+    const auto bytesRead = m_cache.ReadFile("1.sst", kStart, buffer);
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
 
     // Assert
     EXPECT_FALSE(bytesRead.has_value());
@@ -444,8 +446,8 @@ TEST_F(FileCacheTests, ReadFile_CachedFileThatCannotBeOpened_DropsTheEntryAndIsD
     char buffer[8];
 
     // Act
-    const auto bytesRead = m_cache.ReadFile("1.sst", kStart, ByteCount{8}, buffer);
-    m_cache.WaitUntilIdle();
+    const auto bytesRead = m_cache.ReadFile("1.sst", kStart, buffer);
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
 
     // Assert
     EXPECT_FALSE(bytesRead.has_value());
@@ -466,22 +468,22 @@ TEST_F(FileCacheTests, FileReplacedWhileItsSizeIsBeingLookedUp_IsNotActivated) {
         return kOneByte;
     });
     EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).Times(0);
-    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, kNoBytes, nullptr)); // records the entry
-    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, kNoBytes, nullptr)); // queues the download
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, {})); // records the entry
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, {})); // queues the download
     started.get_future().wait();
 
     // Act - the downloader has popped the entry, which is still QueuedForDownload, when the blob is replaced.
     m_cache.MarkFileAsStaleIfExists("1.sst");
     release.Open();
-    m_cache.WaitUntilIdle();
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
 
     // Assert - nothing was downloaded or activated with the pre-replacement size.
     ASSERT_TRUE(::testing::Mock::VerifyAndClearExpectations(m_containerClient.get()));
     EXPECT_EQ(kNoBytes, m_cache.CacheSize());
-    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, kNoBytes, nullptr).has_value());
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, {}).has_value());
     EXPECT_GE(sizeCalls, 1);
     EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
-    m_cache.WaitUntilIdle();
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
 }
 
 TEST_F(FileCacheTests, FileRemovedAndRecreatedWhileItsSizeIsBeingLookedUp_IsNotActivatedWithTheOldSize) {
@@ -490,23 +492,23 @@ TEST_F(FileCacheTests, FileRemovedAndRecreatedWhileItsSizeIsBeingLookedUp_IsNotA
     EXPECT_CALL(*m_containerClient, GetBlobSize("1.sst")).WillRepeatedly([&](const std::string&) -> ByteCount {
         if (++sizeCalls == 1) {
             m_cache.RemoveFile("1.sst");
-            EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, kNoBytes, nullptr));
+            EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, {}));
         }
         return kOneByte;
     });
     EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).Times(0);
-    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, kNoBytes, nullptr)); // records the entry
-    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, kNoBytes, nullptr)); // queues the download
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, {})); // records the entry
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, {})); // queues the download
 
     // Act
-    m_cache.WaitUntilIdle();
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
 
     // Assert - the new entry did not inherit the old size or become Active.
     ASSERT_TRUE(::testing::Mock::VerifyAndClearExpectations(m_containerClient.get()));
     EXPECT_EQ(kNoBytes, m_cache.CacheSize());
     EXPECT_GE(sizeCalls, 1);
     EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
-    m_cache.WaitUntilIdle();
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
 }
 
 TEST_F(FileCacheTests, FileReplacedAndRequeuedDuringADownload_IsDownloadedAgainNotActivatedWithTheOldBytes) {
@@ -521,19 +523,19 @@ TEST_F(FileCacheTests, FileReplacedAndRequeuedDuringADownload_IsDownloadedAgainN
             release.Wait();
         }
     });
-    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, kNoBytes, nullptr)); // records the entry
-    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, kNoBytes, nullptr)); // queues the download
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, {})); // records the entry
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, {})); // queues the download
     started.get_future().wait();
 
     // Act - the blob is replaced mid-download and a reader asks for it again before the first download ends.
     m_cache.MarkFileAsStaleIfExists("1.sst");
-    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, kNoBytes, nullptr));
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, {}));
     release.Open();
-    m_cache.WaitUntilIdle();
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
 
     // Assert - the bytes fetched before the replacement were discarded and the file was fetched again.
     EXPECT_EQ(downloads, 2);
-    EXPECT_TRUE(m_cache.ReadFile("1.sst", kStart, kNoBytes, nullptr).has_value());
+    EXPECT_TRUE(m_cache.ReadFile("1.sst", kStart, {}).has_value());
 }
 
 TEST_F(FileCacheTests, RemoveFile_WhileAReaderIsInsideTheCachedFile_DoesNotWaitForItAndTheReaderFinishes) {
@@ -558,7 +560,7 @@ TEST_F(FileCacheTests, RemoveFile_WhileAReaderIsInsideTheCachedFile_DoesNotWaitF
     EnsureReadFromCache("1.sst");
     auto reader = std::async(std::launch::async, [this, fileSize] {
         char buffer[4];
-        return m_cache.ReadFile("1.sst", kStart, fileSize, buffer);
+        return m_cache.ReadFile("1.sst", kStart, buffer);
     });
     readStarted.get_future().wait();
 
@@ -571,7 +573,7 @@ TEST_F(FileCacheTests, RemoveFile_WhileAReaderIsInsideTheCachedFile_DoesNotWaitF
     ASSERT_EQ(removed, std::future_status::ready);
     ASSERT_EQ(reader.wait_for(std::chrono::seconds(5)), std::future_status::ready);
     reader.get();
-    EXPECT_EQ(IdleWaitResult::Idle, m_cache.WaitUntilIdle(kIdleTimeout));
+    EXPECT_EQ(IdleWaitResult::Idle, FileCacheTestAccess::WaitUntilIdle(m_cache, kIdleTimeout));
     EXPECT_EQ(CachePresence::Absent, m_cache.HasFile("1.sst"));
     EXPECT_EQ(kNoBytes, m_cache.CacheSize());
 }
@@ -595,7 +597,7 @@ TEST_F(FileCacheTests, RemoveFile_WhenAnAllocationFails_NeverThrowsAndNeverServe
         const std::string name = std::string(70, 'a') + std::to_string(failAt) + ".sst";
         char buffer[4];
         EnsureReadFromCache(name, fileSize);
-        ASSERT_TRUE(m_cache.ReadFile(name, kStart, fileSize, buffer).has_value());
+        ASSERT_TRUE(m_cache.ReadFile(name, kStart, buffer).has_value());
 
         // Act
         g_failAllocationIn = failAt;
@@ -603,18 +605,18 @@ TEST_F(FileCacheTests, RemoveFile_WhenAnAllocationFails_NeverThrowsAndNeverServe
         g_failAllocationIn = 0;
 
         // Assert - either removed, or invalidated so that the old bytes are no longer served.
-        EXPECT_FALSE(m_cache.ReadFile(name, kStart, fileSize, buffer).has_value() &&
+        EXPECT_FALSE(m_cache.ReadFile(name, kStart, buffer).has_value() &&
                      m_cache.HasFile(name) == CachePresence::Present)
             << "failAt=" << failAt;
         m_cache.RemoveFile(name);
-        EXPECT_EQ(IdleWaitResult::Idle, m_cache.WaitUntilIdle(kIdleTimeout));
+        EXPECT_EQ(IdleWaitResult::Idle, FileCacheTestAccess::WaitUntilIdle(m_cache, kIdleTimeout));
         EXPECT_EQ(CachePresence::Absent, m_cache.HasFile(name)) << "failAt=" << failAt;
         EXPECT_EQ(kNoBytes, m_cache.CacheSize()) << "failAt=" << failAt;
 
         // The file can be cached again afterwards.
         EnsureReadFromCache(name, fileSize);
         m_cache.RemoveFile(name);
-        EXPECT_EQ(IdleWaitResult::Idle, m_cache.WaitUntilIdle(kIdleTimeout));
+        EXPECT_EQ(IdleWaitResult::Idle, FileCacheTestAccess::WaitUntilIdle(m_cache, kIdleTimeout));
         EXPECT_EQ(kNoBytes, m_cache.CacheSize()) << "failAt=" << failAt;
     }
 }
@@ -638,7 +640,7 @@ TEST_F(FileCacheTests, MarkFileAsStale_WhenAnAllocationFails_StillClosesTheHandl
         const std::string name = std::string(70, 'b') + std::to_string(failAt) + ".sst";
         char buffer[4];
         EnsureReadFromCache(name, fileSize);
-        ASSERT_TRUE(m_cache.ReadFile(name, kStart, fileSize, buffer).has_value());
+        ASSERT_TRUE(m_cache.ReadFile(name, kStart, buffer).has_value());
 
         g_failAllocationIn = failAt;
         bool threw = false;
@@ -652,10 +654,10 @@ TEST_F(FileCacheTests, MarkFileAsStale_WhenAnAllocationFails_StillClosesTheHandl
 
         if (!threw) {
             absorbed += consumed ? 1 : 0;
-            EXPECT_FALSE(m_cache.ReadFile(name, kStart, fileSize, buffer).has_value()) << "failAt=" << failAt;
+            EXPECT_FALSE(m_cache.ReadFile(name, kStart, buffer).has_value()) << "failAt=" << failAt;
         }
         m_cache.RemoveFile(name);
-        EXPECT_EQ(IdleWaitResult::Idle, m_cache.WaitUntilIdle(kIdleTimeout));
+        EXPECT_EQ(IdleWaitResult::Idle, FileCacheTestAccess::WaitUntilIdle(m_cache, kIdleTimeout));
         EXPECT_EQ(kNoBytes, m_cache.CacheSize()) << "failAt=" << failAt;
     }
     EXPECT_GT(absorbed, 0U);
@@ -674,18 +676,18 @@ TEST_F(FileCacheTests, DownloadThatFailsAfterTheFileWasMarkedStale_LeavesNothing
             throw std::runtime_error("download failed");
         }
     });
-    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, kNoBytes, nullptr));
-    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, kNoBytes, nullptr));
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, {}));
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, {}));
     started.get_future().wait();
 
     // Act
     m_cache.MarkFileAsStaleIfExists("1.sst");
     release.Open();
-    ASSERT_EQ(IdleWaitResult::Idle, m_cache.WaitUntilIdle(kIdleTimeout));
+    ASSERT_EQ(IdleWaitResult::Idle, FileCacheTestAccess::WaitUntilIdle(m_cache, kIdleTimeout));
 
     // Assert - the failed download activated nothing and counted no bytes.
     EXPECT_EQ(kNoBytes, m_cache.CacheSize());
-    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, kNoBytes, nullptr).has_value());
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, {}).has_value());
 
     // A later read queues the download again and this time it succeeds.
     EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
@@ -719,20 +721,20 @@ TEST_F(FileCacheTests, DownloadThatFailsAfterTheFileWasMarkedStaleAndRequeued_Ke
         });
         return file;
     });
-    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, kNoBytes, nullptr));
-    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, kNoBytes, nullptr));
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, {}));
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, {}));
     started.get_future().wait();
 
     // Act - replaced and queued again while the first download is still running, then that download fails.
     m_cache.MarkFileAsStaleIfExists("1.sst");
-    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, kNoBytes, nullptr));
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, {}));
     release.Open();
-    ASSERT_EQ(IdleWaitResult::Idle, m_cache.WaitUntilIdle(kIdleTimeout));
+    ASSERT_EQ(IdleWaitResult::Idle, FileCacheTestAccess::WaitUntilIdle(m_cache, kIdleTimeout));
 
     // Assert - the failure did not discard the newer queued state, so the queued download ran and activated it.
     EXPECT_EQ(downloads, 2);
     EXPECT_EQ(CachePresence::Present, m_cache.HasFile("1.sst"));
-    EXPECT_TRUE(m_cache.ReadFile("1.sst", kStart, kNoBytes, nullptr).has_value());
+    EXPECT_TRUE(m_cache.ReadFile("1.sst", kStart, {}).has_value());
 }
 
 TEST_F(FileCacheTests, ReadFile_TooManyUndownloadedStaleEntries_PrunesOldest) {
@@ -744,10 +746,10 @@ TEST_F(FileCacheTests, ReadFile_TooManyUndownloadedStaleEntries_PrunesOldest) {
     char buffer[1];
     for (int i = 0; i < staleEntriesToInsert; ++i) {
         const auto filePath = std::to_string(i) + ".sst";
-        const auto bytesRead = m_cache.ReadFile(filePath, kStart, kOneByte, buffer);
+        const auto bytesRead = m_cache.ReadFile(filePath, kStart, buffer);
         ASSERT_FALSE(bytesRead);
     }
-    m_cache.WaitUntilIdle();
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
 
     // Assert
     EXPECT_EQ(CachePresence::Absent, m_cache.HasFile("0.sst"));
@@ -771,7 +773,7 @@ TEST_F(FileCacheTests, ReadFile_ManyReadsOfACachedFile_OpenItOnce) {
     // Act
     char buffer[1];
     for (int i = 0; i < 50; ++i) {
-        ASSERT_EQ(kOneByte, m_cache.ReadFile("1.sst", kStart, kOneByte, buffer));
+        ASSERT_EQ(kOneByte, m_cache.ReadFile("1.sst", kStart, buffer));
     }
 
     // Assert
@@ -802,12 +804,54 @@ TEST_F(FileCacheTests, EvictedFile_WhoseDeleteFails_IsLoggedRetriedAndNotCounted
     // Act: each download wakes the worker, which retries the delete that failed earlier.
     EnsureReadFromCache("2.sst", fileSize);
     EnsureReadFromCache("3.sst", fileSize);
-    m_cache.WaitUntilIdle();
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
 
     // Assert
     EXPECT_EQ(fileSize, m_cache.CacheSize());
     EXPECT_EQ(CachePresence::Absent, m_cache.HasFile("1.sst"));
     EXPECT_EQ(3, deleteCalls.load());
+}
+
+TEST_F(FileCacheTests, FailedDelete_OfAFileReadAgainWhileItWasBeingDeleted_IsStillRetried) {
+    // Arrange - 1.sst is cached, then 2.sst, so 1.sst is not the most recent download.
+    const ByteCount fileSize{1};
+    EXPECT_CALL(*m_containerClient, GetBlobSize(_)).WillRepeatedly(Return(fileSize));
+    EXPECT_CALL(*m_containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
+    EXPECT_CALL(*m_filesystem, Open(_)).WillRepeatedly([](const std::filesystem::path&) {
+        auto file = std::make_unique<FileMock>();
+        ON_CALL(*file, Read(_, _, _)).WillByDefault([](char*, uint64_t, uint64_t length) { return length; });
+        return file;
+    });
+    EnsureReadFromCache("1.sst", fileSize);
+    EnsureReadFromCache("2.sst", ByteCount{2});
+
+    Gate gate;
+    std::promise<void> deleteEntered;
+    std::atomic<int> deletesOfFirstFile = 0;
+    ON_CALL(*m_filesystem, DeleteFile(_)).WillByDefault([&](const std::filesystem::path& path) -> FilesystemResult {
+        if (path.filename() != "1.sst") {
+            return FilesystemResult::Succeeded;
+        }
+        if (deletesOfFirstFile++ == 0) {
+            deleteEntered.set_value();
+            gate.Wait();
+            return FilesystemResult::Failed;
+        }
+        return FilesystemResult::Succeeded;
+    });
+
+    // Act - while the delete of 1.sst is in progress, a read records a metadata-only entry of the same name, and then
+    // the delete fails.
+    m_cache.RemoveFile("1.sst");
+    deleteEntered.get_future().wait();
+    EXPECT_FALSE(m_cache.ReadFile("1.sst", kStart, {}));
+    gate.Open();
+    m_cache.RemoveFile("2.sst"); // wakes the worker, which retries failed deletes
+    ASSERT_EQ(IdleWaitResult::Idle, FileCacheTestAccess::WaitUntilIdle(m_cache, kIdleTimeout));
+
+    // Assert - the metadata-only entry must not cancel the retry, or the file is left on disk uncounted.
+    EXPECT_EQ(2, deletesOfFirstFile.load());
+    EXPECT_EQ(kNoBytes, m_cache.CacheSize());
 }
 
 TEST_F(FileCacheTests, RunningTotals_StayConsistentThroughEvictionAndRefresh) {
@@ -827,7 +871,7 @@ TEST_F(FileCacheTests, RunningTotals_StayConsistentThroughEvictionAndRefresh) {
     m_cache.MarkFileAsStaleIfExists("2.sst");
     EXPECT_EQ(ByteCount{50}, m_cache.CacheSize());
     m_cache.SetCacheSize(ByteCount{20});
-    m_cache.WaitUntilIdle();
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
 
     // Assert
     EXPECT_LE(m_cache.CacheSize(), ByteCount{20});
@@ -850,7 +894,7 @@ TEST_F(FileCacheTests, SetCacheSize_ShrinkingBelowTheCurrentSizeEvictsAgainstThe
 
     // Act: evicting 50 bytes is more than the new maximum of 10, which must not be mistaken for an oversized file.
     m_cache.SetCacheSize(ByteCount{10});
-    m_cache.WaitUntilIdle();
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
 
     // Assert
     EXPECT_LE(m_cache.CacheSize(), ByteCount{10});
@@ -870,12 +914,12 @@ TEST_F(FileCacheTests, ShortRead_DoesNotRemoveAnEntryThatWasReplacedDuringTheRea
         return file;
     });
     std::array<char, 10> buffer{};
-    (void)m_cache.ReadFile("1.sst", kStart, ByteCount{10}, buffer.data());
-    m_cache.WaitUntilIdle();
+    (void)m_cache.ReadFile("1.sst", kStart, buffer);
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
 
     // Act
-    (void)m_cache.ReadFile("1.sst", kStart, ByteCount{10}, buffer.data());
-    m_cache.WaitUntilIdle();
+    (void)m_cache.ReadFile("1.sst", kStart, buffer);
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
 
     // Assert
     EXPECT_EQ(CachePresence::Present, m_cache.HasFile("1.sst"));
@@ -900,7 +944,7 @@ TEST_F(FileCacheTests, EvictedFiles_AreDeletedBeforeTheNextFileIsDownloaded) {
 
     // Act
     EnsureReadFromCache("2.sst", fileSize);
-    m_cache.WaitUntilIdle();
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
 
     // Assert
     EXPECT_TRUE(deletedBeforeDownload);
@@ -917,12 +961,12 @@ TEST_F(FileCacheTests, Eviction_DoesNotRemoveMetadataOnlyStaleEntries) {
         EXPECT_CALL(*file, Read(_, _, _)).WillRepeatedly([](char*, uint64_t, uint64_t length) { return length; });
         return file;
     });
-    EXPECT_FALSE(m_cache.ReadFile("seen.sst", kStart, kNoBytes, nullptr)); // metadata-only entry, size 0
+    EXPECT_FALSE(m_cache.ReadFile("seen.sst", kStart, {})); // metadata-only entry, size 0
     EnsureReadFromCache("1.sst", fileSize);
 
     // Act - forces an eviction
     EnsureReadFromCache("2.sst", fileSize);
-    m_cache.WaitUntilIdle();
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
 
     // Assert
     EXPECT_EQ(CachePresence::Present, m_cache.HasFile("seen.sst"));
@@ -946,14 +990,14 @@ TEST_F(FileCacheTests, SetCacheSize_WhileADownloadIsInFlight_EvictsAfterItActiva
         return file;
     });
     EnsureReadFromCache("1.sst", fileSize);
-    EXPECT_FALSE(m_cache.ReadFile("2.sst", kStart, kNoBytes, nullptr));
-    EXPECT_FALSE(m_cache.ReadFile("2.sst", kStart, kNoBytes, nullptr));
+    EXPECT_FALSE(m_cache.ReadFile("2.sst", kStart, {}));
+    EXPECT_FALSE(m_cache.ReadFile("2.sst", kStart, {}));
     started.get_future().wait();
 
     // Act - the in-flight file is not counted yet, so nothing is evicted by the resize itself.
     m_cache.SetCacheSize(fileSize);
     release.Open();
-    m_cache.WaitUntilIdle();
+    FileCacheTestAccess::WaitUntilIdle(m_cache);
 
     // Assert
     EXPECT_LE(m_cache.CacheSize(), fileSize);
@@ -971,10 +1015,10 @@ TEST_F(FileCacheTests, Download_PassesTheCachePathThroughWithoutNarrowing) {
         });
 
     // Act
-    EXPECT_FALSE(cache.ReadFile("1.sst", kStart, kNoBytes, nullptr));
-    EXPECT_FALSE(cache.ReadFile("1.sst", kStart, kNoBytes, nullptr));
+    EXPECT_FALSE(cache.ReadFile("1.sst", kStart, {}));
+    EXPECT_FALSE(cache.ReadFile("1.sst", kStart, {}));
     const auto path = destination.get_future().get();
-    cache.WaitUntilIdle();
+    FileCacheTestAccess::WaitUntilIdle(cache);
 
     // Assert
     EXPECT_EQ(cacheDir / "1.sst", path);
@@ -997,8 +1041,8 @@ TEST(FileCacheShutdownTests, DestroyingTheCacheWithQueuedDownloads_StopsWithoutH
     });
     auto cache = std::make_unique<FileCache>("tmp", ByteCount{1000}, containerClient, filesystem, logger);
     for (const auto* name : {"1.sst", "2.sst", "3.sst"}) {
-        (void)cache->ReadFile(name, kStart, kNoBytes, nullptr);
-        (void)cache->ReadFile(name, kStart, kNoBytes, nullptr);
+        (void)cache->ReadFile(name, kStart, {});
+        (void)cache->ReadFile(name, kStart, {});
     }
     started.get_future().wait();
 
@@ -1017,9 +1061,11 @@ TEST(FileCacheShutdownTests, DestroyingTheCacheCancelsARunningDownloadThatHonour
     class BlockingClient final : public AVEVA::RocksDB::Plugin::Core::ContainerClient {
       public:
         std::promise<void> Started;
-        ByteCount GetBlobSize(const std::string&, std::stop_token) override { return ByteCount{1}; }
-        void DownloadBlobTo(const std::string&, const std::filesystem::path&, ByteOffset, ByteCount,
-                            std::stop_token stopToken) override {
+        ByteCount GetBlobSize(const AVEVA::RocksDB::Plugin::Core::BlobName&, std::stop_token) override {
+            return ByteCount{1};
+        }
+        void DownloadBlobTo(const AVEVA::RocksDB::Plugin::Core::BlobName&, const std::filesystem::path&, ByteOffset,
+                            ByteCount, std::stop_token stopToken) override {
             Started.set_value();
             while (!stopToken.stop_requested()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1031,8 +1077,8 @@ TEST(FileCacheShutdownTests, DestroyingTheCacheCancelsARunningDownloadThatHonour
     auto filesystem = std::make_shared<NiceMock<FilesystemMock>>();
     auto logger = std::make_shared<severity_logger_mt<severity_level>>();
     auto cache = std::make_unique<FileCache>("tmp", ByteCount{1000}, client, filesystem, logger);
-    (void)cache->ReadFile("1.sst", kStart, kNoBytes, nullptr);
-    (void)cache->ReadFile("1.sst", kStart, kNoBytes, nullptr);
+    (void)cache->ReadFile("1.sst", kStart, {});
+    (void)cache->ReadFile("1.sst", kStart, {});
     client->Started.get_future().wait();
 
     // Act
@@ -1048,22 +1094,22 @@ TEST(FileCacheShutdownTests, DestroyingTheCacheCancelsASizeLookupThatHonoursTheS
     class BlockingClient final : public AVEVA::RocksDB::Plugin::Core::ContainerClient {
       public:
         std::promise<void> Started;
-        ByteCount GetBlobSize(const std::string&, std::stop_token stopToken) override {
+        ByteCount GetBlobSize(const AVEVA::RocksDB::Plugin::Core::BlobName&, std::stop_token stopToken) override {
             Started.set_value();
             while (!stopToken.stop_requested()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
             throw std::runtime_error("size lookup stopped");
         }
-        void DownloadBlobTo(const std::string&, const std::filesystem::path&, ByteOffset, ByteCount,
-                            std::stop_token) override {}
+        void DownloadBlobTo(const AVEVA::RocksDB::Plugin::Core::BlobName&, const std::filesystem::path&, ByteOffset,
+                            ByteCount, std::stop_token) override {}
     };
     auto client = std::make_shared<BlockingClient>();
     auto filesystem = std::make_shared<NiceMock<FilesystemMock>>();
     auto logger = std::make_shared<severity_logger_mt<severity_level>>();
     auto cache = std::make_unique<FileCache>("tmp", ByteCount{1000}, client, filesystem, logger);
-    (void)cache->ReadFile("1.sst", kStart, kNoBytes, nullptr);
-    (void)cache->ReadFile("1.sst", kStart, kNoBytes, nullptr);
+    (void)cache->ReadFile("1.sst", kStart, {});
+    (void)cache->ReadFile("1.sst", kStart, {});
     client->Started.get_future().wait();
 
     // Act
@@ -1114,7 +1160,7 @@ struct PruneDeleteCounter {
 void TouchOnce(FileCache& cache, const int count, const std::string& prefix) {
     char buffer[1];
     for (int i = 0; i < count; ++i) {
-        ASSERT_FALSE(cache.ReadFile(prefix + std::to_string(i) + ".sst", kStart, kOneByte, buffer));
+        ASSERT_FALSE(cache.ReadFile(prefix + std::to_string(i) + ".sst", kStart, buffer));
     }
 }
 } // namespace
@@ -1131,7 +1177,7 @@ TEST(FileCacheShutdownTests, PruningOneTouchEntries_InAnEmptyCacheDirectory_Dele
 
     // Act
     TouchOnce(cache, 3000, "");
-    cache.WaitUntilIdle();
+    FileCacheTestAccess::WaitUntilIdle(cache);
 
     // Assert
     EXPECT_EQ(CachePresence::Absent, cache.HasFile("0.sst"));
@@ -1152,7 +1198,7 @@ TEST(FileCacheShutdownTests, PruningOneTouchEntries_WhenAnEarlierRunLeftFiles_St
 
     // Act
     TouchOnce(cache, 2050, "");
-    cache.WaitUntilIdle();
+    FileCacheTestAccess::WaitUntilIdle(cache);
 
     // Assert
     ASSERT_FALSE(counter.Deleted.empty());
@@ -1170,15 +1216,15 @@ TEST(FileCacheShutdownTests, PruningAStaleZeroLengthDownloadedEntry_StillDeletes
     EXPECT_CALL(*containerClient, DownloadBlobTo(_, _, _, _)).WillRepeatedly(Return());
     auto logger = std::make_shared<severity_logger_mt<severity_level>>();
     FileCache cache(directory.Path(), ByteCount{1000}, containerClient, filesystem, logger);
-    for (int attempt = 0; attempt < 4 && !cache.ReadFile("zero.sst", kStart, kNoBytes, nullptr); ++attempt) {
-        cache.WaitUntilIdle();
+    for (int attempt = 0; attempt < 4 && !cache.ReadFile("zero.sst", kStart, {}); ++attempt) {
+        FileCacheTestAccess::WaitUntilIdle(cache);
     }
-    ASSERT_TRUE(cache.ReadFile("zero.sst", kStart, kNoBytes, nullptr));
+    ASSERT_TRUE(cache.ReadFile("zero.sst", kStart, {}));
     cache.MarkFileAsStaleIfExists("zero.sst");
 
     // Act
     TouchOnce(cache, 2049, "other");
-    cache.WaitUntilIdle();
+    FileCacheTestAccess::WaitUntilIdle(cache);
 
     // Assert
     EXPECT_EQ(CachePresence::Absent, cache.HasFile("zero.sst"));
@@ -1208,8 +1254,8 @@ TEST(FileCacheShutdownTests, FailedDelete_IsRetriedOnceAtShutdown) {
         FileCache cache("tmp", ByteCount{100}, containerClient, filesystem, logger);
         for (const auto* name : {"1.sst", "2.sst"}) {
             for (int attempt = 0; attempt < 4; ++attempt) {
-                (void)cache.ReadFile(name, kStart, kNoBytes, nullptr);
-                cache.WaitUntilIdle();
+                (void)cache.ReadFile(name, kStart, {});
+                FileCacheTestAccess::WaitUntilIdle(cache);
             }
         }
 

@@ -112,7 +112,7 @@ template <typename TBlob> LockFile::LockResult BasicLockFileImpl<TBlob>::Lock() 
         attemptStart = Now();
         AzureClient::AcquireLeaseOptions options;
         options.ProposedLeaseId = leaseId;
-        options.Duration = m_leaseLength;
+        options.Duration = AzureClient::LeaseDuration{std::chrono::duration_cast<std::chrono::seconds>(m_leaseLength)};
         // Each attempt inherits the client's retry policy, which can run for minutes; bound it by the remaining lock
         // budget so Lock() cannot block far beyond the lease length.
         auto requestOptions = m_file->GetDefaultRequestOptions();
@@ -222,7 +222,7 @@ template <typename TBlob> std::optional<std::string> BasicLockFileImpl<TBlob>::C
 
 template <typename TBlob> BasicLockFileImpl<TBlob>::~BasicLockFileImpl() {
     if (m_runtime) {
-        m_runtime->SetLeaseDeadline(this, std::nullopt);
+        m_runtime->Fence().SetLeaseDeadline(LeaseOwnerId{this}, std::nullopt);
     }
 }
 
@@ -233,9 +233,10 @@ template <typename TBlob> void BasicLockFileImpl<TBlob>::PublishDeadlineLocked()
         return;
     }
     if (m_holding.load() == LeaseHolding::Held && m_leaseId.has_value() && m_release == ReleaseProgress::NotReleasing) {
-        m_runtime->SetLeaseDeadline(this, std::chrono::steady_clock::now() + (RenewalDeadline() - Now()));
+        m_runtime->Fence().SetLeaseDeadline(LeaseOwnerId{this},
+                                            std::chrono::steady_clock::now() + (RenewalDeadline() - Now()));
     } else {
-        m_runtime->SetLeaseDeadline(this, std::nullopt);
+        m_runtime->Fence().SetLeaseDeadline(LeaseOwnerId{this}, std::nullopt);
     }
 }
 
@@ -282,7 +283,7 @@ std::optional<typename BasicLockFileImpl<TBlob>::RenewalAttempt> BasicLockFileIm
 }
 
 template <typename TBlob>
-std::pair<std::exception_ptr, RenewalOutcome>
+typename BasicLockFileImpl<TBlob>::RenewalResult
 BasicLockFileImpl<TBlob>::FinishRenewal(const std::string& leaseId, std::chrono::steady_clock::time_point requestStart,
                                         std::exception_ptr failure) const {
     std::exception_ptr error;
@@ -305,7 +306,7 @@ BasicLockFileImpl<TBlob>::FinishRenewal(const std::string& leaseId, std::chrono:
             error = std::current_exception();
         }
     }
-    return {error, renewed};
+    return RenewalResult{.Error = error, .Outcome = renewed};
 }
 
 template <typename TBlob> boost::asio::awaitable<RenewalOutcome> BasicLockFileImpl<TBlob>::RenewAsync() const {
@@ -320,11 +321,11 @@ template <typename TBlob> boost::asio::awaitable<RenewalOutcome> BasicLockFileIm
     } catch (...) {
         failure = std::current_exception();
     }
-    const auto [error, renewed] = FinishRenewal(attempt->LeaseId, attempt->Start, std::move(failure));
-    if (error) {
-        std::rethrow_exception(error);
+    const auto result = FinishRenewal(attempt->LeaseId, attempt->Start, std::move(failure));
+    if (result.Error) {
+        std::rethrow_exception(result.Error);
     }
-    co_return renewed;
+    co_return result.Outcome;
 }
 
 // Blocking renewal for RocksDB threads; it waits on RenewAsync and so must never run on the io_context thread.

@@ -17,11 +17,11 @@ class ContainerClientMock : public ContainerClient {
                 (const std::string& path, const std::filesystem::path& destinationPath, ByteOffset offset,
                  ByteCount length));
 
-    ByteCount GetBlobSize(const std::string& path, std::stop_token) override { return GetBlobSize(path); }
+    ByteCount GetBlobSize(const BlobName& name, std::stop_token) override { return GetBlobSize(name.Value()); }
 
-    void DownloadBlobTo(const std::string& path, const std::filesystem::path& destinationPath, ByteOffset offset,
+    void DownloadBlobTo(const BlobName& name, const std::filesystem::path& destinationPath, ByteOffset offset,
                         ByteCount length, std::stop_token) override {
-        DownloadBlobTo(path, destinationPath, offset, length);
+        DownloadBlobTo(name.Value(), destinationPath, offset, length);
     }
 };
 } // namespace AVEVA::RocksDB::Plugin::Core::Mocks

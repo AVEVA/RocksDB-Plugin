@@ -4,26 +4,18 @@
 #pragma once
 
 #include <AVEVA/HttpClient/Detail/Lifetime.hpp>
+#include <AVEVA/HttpClient/HttpBody.hpp>
 #include <AVEVA/HttpClient/HttpHeader.hpp>
 #include <AVEVA/HttpClient/HttpMethod.hpp>
+#include <AVEVA/HttpClient/Units.hpp>
 
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <span>
 #include <string>
 #include <vector>
 
 namespace AVEVA {
-/// <summary>Which representation holds an <see cref="HttpRequest"/> body.</summary>
-enum class BodyStorage : std::uint8_t { Owned, View };
-
 /// <summary>
-/// An outbound HTTP request: method, absolute http(s) URL, headers, and an optional body.
-///
-/// The body has two mutually exclusive representations. <see cref="SetBody"/> stores an owned copy;
-/// <see cref="SetBodyView"/> stores a non-owning view over caller memory and avoids the copy at the cost of
-/// a lifetime contract. Setting one clears the other, and <see cref="GetBodySize"/> reports the active one.
+/// An outbound HTTP request: method, absolute http(s) URL, headers, and an optional body. Copying a request shares
+/// its body (see <see cref="HttpBody"/>) rather than copying the bytes.
 /// </summary>
 class HttpRequest {
   public:
@@ -41,27 +33,22 @@ class HttpRequest {
     /// <summary>
     /// The request URL, exactly as supplied; it is not parsed or validated here.
     /// </summary>
-    /// <returns>The URL, empty unless set.</returns>
-    [[nodiscard]] const std::string& GetUrl() const noexcept AVEVA_LIFETIMEBOUND;
+    /// <returns>The URL, empty unless set; valid for as long as the request is.</returns>
+    [[nodiscard]] const std::string& GetUrl() const& noexcept AVEVA_LIFETIMEBOUND;
+    [[nodiscard]] std::string GetUrl() && noexcept;
 
     /// <summary>
     /// The request headers.
     /// </summary>
-    /// <returns>The headers, in the order they were added.</returns>
-    [[nodiscard]] const std::vector<HttpHeader>& GetHeaders() const noexcept AVEVA_LIFETIMEBOUND;
+    /// <returns>The headers, in the order they were added; valid for as long as the request is.</returns>
+    [[nodiscard]] const std::vector<HttpHeader>& GetHeaders() const& noexcept AVEVA_LIFETIMEBOUND;
+    [[nodiscard]] std::vector<HttpHeader> GetHeaders() && noexcept;
 
     /// <summary>
-    /// The request headers, for in-place modification before the request is sent.
+    /// The request body.
     /// </summary>
-    /// <returns>A mutable reference to the headers.</returns>
-    [[nodiscard]] std::vector<HttpHeader>& GetHeaders() noexcept AVEVA_LIFETIMEBOUND;
-
-    /// <summary>
-    /// Returns the owned body set via <see cref="SetBody"/>.
-    /// </summary>
-    /// <returns>The owned body. Empty if a non-owning body was set via <see cref="SetBodyView"/> -- use
-    /// <see cref="GetBodyView"/> (and <see cref="GetBodyStorage"/>) in that case.</returns>
-    [[nodiscard]] const std::string& GetBody() const noexcept AVEVA_LIFETIMEBOUND;
+    /// <returns>A copy of the body, sharing its bytes; empty unless set.</returns>
+    [[nodiscard]] HttpBody GetBody() const noexcept;
 
     /// <summary>
     /// Sets the request method.
@@ -73,13 +60,7 @@ class HttpRequest {
     /// Sets the absolute request URL.
     /// </summary>
     /// <param name="url">The absolute http(s) URL to request.</param>
-    void SetUrl(std::string url);
-
-    /// <summary>
-    /// Replaces every header.
-    /// </summary>
-    /// <param name="headers">The headers to send.</param>
-    void SetHeaders(std::vector<HttpHeader> headers);
+    void SetUrl(HttpUrl url) noexcept;
 
     /// <summary>
     /// Appends a header. Duplicate names are kept as separate entries rather than merged. Headers the client
@@ -89,79 +70,22 @@ class HttpRequest {
     void AddHeader(HttpHeader header);
 
     /// <summary>
-    /// Reserves room for headers, to avoid reallocating while they are added.
+    /// Removes every header with a name, compared case-insensitively as HTTP field names are. Replacing a header is
+    /// removing it and adding the new one.
     /// </summary>
-    /// <param name="count">The number of headers to make room for.</param>
-    void ReserveHeaders(std::size_t count);
+    /// <param name="name">The field name to remove.</param>
+    void RemoveHeaders(const HeaderName& name) noexcept;
 
     /// <summary>
-    /// Sets an owned request body. The bytes are copied synchronously; the caller's buffer
-    /// need not outlive this call. Clears any body view previously set via <see cref="SetBodyView"/>.
+    /// Sets the request body, replacing any previous one.
     /// </summary>
-    /// <param name="body">The body to copy.</param>
-    void SetBody(std::string body);
-
-    /// <summary>
-    /// Sets a non-owning request body view over caller-owned memory.
-    ///
-    /// LIFETIME CONTRACT: unlike <see cref="SetBody"/>, this does not copy the content. The memory it
-    /// points to MUST remain valid and unmodified from this call until the completion handler for
-    /// the <c>HttpClient::SendAsync()</c> (or equivalent) operation that consumes this request has run --
-    /// NOT merely until the initiating call returns. Destroying or mutating the referenced buffer before
-    /// completion is undefined behavior. Prefer <see cref="SetBody"/> unless you can guarantee this extended
-    /// lifetime (for example the buffer is owned by a <c>std::shared_ptr</c> kept alive by the caller for the
-    /// duration of the operation), or use the overload that takes a keep-alive.
-    /// </summary>
-    /// <param name="content">The caller-owned bytes to send, subject to the lifetime contract above.</param>
-    void SetBodyView(std::span<const std::byte> content AVEVA_LIFETIME_CAPTURE_BY(this)) noexcept;
-
-    /// <summary>
-    /// Like <see cref="SetBodyView"/>, but the request (and every copy of it, and the HTTP operation that
-    /// sends it) also holds the keep-alive, so the viewed memory stays valid for as long as anything can
-    /// still read it. This is the safe way to satisfy the body-view lifetime contract.
-    /// </summary>
-    /// <param name="content">The bytes to send, owned by <paramref name="keepAlive"/>.</param>
-    /// <param name="keepAlive">An owner of <paramref name="content"/>, held for the whole operation.</param>
-    void SetBodyView(std::span<const std::byte> content, std::shared_ptr<const void> keepAlive) noexcept;
-
-    /// <summary>
-    /// The owner passed to <c>SetBodyView(content, keepAlive)</c>.
-    /// </summary>
-    /// <returns>The keep-alive, or null if none was given.</returns>
-    [[nodiscard]] const std::shared_ptr<const void>& GetBodyKeepAlive() const noexcept AVEVA_LIFETIMEBOUND;
-
-    /// <summary>
-    /// Moves the owned body out of the request, leaving it empty. Has no effect on a body view.
-    /// </summary>
-    /// <returns>The previously owned body.</returns>
-    [[nodiscard]] std::string ReleaseBody() noexcept;
-
-    /// <summary>
-    /// Which representation holds the active body.
-    /// </summary>
-    /// <returns><c>View</c> if the body was set via <see cref="SetBodyView"/>, <c>Owned</c> if via
-    /// <see cref="SetBody"/> (or no body was set).</returns>
-    [[nodiscard]] BodyStorage GetBodyStorage() const noexcept;
-
-    /// <summary>
-    /// Returns the non-owning body view set via <see cref="SetBodyView"/>.
-    /// </summary>
-    /// <returns>The view; empty (and meaningless) unless <see cref="GetBodyStorage"/> is <c>View</c>.</returns>
-    [[nodiscard]] std::span<const std::byte> GetBodyView() const noexcept;
-
-    /// <summary>
-    /// The body length regardless of which representation (<see cref="SetBody"/> or
-    /// <see cref="SetBodyView"/>) is active.
-    /// </summary>
-    /// <returns>The body length in bytes.</returns>
-    [[nodiscard]] std::size_t GetBodySize() const noexcept;
+    /// <param name="body">The body to send.</param>
+    void SetBody(HttpBody body) noexcept;
 
   private:
     HttpMethod m_method = HttpMethod::Get;
     std::string m_url;
     std::vector<HttpHeader> m_headers;
-    std::string m_body;
-    std::span<const std::byte> m_bodyView;
-    std::shared_ptr<const void> m_bodyKeepAlive;
+    HttpBody m_body;
 };
 } // namespace AVEVA

@@ -10,10 +10,14 @@ add_library(aveva-rocksdb-plugin-core STATIC
     LocalFile.cpp
 
     # Private headers
+    FileCacheEntry.hpp
+    FileCacheImpl.hpp
     LruFileIndex.hpp
     ResultHandle.hpp
 )
 add_library(aveva::rocksdb-plugin-core ALIAS aveva-rocksdb-plugin-core)
+# Test-only headers (e.g. FileCacheTestAccess.hpp) visible to in-tree targets; never installed.
+target_include_directories(aveva-rocksdb-plugin-core PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../../include")
 target_sources(aveva-rocksdb-plugin-core
   PUBLIC
@@ -21,7 +25,6 @@ target_sources(aveva-rocksdb-plugin-core
   BASE_DIRS "${base-include-dir}"
   FILES
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/FileCacheEntry.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/ContainerClient.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/Filesystem.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/File.hpp"
@@ -48,12 +51,12 @@ find_package(aveva-install-library CONFIG REQUIRED)
 target_link_libraries(aveva-rocksdb-plugin-core
     PUBLIC
         Boost::log
-        Boost::intrusive
         Boost::static_string
         RocksDB::rocksdb
     PRIVATE
         Boost::algorithm
         Boost::container
+        Boost::intrusive
         Boost::unordered
         Boost::scope
 )

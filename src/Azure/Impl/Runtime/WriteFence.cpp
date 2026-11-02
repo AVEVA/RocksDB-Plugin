@@ -23,11 +23,11 @@ std::optional<std::chrono::steady_clock::duration> WriteFence::ThrowIfFenced() c
     return remaining;
 }
 
-void WriteFence::SetLeaseDeadline(const void* owner,
+void WriteFence::SetLeaseDeadline(const LeaseOwnerId owner,
                                   const std::optional<std::chrono::steady_clock::time_point> deadline) {
     const std::scoped_lock lock(m_leaseMutex);
     const auto it =
-        std::ranges::find(m_leaseDeadlines, owner, &std::pair<const void*, std::chrono::steady_clock::rep>::first);
+        std::ranges::find(m_leaseDeadlines, owner, &std::pair<LeaseOwnerId, std::chrono::steady_clock::rep>::first);
     if (!deadline) {
         if (it != m_leaseDeadlines.end()) {
             m_leaseDeadlines.erase(it);

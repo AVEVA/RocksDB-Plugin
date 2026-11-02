@@ -59,11 +59,15 @@ class BasicLockFileImpl
     };
     // Empty when no lease is held; throws when the renewal deadline has passed.
     [[nodiscard]] std::optional<RenewalAttempt> BeginRenewal() const;
-    // Records a completed renewal request. `failure` is the request's failure (null on success); returns the failure
-    // to report and whether a renewal happened.
-    [[nodiscard]] std::pair<std::exception_ptr, RenewalOutcome>
-    FinishRenewal(const std::string& leaseId, std::chrono::steady_clock::time_point requestStart,
-                  std::exception_ptr failure) const;
+    // What a completed renewal request amounts to: the failure to report (null for none) and whether it renewed.
+    struct RenewalResult {
+        std::exception_ptr Error;
+        RenewalOutcome Outcome;
+    };
+    // Records a completed renewal request. `failure` is the request's failure (null on success).
+    [[nodiscard]] RenewalResult FinishRenewal(const std::string& leaseId,
+                                              std::chrono::steady_clock::time_point requestStart,
+                                              std::exception_ptr failure) const;
     // Requires m_stateMutex.
     void PublishDeadlineLocked() const;
     // Throws when the lease has expired or its renewal deadline has passed; otherwise returns the time left to renew.

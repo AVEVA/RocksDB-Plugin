@@ -167,10 +167,12 @@ std::expected<AccessToken, std::error_code> ParseTokenResponse(std::error_code e
     return token;
 }
 
+// The tenant becomes a path segment of the token endpoint, so a dot-only value ("." or "..") is refused: it would
+// be resolved as a relative path segment and address a different endpoint.
 Validity ValidityOfTenantId(std::string_view tenantId) noexcept {
     const auto valid = !tenantId.empty() && std::ranges::all_of(tenantId, [](char c) {
         return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '.';
-    });
+    }) && !std::ranges::all_of(tenantId, [](char c) { return c == '.'; });
     return valid ? Validity::Valid : Validity::Invalid;
 }
 
@@ -199,9 +201,9 @@ HttpRequest BuildEntraTokenRequest(std::string_view authorityHost, TenantIdLabel
 
     HttpRequest request;
     request.SetMethod(HttpMethod::Post);
-    request.SetUrl(std::move(url));
-    request.AddHeader(HttpHeader{"Content-Type", "application/x-www-form-urlencoded"});
-    request.SetBody(std::move(body));
+    request.SetUrl(HttpUrl{std::move(url)});
+    request.AddHeader(HttpHeader(HeaderName{"Content-Type"}, HeaderValue{"application/x-www-form-urlencoded"}));
+    request.SetBody(HttpBody{std::move(body)});
     return request;
 }
 
@@ -228,7 +230,8 @@ std::optional<std::string> ReadTokenFile(const std::string& path) {
 void ValidateOidcRequestUri(std::string_view uri) {
     const auto parsed = boost::urls::parse_absolute_uri(uri);
     if (!parsed || parsed->scheme_id() != boost::urls::scheme::https || !parsed->has_authority() ||
-        parsed->host().empty() || parsed->has_userinfo() || uri.find('\\') != std::string_view::npos) {
+        parsed->host().empty() || parsed->has_userinfo() || parsed->has_fragment() ||
+        uri.find('\\') != std::string_view::npos) {
         throw std::invalid_argument("OidcRequestUri must be an https URL with a non-empty host and no fragment.");
     }
 }

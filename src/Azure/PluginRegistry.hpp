@@ -67,11 +67,15 @@ std::string PluginNameFor(const StorageInfo& primary, const std::optional<Storag
         canonical += ':';
         canonical += part;
     };
-    append(primary.GetStorageAccountUrl());
-    append(primary.GetDbName());
+    const auto appendAccount = [&append](const StorageInfo& info) {
+        const auto accountUrl = info.GetStorageAccountUrl();
+        const auto dbName = info.GetDbName();
+        append(accountUrl.Value());
+        append(dbName.Value());
+    };
+    appendAccount(primary);
     if (backup) {
-        append(backup->GetStorageAccountUrl());
-        append(backup->GetDbName());
+        appendAccount(*backup);
     }
 
     std::string name(Plugin::Name);
@@ -86,9 +90,12 @@ std::string PluginNameFor(const StorageInfo& primary, const std::optional<Storag
 /// </summary>
 template <class StorageInfo>
 std::string LegacyPluginNameFor(const StorageInfo& primary, const std::optional<StorageInfo>& backup) {
-    auto name = std::string(Plugin::Name) + primary.GetDbName();
+    auto name = std::string(Plugin::Name);
+    const auto primaryDb = primary.GetDbName();
+    name += primaryDb.Value();
     if (backup) {
-        name += backup->GetDbName();
+        const auto backupDb = backup->GetDbName();
+        name += backupDb.Value();
     }
     return name;
 }

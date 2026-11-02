@@ -248,7 +248,7 @@ TEST_F(AsyncReadTests, ReadAsync_AtCachedEndWithMovedEtag_PublishesTheRefreshToT
     std::vector<void*> handles{handle.Handle};
     ASSERT_TRUE(PollAsyncReads(handles).ok());
 
-    const auto cached = m_deferredEnv.Runtime->CachedBlobMetadata(m_deferredEnv.Client->ResourceUrl());
+    const auto cached = m_deferredEnv.Runtime->MetadataCache().Metadata(m_deferredEnv.Client->ResourceUrl());
     ASSERT_TRUE(cached.has_value());
     EXPECT_EQ("etag2", cached->ETag);
 }
@@ -366,7 +366,7 @@ TEST_F(AsyncReadTests, PrefetchCompletion_ThrowingWaiter_DoesNotEscapeOrSkipTheO
 
     EXPECT_NO_THROW({
         m_deferredEnv.Blob->TakeDownload().Succeed(std::string(2048, 'P'));
-        EXPECT_TRUE(m_deferredEnv.Http.RunUntil([&] { return secondRan; }));
+        EXPECT_EQ(m_deferredEnv.Http.RunUntil([&] { return secondRan; }), AVEVA::AzureClient::Tests::WaitOutcome::Done);
     });
 
     EXPECT_TRUE(secondRan);
@@ -389,12 +389,14 @@ TEST_F(AsyncReadTests, PrefetchCompletion_ManyInterleavedWaiters_EachRunsOnceAnd
     auto first = m_deferredEnv.Blob->TakeDownload();
     ASSERT_EQ(0, first.Request.Offset);
     first.Succeed(std::string(512, 'A'));
-    ASSERT_TRUE(m_deferredEnv.Http.RunUntil([&] { return ranA.back() == 1; }));
+    ASSERT_EQ(m_deferredEnv.Http.RunUntil([&] { return ranA.back() == 1; }),
+              AVEVA::AzureClient::Tests::WaitOutcome::Done);
     EXPECT_EQ(std::vector<int>(kWaitersPerSlot, 1), ranA);
     EXPECT_EQ(std::vector<int>(kWaitersPerSlot, 0), ranB);
 
     m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'B'));
-    ASSERT_TRUE(m_deferredEnv.Http.RunUntil([&] { return ranB.back() == 1; }));
+    ASSERT_EQ(m_deferredEnv.Http.RunUntil([&] { return ranB.back() == 1; }),
+              AVEVA::AzureClient::Tests::WaitOutcome::Done);
     EXPECT_EQ(std::vector<int>(kWaitersPerSlot, 1), ranA);
     EXPECT_EQ(std::vector<int>(kWaitersPerSlot, 1), ranB);
 }
@@ -446,7 +448,7 @@ TEST_F(AsyncReadTests, PrefetchChain_GrowthFailure_LeavesCallbackUsableAndKeepsE
     ++queued;
 
     m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'P'));
-    ASSERT_TRUE(m_deferredEnv.Http.RunUntil([&] { return ran == queued; }));
+    ASSERT_EQ(m_deferredEnv.Http.RunUntil([&] { return ran == queued; }), AVEVA::AzureClient::Tests::WaitOutcome::Done);
     EXPECT_EQ(queued, ran);
 }
 
@@ -463,7 +465,7 @@ TEST_F(AsyncReadTests, PrefetchCompletion_SlotInvalidatedDuringDownload_StillRel
     EXPECT_EQ(BlobSize, file->GetSize());
     m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'P'));
 
-    ASSERT_TRUE(m_deferredEnv.Http.RunUntil([&] { return ran == 1; }));
+    ASSERT_EQ(m_deferredEnv.Http.RunUntil([&] { return ran == 1; }), AVEVA::AzureClient::Tests::WaitOutcome::Done);
     EXPECT_EQ(1, ran);
     std::vector<char> buffer(64);
     EXPECT_FALSE(file->TryReadFromCache(100, 64, buffer.data()).has_value());
@@ -478,7 +480,7 @@ TEST_F(AsyncReadTests, PrefetchChain_OntoSettledSlot_DeclinesAndKeepsTheCallback
     ASSERT_EQ(PrefetchChain::Chained, file->ChainOntoPendingPrefetch(100, 64, waiter));
     // A later chain onto a settled slot is declined and must not consume the callback.
     m_deferredEnv.Blob->TakeDownload().Succeed(std::string(512, 'P'));
-    ASSERT_TRUE(m_deferredEnv.Http.RunUntil([&] { return ran == 1; }));
+    ASSERT_EQ(m_deferredEnv.Http.RunUntil([&] { return ran == 1; }), AVEVA::AzureClient::Tests::WaitOutcome::Done);
     std::move_only_function<void()> late = [&ran] { ++ran; };
     EXPECT_EQ(PrefetchChain::Declined, file->ChainOntoPendingPrefetch(100, 64, late));
     EXPECT_TRUE(static_cast<bool>(late));
@@ -518,7 +520,8 @@ TEST_F(AsyncReadTests, Read_PartiallyOverlappingPrefetch_DownloadsOnlyTheRemaind
     auto reading = std::async(std::launch::async, [&] {
         return file.Read(256, scratch.size(), rocksdb::IOOptions{}, &result, scratch.data(), nullptr);
     });
-    ASSERT_TRUE(m_deferredEnv.Http.RunUntil([&] { return m_deferredEnv.Blob->PendingDownloads() == 1; }));
+    ASSERT_EQ(m_deferredEnv.Http.RunUntil([&] { return m_deferredEnv.Blob->PendingDownloads() == 1; }),
+              AVEVA::AzureClient::Tests::WaitOutcome::Done);
     m_deferredEnv.Blob->TakeDownload().Succeed(std::string(256, 'R'));
     const auto status = reading.get();
 
@@ -539,7 +542,8 @@ TEST_F(AsyncReadTests, Read_BlobOverwrittenAfterPrefetch_NeverReturnsMixedVersio
     auto reading = std::async(std::launch::async, [&] {
         return file.Read(256, scratch.size(), rocksdb::IOOptions{}, &result, scratch.data(), nullptr);
     });
-    ASSERT_TRUE(m_deferredEnv.Http.RunUntil([&] { return m_deferredEnv.Blob->PendingDownloads() == 1; }));
+    ASSERT_EQ(m_deferredEnv.Http.RunUntil([&] { return m_deferredEnv.Blob->PendingDownloads() == 1; }),
+              AVEVA::AzureClient::Tests::WaitOutcome::Done);
     // The blob is overwritten after the prefix was served from the prefetch; the suffix download then hits a 412.
     m_deferredEnv.Blob->SetETag("etag2");
     m_deferredEnv.Blob->TakeDownload().Fail(FakeBlobServer::Error(HttpStatus::PreconditionFailed, "ConditionNotMet"));
@@ -849,8 +853,9 @@ TEST_F(AsyncReadTests, MultiRead_AdjacentAndNearbyRanges_AreFetchedWithOneDownlo
 // Prefetch completions run on the client executor, so a test must wait before relying on them.
 static void WaitForPrefetches(const FakeReadableFileImpl& impl, std::initializer_list<int64_t> offsets) {
     for (const auto offset : offsets) {
-        EXPECT_TRUE(AVEVA::AzureClient::Tests::WaitUntil(
-            [&] { return impl.HasPendingPrefetch(offset, 1) == PrefetchCoverage::Uncovered; }));
+        EXPECT_EQ(AVEVA::AzureClient::Tests::WaitUntil(
+                      [&] { return impl.HasPendingPrefetch(offset, 1) == PrefetchCoverage::Uncovered; }),
+                  AVEVA::AzureClient::Tests::WaitOutcome::Done);
     }
 }
 
@@ -1111,7 +1116,8 @@ TEST_F(AsyncReadTests, MultiRead_LargeGroups_AreAdmittedByBytesNotJustByCount) {
     std::jthread reader([&] { status = file.MultiRead(reqs.data(), reqs.size(), rocksdb::IOOptions{}, nullptr); });
 
     ASSERT_TRUE(m_deferredEnv.Blob->WaitForPendingDownloads(admitted));
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    // Once the executor is idle every group that admission allowed has sent its download.
+    AVEVA::RocksDB::Plugin::Azure::Impl::Tests::Settle(m_deferredEnv.Http);
     EXPECT_EQ(admitted, m_deferredEnv.Blob->PendingDownloads());
 
     size_t served = 0;
@@ -1140,11 +1146,14 @@ TEST_F(AsyncReadTests, MultiRead_TimeoutIsOneBudgetForTheBatch_ExpiredQueuedGrou
     for (size_t i = 0; i < count; ++i) {
         SetRequest(reqs[i], i * 20000, scratch[i]);
     }
+    // Generous, so that starting 32 downloads on a loaded machine cannot spend the budget before the first completes.
+    constexpr auto timeout = std::chrono::seconds(2);
     rocksdb::IOOptions options;
-    options.timeout = std::chrono::milliseconds(300);
+    options.timeout = timeout;
 
     std::atomic<bool> done = false;
     rocksdb::IOStatus status;
+    const auto started = std::chrono::steady_clock::now();
     std::jthread reader([&] {
         status = file.MultiRead(reqs.data(), reqs.size(), options, nullptr);
         done = true;
@@ -1154,7 +1163,8 @@ TEST_F(AsyncReadTests, MultiRead_TimeoutIsOneBudgetForTheBatch_ExpiredQueuedGrou
     auto first = m_deferredEnv.Blob->TakeDownload();
     const size_t firstIndex = static_cast<size_t>(first.Request.Offset) / 20000;
     first.Succeed(Expected(first.Request.Offset, 16));
-    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    // The budget starts when MultiRead is entered, which is after `started`; the margin covers that thread start-up.
+    std::this_thread::sleep_until(started + timeout + std::chrono::seconds(1));
 
     // Completing the first read before the deadline frees the window for one more group; once the deadline has
     // passed the remaining queued groups must not start new reads.
@@ -1248,14 +1258,19 @@ TEST_F(AsyncReadTests, ReadAsync_FinishingBeforeTheIoOptionsTimeout_IsNotTimedOu
     auto req = MakeRequest(0, scratch);
     CallbackRecord record;
     IoHandle handle;
+    // Long enough that completing the download cannot lose the race on a loaded machine.
+    constexpr auto timeout = std::chrono::seconds(1);
     rocksdb::IOOptions options;
-    options.timeout = std::chrono::milliseconds(50);
+    options.timeout = timeout;
 
+    const auto submitted = std::chrono::steady_clock::now();
     ASSERT_TRUE(Submit(file, req, record, handle, options).ok());
     m_deferredEnv.Blob->TakeDownload().Succeed(std::string(64, 'C'));
     std::vector<void*> handles{handle.Handle};
     ASSERT_TRUE(PollAsyncReads(handles).ok());
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // Let the deadline pass, then drain whatever its timer queued, so a late timeout would have been delivered.
+    std::this_thread::sleep_until(submitted + timeout + std::chrono::milliseconds(250));
+    AVEVA::RocksDB::Plugin::Azure::Impl::Tests::Settle(m_deferredEnv.Http);
 
     EXPECT_EQ(1, record.Calls.load());
     EXPECT_TRUE(record.Status.ok()) << record.Status.ToString();
@@ -1270,7 +1285,7 @@ TEST_F(AsyncReadTests, ReadAsync_WithoutIoOptionsTimeoutRequestsNoDeadline) {
 
     ASSERT_TRUE(Submit(file, req, record, handle).ok());
     auto download = m_deferredEnv.Blob->TakeDownload();
-    EXPECT_EQ(m_deferredEnv.Client->GetDefaultRequestOptions().GetTimeout(), download.Request.Timeout);
+    EXPECT_EQ(m_deferredEnv.Client->GetDefaultRequestOptions().GetTimeout().Value(), download.Request.Timeout);
     download.Succeed(std::string(64, 'C'));
     std::vector<void*> handles{handle.Handle};
     ASSERT_TRUE(PollAsyncReads(handles).ok());
@@ -1322,7 +1337,8 @@ TEST_F(AsyncReadTests, ReadAsync_DeletingHandlesOfStalledPrivateReads_CancelsThe
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     EXPECT_EQ(0U, m_deferredEnv.Blob->PendingDownloads());
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    // A retry would be sent from the executor; once it is idle none was.
+    AVEVA::RocksDB::Plugin::Azure::Impl::Tests::Settle(m_deferredEnv.Http);
     EXPECT_EQ(downloadsBefore, m_deferredEnv.Blob->Downloads.size());
     for (size_t i = 0; i < Reads; ++i) {
         EXPECT_EQ(0, records[i].Calls.load());
@@ -1365,11 +1381,12 @@ TEST_F(AsyncReadTests, ReadAsync_AbortedWaiterOfAFailedPrefetch_DoesNotStartAFal
 
     handle.Reset();
     // Abandoning one waiter must not cancel the shared prefetch.
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    AVEVA::RocksDB::Plugin::Azure::Impl::Tests::Settle(m_deferredEnv.Http);
     ASSERT_EQ(1U, m_deferredEnv.Blob->PendingDownloads());
     m_deferredEnv.Blob->TakeDownload().Fail(FakeBlobServer::Error(HttpStatus::BadRequest, "InvalidInput"));
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // A fallback download would be sent from the executor; once it is idle none was.
+    AVEVA::RocksDB::Plugin::Azure::Impl::Tests::Settle(m_deferredEnv.Http);
     EXPECT_EQ(0U, m_deferredEnv.Blob->PendingDownloads());
     EXPECT_EQ(1U, m_deferredEnv.Blob->Downloads.size());
     EXPECT_EQ(std::string(64, 'x'), std::string(scratch.begin(), scratch.end()));
@@ -1407,10 +1424,12 @@ TEST_F(AsyncReadTests, ReadAsync_StaleReadAfterTheDeadline_TimesOutInsteadOfRefr
     rocksdb::IOOptions options;
     options.timeout = std::chrono::milliseconds(150);
 
+    const auto submitted = std::chrono::steady_clock::now();
     ASSERT_TRUE(Submit(file, req, record, handle, options).ok());
     auto download = m_deferredEnv.Blob->TakeDownload();
     const int propertiesBefore = m_deferredEnv.Blob->PropertiesRequests.Value();
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    // The stale response must arrive after the deadline, however long taking the download took.
+    std::this_thread::sleep_until(submitted + options.timeout + std::chrono::milliseconds(100));
     m_deferredEnv.Blob->SetETag("etag2");
     download.Fail(FakeBlobServer::Error(HttpStatus::PreconditionFailed, "ConditionNotMet"));
 
@@ -1499,7 +1518,8 @@ TEST_F(AsyncReadTests, ReadAsync_PreconditionFailed_RefreshesMetadataAndRetries)
     m_deferredEnv.Blob->SetETag("etag2");
     m_deferredEnv.Blob->TakeDownload().Fail(FakeBlobServer::Error(HttpStatus::PreconditionFailed, "ConditionNotMet"));
     // The retry is issued from the failed request's completion, after the metadata refresh.
-    ASSERT_TRUE(m_deferredEnv.Http.RunUntil([&] { return m_deferredEnv.Blob->PendingDownloads() == 1; }));
+    ASSERT_EQ(m_deferredEnv.Http.RunUntil([&] { return m_deferredEnv.Blob->PendingDownloads() == 1; }),
+              AVEVA::AzureClient::Tests::WaitOutcome::Done);
     auto retry = m_deferredEnv.Blob->TakeDownload();
     EXPECT_EQ("etag2", retry.Request.IfMatch);
     retry.Succeed(std::string(16, 'E'));
@@ -1732,13 +1752,15 @@ TEST_F(AsyncReadTests, ReadAsync_PreconditionFailedEveryTime_StopsAfterTheRetryL
     ASSERT_TRUE(Submit(file, req, record, handle).ok());
 
     for (int attempt = 0; attempt <= FakeReadableFileImpl::kMaxStaleReadRetries; ++attempt) {
-        ASSERT_TRUE(m_deferredEnv.Http.RunUntil([&] { return m_deferredEnv.Blob->PendingDownloads() == 1; }))
+        ASSERT_EQ(m_deferredEnv.Http.RunUntil([&] { return m_deferredEnv.Blob->PendingDownloads() == 1; }),
+                  AVEVA::AzureClient::Tests::WaitOutcome::Done)
             << "attempt " << attempt;
         m_deferredEnv.Blob->TakeDownload().Fail(
             FakeBlobServer::Error(HttpStatus::PreconditionFailed, "ConditionNotMet"));
     }
-    EXPECT_FALSE(m_deferredEnv.Http.RunUntil([&] { return m_deferredEnv.Blob->PendingDownloads() != 0; },
-                                             std::chrono::milliseconds{200}));
+    EXPECT_EQ(m_deferredEnv.Http.RunUntil([&] { return m_deferredEnv.Blob->PendingDownloads() != 0; },
+                                          std::chrono::milliseconds{200}),
+              AVEVA::AzureClient::Tests::WaitOutcome::TimedOut);
 
     std::vector<void*> handles{handle.Handle};
     ASSERT_TRUE(PollAsyncReads(handles).ok());
@@ -1981,7 +2003,7 @@ TEST(HeldRequestsTests, CountingBeforeTheTransportRegistersTheRequestKeepsIt) {
     size_t countedWhileUnregistered = 0;
     http.SetResponder([&](const AVEVA::AzureClient::Tests::FakeHttpClient::RequestRecord& record) {
         AVEVA::AzureClient::Tests::FakeHttpClient::ScriptedResult result;
-        result.Deferred = true;
+        result.Delivery = AVEVA::AzureClient::Tests::Delivery::Deferred;
         held.Add(record.Index);
         countedWhileUnregistered = held.Count(http);
         return result;
@@ -1992,6 +2014,6 @@ TEST(HeldRequestsTests, CountingBeforeTheTransportRegistersTheRequestKeepsIt) {
 
     EXPECT_EQ(1U, countedWhileUnregistered);
     EXPECT_EQ(1U, held.Count(http));
-    EXPECT_TRUE(http.CompleteRequest(0));
+    EXPECT_EQ(http.CompleteRequest(0), AVEVA::AzureClient::Tests::Settlement::Settled);
     EXPECT_EQ(0U, held.Count(http));
 }

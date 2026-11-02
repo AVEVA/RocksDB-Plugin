@@ -21,6 +21,7 @@ namespace BlobOperations = AVEVA::RocksDB::Plugin::Azure::Impl::BlobOperations;
 namespace Configuration = AVEVA::RocksDB::Plugin::Azure::Impl::Tests::SignedConfiguration;
 using AVEVA::RocksDB::Plugin::Azure::Impl::ReadWriteFileImpl;
 using AVEVA::RocksDB::Plugin::Azure::Impl::Testing::AzureIntegrationTestBase;
+using AVEVA::RocksDB::Plugin::Core::ByteOffset;
 
 class ReadWriteFileIntegrationTests : public AzureIntegrationTestBase {
   protected:
@@ -38,12 +39,16 @@ TEST_F(ReadWriteFileIntegrationTests, Write_ThenRead_DataMatchesCorrectly) {
     }
 
     // Act
-    file.Write(0, testData.data(), static_cast<int64_t>(testData.size()));
+    file.Write(ByteOffset{static_cast<uint64_t>(0)},
+               std::span<const char>(testData.data(), static_cast<size_t>(static_cast<int64_t>(testData.size()))));
     file.Sync();
 
     // Read data back
     std::vector<char> readBuffer(testData.size());
-    const auto bytesRead = file.Read(0, static_cast<int64_t>(testData.size()), readBuffer.data());
+    const auto bytesRead = static_cast<int64_t>(
+        file.Read(ByteOffset{static_cast<uint64_t>(0)},
+                  std::span<char>(readBuffer.data(), static_cast<size_t>(static_cast<int64_t>(testData.size()))))
+            .Value());
 
     // Assert
     EXPECT_EQ(static_cast<int64_t>(testData.size()), bytesRead);
@@ -60,18 +65,27 @@ TEST_F(ReadWriteFileIntegrationTests, Write_AtDifferentOffsets_ReadsCorrectly) {
     const std::vector<char> data3(200, 'C');
 
     // Act - Write at different offsets
-    file.Write(0, data1.data(), static_cast<int64_t>(data1.size()));
-    file.Write(500, data2.data(), static_cast<int64_t>(data2.size()));
-    file.Write(1000, data3.data(), static_cast<int64_t>(data3.size()));
+    file.Write(ByteOffset{static_cast<uint64_t>(0)},
+               std::span<const char>(data1.data(), static_cast<size_t>(static_cast<int64_t>(data1.size()))));
+    file.Write(ByteOffset{static_cast<uint64_t>(500)},
+               std::span<const char>(data2.data(), static_cast<size_t>(static_cast<int64_t>(data2.size()))));
+    file.Write(ByteOffset{static_cast<uint64_t>(1000)},
+               std::span<const char>(data3.data(), static_cast<size_t>(static_cast<int64_t>(data3.size()))));
     file.Sync();
 
     // Read back
     std::vector<char> readBuffer1(100);
     std::vector<char> readBuffer2(150);
     std::vector<char> readBuffer3(200);
-    const auto read1 = file.Read(0, 100, readBuffer1.data());
-    const auto read2 = file.Read(500, 150, readBuffer2.data());
-    const auto read3 = file.Read(1000, 200, readBuffer3.data());
+    const auto read1 = static_cast<int64_t>(
+        file.Read(ByteOffset{static_cast<uint64_t>(0)}, std::span<char>(readBuffer1.data(), static_cast<size_t>(100)))
+            .Value());
+    const auto read2 = static_cast<int64_t>(
+        file.Read(ByteOffset{static_cast<uint64_t>(500)}, std::span<char>(readBuffer2.data(), static_cast<size_t>(150)))
+            .Value());
+    const auto read3 = static_cast<int64_t>(file.Read(ByteOffset{static_cast<uint64_t>(1000)},
+                                                      std::span<char>(readBuffer3.data(), static_cast<size_t>(200)))
+                                                .Value());
 
     // Assert
     EXPECT_EQ(100, read1);
@@ -94,11 +108,15 @@ TEST_F(ReadWriteFileIntegrationTests, Write_LargeData_HandlesCorrectly) {
     }
 
     // Act
-    file.Write(0, testData.data(), static_cast<int64_t>(testData.size()));
+    file.Write(ByteOffset{static_cast<uint64_t>(0)},
+               std::span<const char>(testData.data(), static_cast<size_t>(static_cast<int64_t>(testData.size()))));
     file.Sync();
 
     std::vector<char> readBuffer(testData.size());
-    const auto bytesRead = file.Read(0, static_cast<int64_t>(testData.size()), readBuffer.data());
+    const auto bytesRead = static_cast<int64_t>(
+        file.Read(ByteOffset{static_cast<uint64_t>(0)},
+                  std::span<char>(readBuffer.data(), static_cast<size_t>(static_cast<int64_t>(testData.size()))))
+            .Value());
 
     // Assert
     EXPECT_EQ(static_cast<int64_t>(testData.size()), bytesRead);
@@ -114,7 +132,8 @@ TEST_F(ReadWriteFileIntegrationTests, OverwriteExistingData_UpdatesCorrectly) {
     const std::vector<char> newData(200, 'Y');
 
     // Act
-    file.Write(100, newData.data(), static_cast<int64_t>(newData.size()));
+    file.Write(ByteOffset{static_cast<uint64_t>(100)},
+               std::span<const char>(newData.data(), static_cast<size_t>(static_cast<int64_t>(newData.size()))));
     file.Sync();
 
     // Assert
@@ -122,7 +141,10 @@ TEST_F(ReadWriteFileIntegrationTests, OverwriteExistingData_UpdatesCorrectly) {
     std::copy(newData.begin(), newData.end(), expected.begin() + 100);
 
     std::vector<char> readBuffer(expected.size());
-    const auto bytesRead = file.Read(0, static_cast<int64_t>(expected.size()), readBuffer.data());
+    const auto bytesRead = static_cast<int64_t>(
+        file.Read(ByteOffset{static_cast<uint64_t>(0)},
+                  std::span<char>(readBuffer.data(), static_cast<size_t>(static_cast<int64_t>(expected.size()))))
+            .Value());
 
     EXPECT_EQ(static_cast<int64_t>(expected.size()), bytesRead);
     EXPECT_EQ(expected, readBuffer);
@@ -135,7 +157,8 @@ TEST_F(ReadWriteFileIntegrationTests, Flush_PersistsChangesToBlob) {
     const std::vector<char> testData(750, 'F');
 
     // Act
-    file.Write(0, testData.data(), static_cast<int64_t>(testData.size()));
+    file.Write(ByteOffset{static_cast<uint64_t>(0)},
+               std::span<const char>(testData.data(), static_cast<size_t>(static_cast<int64_t>(testData.size()))));
     file.Flush();
 
     // Assert - Data should be persisted, but size metadata may not be updated yet
@@ -168,7 +191,8 @@ TEST_F(ReadWriteFileIntegrationTests, Sync_UpdatesFileSizeInBlob) {
     const std::vector<char> testData(888, 'S');
 
     // Act
-    file.Write(0, testData.data(), static_cast<int64_t>(testData.size()));
+    file.Write(ByteOffset{static_cast<uint64_t>(0)},
+               std::span<const char>(testData.data(), static_cast<size_t>(static_cast<int64_t>(testData.size()))));
     file.Sync();
 
     // Assert
@@ -189,7 +213,10 @@ TEST_F(ReadWriteFileIntegrationTests, Read_FromExistingFile_ReadsCorrectly) {
 
     // Act
     std::vector<char> readBuffer(initialData.size());
-    const auto bytesRead = file.Read(0, static_cast<int64_t>(initialData.size()), readBuffer.data());
+    const auto bytesRead = static_cast<int64_t>(
+        file.Read(ByteOffset{static_cast<uint64_t>(0)},
+                  std::span<char>(readBuffer.data(), static_cast<size_t>(static_cast<int64_t>(initialData.size()))))
+            .Value());
 
     // Assert
     EXPECT_EQ(static_cast<int64_t>(initialData.size()), bytesRead);
@@ -206,12 +233,16 @@ TEST_F(ReadWriteFileIntegrationTests, NonPageAlignedWrites_HandleCorrectly) {
     const std::vector<char> testData(555, 'N');
 
     // Act
-    file.Write(offset, testData.data(), static_cast<int64_t>(testData.size()));
+    file.Write(ByteOffset{static_cast<uint64_t>(offset)},
+               std::span<const char>(testData.data(), static_cast<size_t>(static_cast<int64_t>(testData.size()))));
     file.Sync();
 
     // Assert
     std::vector<char> readBuffer(testData.size());
-    int64_t bytesRead = file.Read(offset, static_cast<int64_t>(testData.size()), readBuffer.data());
+    int64_t bytesRead = static_cast<int64_t>(
+        file.Read(ByteOffset{static_cast<uint64_t>(offset)},
+                  std::span<char>(readBuffer.data(), static_cast<size_t>(static_cast<int64_t>(testData.size()))))
+            .Value());
 
     EXPECT_EQ(static_cast<int64_t>(testData.size()), bytesRead);
     EXPECT_EQ(testData, readBuffer);
@@ -225,7 +256,8 @@ TEST_F(ReadWriteFileIntegrationTests, GetFileSize_ReturnsCorrectSize) {
     const std::vector<char> testData(1234, 'G');
 
     // Act
-    file.Write(0, testData.data(), static_cast<int64_t>(testData.size()));
+    file.Write(ByteOffset{static_cast<uint64_t>(0)},
+               std::span<const char>(testData.data(), static_cast<size_t>(static_cast<int64_t>(testData.size()))));
     file.Sync();
 
     // Assert - Verify size through blob client
@@ -240,7 +272,8 @@ TEST_F(ReadWriteFileIntegrationTests, Close_CanBeCalledMultipleTimes) {
     ReadWriteFileImpl file{m_blobName, m_runtime, blobClient, nullptr, m_logger};
 
     const std::vector<char> testData(100, 'C');
-    file.Write(0, testData.data(), static_cast<int64_t>(testData.size()));
+    file.Write(ByteOffset{static_cast<uint64_t>(0)},
+               std::span<const char>(testData.data(), static_cast<size_t>(static_cast<int64_t>(testData.size()))));
 
     // Act & Assert - Should not throw
     EXPECT_NO_THROW(file.Close());
@@ -258,11 +291,15 @@ TEST_F(ReadWriteFileIntegrationTests, WriteAndReadAcrossPageBoundaries_HandlesCo
     const std::vector<char> testData(200, 'B');
 
     // Act
-    file.Write(offset, testData.data(), static_cast<int64_t>(testData.size()));
+    file.Write(ByteOffset{static_cast<uint64_t>(offset)},
+               std::span<const char>(testData.data(), static_cast<size_t>(static_cast<int64_t>(testData.size()))));
     file.Sync();
 
     std::vector<char> readBuffer(testData.size());
-    int64_t bytesRead = file.Read(offset, static_cast<int64_t>(testData.size()), readBuffer.data());
+    int64_t bytesRead = static_cast<int64_t>(
+        file.Read(ByteOffset{static_cast<uint64_t>(offset)},
+                  std::span<char>(readBuffer.data(), static_cast<size_t>(static_cast<int64_t>(testData.size()))))
+            .Value());
 
     // Assert
     EXPECT_EQ(static_cast<int64_t>(testData.size()), bytesRead);
@@ -279,12 +316,16 @@ TEST_F(ReadWriteFileIntegrationTests, WriteExtendsBeyondInitialCapacity_ExpandsB
     const std::vector<char> testData(1000, 'E');
 
     // Act
-    file.Write(offset, testData.data(), static_cast<int64_t>(testData.size()));
+    file.Write(ByteOffset{static_cast<uint64_t>(offset)},
+               std::span<const char>(testData.data(), static_cast<size_t>(static_cast<int64_t>(testData.size()))));
     file.Sync();
 
     // Assert
     std::vector<char> readBuffer(testData.size());
-    int64_t bytesRead = file.Read(offset, static_cast<int64_t>(testData.size()), readBuffer.data());
+    int64_t bytesRead = static_cast<int64_t>(
+        file.Read(ByteOffset{static_cast<uint64_t>(offset)},
+                  std::span<char>(readBuffer.data(), static_cast<size_t>(static_cast<int64_t>(testData.size()))))
+            .Value());
 
     EXPECT_EQ(static_cast<int64_t>(testData.size()), bytesRead);
     EXPECT_EQ(testData, readBuffer);
@@ -300,21 +341,30 @@ TEST_F(ReadWriteFileIntegrationTests, MultipleWritesAndReads_MaintainDataIntegri
     const std::vector<char> data2(400, '2');
     const std::vector<char> data3(500, '3');
 
-    file.Write(0, data1.data(), static_cast<int64_t>(data1.size()));
-    file.Write(1000, data2.data(), static_cast<int64_t>(data2.size()));
+    file.Write(ByteOffset{static_cast<uint64_t>(0)},
+               std::span<const char>(data1.data(), static_cast<size_t>(static_cast<int64_t>(data1.size()))));
+    file.Write(ByteOffset{static_cast<uint64_t>(1000)},
+               std::span<const char>(data2.data(), static_cast<size_t>(static_cast<int64_t>(data2.size()))));
     file.Sync();
 
     std::vector<char> read1(data1.size());
-    const auto bytesRead1 = file.Read(0, 300, read1.data());
+    const auto bytesRead1 = static_cast<int64_t>(
+        file.Read(ByteOffset{static_cast<uint64_t>(0)}, std::span<char>(read1.data(), static_cast<size_t>(300)))
+            .Value());
     EXPECT_EQ(data1, read1);
 
-    file.Write(2000, data3.data(), static_cast<int64_t>(data3.size()));
+    file.Write(ByteOffset{static_cast<uint64_t>(2000)},
+               std::span<const char>(data3.data(), static_cast<size_t>(static_cast<int64_t>(data3.size()))));
     file.Sync();
 
     std::vector<char> read2(data2.size());
     std::vector<char> read3(data3.size());
-    const auto bytesRead2 = file.Read(1000, 400, read2.data());
-    const auto bytesRead3 = file.Read(2000, 500, read3.data());
+    const auto bytesRead2 = static_cast<int64_t>(
+        file.Read(ByteOffset{static_cast<uint64_t>(1000)}, std::span<char>(read2.data(), static_cast<size_t>(400)))
+            .Value());
+    const auto bytesRead3 = static_cast<int64_t>(
+        file.Read(ByteOffset{static_cast<uint64_t>(2000)}, std::span<char>(read3.data(), static_cast<size_t>(500)))
+            .Value());
 
     // Assert
     EXPECT_EQ(static_cast<int64_t>(data1.size()), bytesRead1);

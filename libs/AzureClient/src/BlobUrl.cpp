@@ -14,15 +14,6 @@
 
 // Percent-encoding and query-string helpers shared by every request builder.
 namespace AVEVA::AzureClient::Private {
-namespace {
-struct ExtraSafeCharacters {
-    std::string_view Characters;
-
-    [[nodiscard]] bool operator()(char value) const noexcept {
-        return boost::urls::unreserved_chars(value) || Characters.contains(value);
-    }
-};
-} // namespace
 
 std::string_view TrimTrailingSlashes(std::string_view value) noexcept {
     // npos + 1 wraps to 0, which yields the empty view for an all-slash input.
@@ -37,7 +28,11 @@ std::string_view TrimLeadingQuestionMark(std::string_view value) noexcept {
 }
 
 void UrlEncodeAppend(std::string& out, std::string_view value, std::string_view extraSafeChars) {
-    boost::urls::encode(value, ExtraSafeCharacters{extraSafeChars}, {}, boost::urls::string_token::append_to(out));
+    // Boost's CharSet concept requires a predicate, so this stays local rather than becoming an interface.
+    const auto isSafe = [extraSafeChars](char character) noexcept {
+        return boost::urls::unreserved_chars(character) || extraSafeChars.contains(character);
+    };
+    boost::urls::encode(value, isSafe, {}, boost::urls::string_token::append_to(out));
 }
 
 std::string UrlEncode(std::string_view value, std::string_view extraSafeChars) {

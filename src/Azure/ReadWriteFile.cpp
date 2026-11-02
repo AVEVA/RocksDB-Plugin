@@ -25,7 +25,7 @@ rocksdb::IOStatus ReadWriteFile::Write(uint64_t offset, const rocksdb::Slice& da
             return rocksdb::IOStatus::InvalidArgument("Write offset or size is out of range");
         }
 
-        m_file->Write(static_cast<int64_t>(offset), data.data(), static_cast<int64_t>(data.size()));
+        m_file->Write(Core::ByteOffset{offset}, std::span<const char>(data.data(), data.size()));
         return rocksdb::IOStatus::OK();
     });
 }
@@ -37,13 +37,11 @@ rocksdb::IOStatus ReadWriteFile::Read(uint64_t offset, size_t n, const rocksdb::
             return rocksdb::IOStatus::InvalidArgument("Read offset or size is out of range");
         }
 
-        const auto bytesRead = m_file->Read(static_cast<int64_t>(offset), static_cast<int64_t>(n), scratch);
-
-        assert(bytesRead >= 0 && "Bytes read should not be negative");
-        assert(bytesRead <= static_cast<int64_t>(n) && "Bytes read should not exceed requested amount");
+        const auto bytesRead = m_file->Read(Core::ByteOffset{offset}, std::span<char>(scratch, n));
+        assert(bytesRead.Value() <= n && "Bytes read should not exceed requested amount");
 
         result->data_ = scratch;
-        result->size_ = static_cast<size_t>(bytesRead);
+        result->size_ = static_cast<size_t>(bytesRead.Value());
         return rocksdb::IOStatus::OK();
     });
 }

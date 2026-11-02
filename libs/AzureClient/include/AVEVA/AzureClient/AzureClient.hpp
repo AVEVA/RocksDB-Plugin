@@ -18,3 +18,4 @@
 #include <AVEVA/AzureClient/PageBlobClient.hpp>
 #include <AVEVA/AzureClient/Response.hpp>
 #include <AVEVA/AzureClient/TokenCredential.hpp>
+#include <AVEVA/AzureClient/Types.hpp>

@@ -157,12 +157,13 @@ void ParseExtendedBlobProperties(Models::BlobProperties& properties, const BlobP
     properties.ContentEncoding = std::string{values.ContentEncoding};
     properties.ContentLanguage = std::string{values.ContentLanguage};
     properties.ContentDisposition = std::string{values.ContentDisposition};
-    properties.CreatedOn = ParseOptionalHttpDate(values.CreatedOn, names.CreatedOn);
+    properties.CreatedOn = ParseOptionalHttpDate(values.CreatedOn, FieldName{names.CreatedOn});
     properties.LeaseStatus = ParseLeaseStatus(values.LeaseStatus);
     properties.LeaseState = ParseLeaseState(values.LeaseState);
     properties.LeaseDuration = ParseLeaseDurationType(values.LeaseDuration);
-    properties.ServerEncrypted = ParseOptionalFlag<ServerEncryption>(values.ServerEncrypted, names.ServerEncrypted);
-    properties.SequenceNumber = ParseOptionalUnsigned(values.SequenceNumber, names.SequenceNumber);
+    properties.ServerEncrypted =
+        ParseOptionalFlag<ServerEncryption>(values.ServerEncrypted, FieldName{names.ServerEncrypted});
+    properties.SequenceNumber = ParseOptionalUnsigned(values.SequenceNumber, FieldName{names.SequenceNumber});
 }
 
 [[nodiscard]] std::optional<int> ParseInt(std::string_view value) noexcept { return ParseExact<int>(value); }
@@ -181,10 +182,10 @@ void ParseExtendedBlobProperties(Models::BlobProperties& properties, const BlobP
     return static_cast<unsigned int>(found - MonthNames.begin()) + 1U;
 }
 
-constexpr unsigned int MaxHourOfDay = 23U;
-constexpr unsigned int MaxMinuteOfHour = 59U;
+constexpr std::chrono::hours MaxHourOfDay{23};
+constexpr std::chrono::minutes MaxMinuteOfHour{59};
 // 60 is accepted so that a leap second is not rejected outright.
-constexpr unsigned int MaxSecondOfMinute = 60U;
+constexpr std::chrono::seconds MaxSecondOfMinute{60};
 
 // A fixed-width field within one of the fixed-layout timestamp formats below:
 // the `Offset` of its first character and its `Length` in characters.
@@ -193,20 +194,17 @@ struct DateField {
     std::size_t Length;
 };
 
-// Wraps every other time-of-day/calendar component so no two adjacent parameters of
-// BuildUtcTimePoint share a plain `unsigned int` type.
-struct UtcTimeComponentTag {};
-
-using UtcTimeComponent = NumericLabel<unsigned int, UtcTimeComponentTag>;
-
+// Combines parsed calendar and time-of-day components into a UTC time point. Each component has its own chrono
+// type, so they cannot be passed in the wrong order. Returns nothing for an invalid date or time.
 [[nodiscard]] std::optional<std::chrono::system_clock::time_point>
-BuildUtcTimePoint(int yearValue, UtcTimeComponent monthValue, unsigned int dayValue, UtcTimeComponent hourValue,
-                  unsigned int minuteValue, UtcTimeComponent secondValue) noexcept {
+BuildUtcTimePoint(std::chrono::year yearValue, std::chrono::month monthValue, std::chrono::day dayValue,
+                  std::chrono::hours hourValue, std::chrono::minutes minuteValue,
+                  std::chrono::seconds secondValue) noexcept {
     using namespace std::chrono;
 
-    const year_month_day calendarDate{year{yearValue}, month{monthValue.Value}, day{dayValue}};
-    if (!calendarDate.ok() || hourValue.Value > MaxHourOfDay || minuteValue > MaxMinuteOfHour ||
-        secondValue.Value > MaxSecondOfMinute) {
+    const year_month_day calendarDate{yearValue, monthValue, dayValue};
+    if (!calendarDate.ok() || hourValue < hours::zero() || hourValue > MaxHourOfDay || minuteValue < minutes::zero() ||
+        minuteValue > MaxMinuteOfHour || secondValue < seconds::zero() || secondValue > MaxSecondOfMinute) {
         return std::nullopt;
     }
 
@@ -215,8 +213,7 @@ BuildUtcTimePoint(int yearValue, UtcTimeComponent monthValue, unsigned int dayVa
     constexpr auto earliest = duration_cast<seconds>(system_clock::duration::min()) + seconds{1};
     constexpr auto latest = duration_cast<seconds>(system_clock::duration::max()) - seconds{1};
     const sys_days days{calendarDate};
-    const seconds total = duration_cast<seconds>(days.time_since_epoch()) + hours{hourValue.Value} +
-                          minutes{minuteValue} + seconds{secondValue.Value};
+    const seconds total = duration_cast<seconds>(days.time_since_epoch()) + hourValue + minuteValue + secondValue;
     if (total < earliest || total > latest) {
         return std::nullopt;
     }
@@ -274,7 +271,8 @@ ParseRfc1123HttpDate(std::string_view value) noexcept {
         return std::nullopt;
     }
 
-    return BuildUtcTimePoint(*year, *month, *day, *hour, *minute, *second);
+    return BuildUtcTimePoint(std::chrono::year{*year}, std::chrono::month{*month}, std::chrono::day{*day},
+                             std::chrono::hours{*hour}, std::chrono::minutes{*minute}, std::chrono::seconds{*second});
 }
 
 // "Sunday, 06-Nov-94 08:49:37 GMT" - the obsolete RFC 850 format. Offsets are relative to the
@@ -344,7 +342,8 @@ ParseRfc850HttpDate(std::string_view value) noexcept {
         year -= YearsPerCentury;
     }
 
-    return BuildUtcTimePoint(year, *month, *day, *hour, *minute, *second);
+    return BuildUtcTimePoint(std::chrono::year{year}, std::chrono::month{*month}, std::chrono::day{*day},
+                             std::chrono::hours{*hour}, std::chrono::minutes{*minute}, std::chrono::seconds{*second});
 }
 
 // "Sun Nov  6 08:49:37 1994" - the ANSI C asctime() format.
@@ -394,7 +393,8 @@ ParseAsctimeHttpDate(std::string_view value) noexcept {
         return std::nullopt;
     }
 
-    return BuildUtcTimePoint(*year, *month, *day, *hour, *minute, *second);
+    return BuildUtcTimePoint(std::chrono::year{*year}, std::chrono::month{*month}, std::chrono::day{*day},
+                             std::chrono::hours{*hour}, std::chrono::minutes{*minute}, std::chrono::seconds{*second});
 }
 
 [[nodiscard]] Models::MetadataMap ParseMetadataXml(const XmlNode& node) {
@@ -632,7 +632,9 @@ std::optional<std::chrono::system_clock::time_point> ParseIso8601Utc(std::string
     if (!year || !month || !day || !hour || !minute || !second) {
         return std::nullopt;
     }
-    auto result = BuildUtcTimePoint(*year, *month, *day, *hour, *minute, *second);
+    auto result =
+        BuildUtcTimePoint(std::chrono::year{*year}, std::chrono::month{*month}, std::chrono::day{*day},
+                          std::chrono::hours{*hour}, std::chrono::minutes{*minute}, std::chrono::seconds{*second});
     // Digits beyond the seventh are dropped (truncated, not rounded): the service emits 100 ns ticks, so nothing real
     // is lost.
     std::string_view fraction = value.substr(FractionOffset, value.size() - MinLength);
@@ -927,7 +929,7 @@ Models::BlobProperties ParseBlobProperties(const HttpResponse& response) {
                                                    .SequenceNumber = value(BlobHeader::SequenceNumber)});
     properties.VersionId = std::string{value(BlobHeader::VersionId)};
     properties.IsCurrentVersion =
-        ParseOptionalFlag<VersionCurrency>(value(BlobHeader::IsCurrentVersion), "x-ms-is-current-version");
+        ParseOptionalFlag<VersionCurrency>(value(BlobHeader::IsCurrentVersion), FieldName{"x-ms-is-current-version"});
     return properties;
 }
 
@@ -960,11 +962,12 @@ Models::ReleaseBlobLeaseResult ParseReleaseBlobLeaseResult(const HttpResponse& r
 
 Models::GetPageRangesResult ParseGetPageRangesResult(const HttpResponse& response) {
     auto result = ParseETagAndLastModified<Models::GetPageRangesResult>(response);
-    result.BlobContentLength =
-        ParseOptionalUnsigned(FindHeaderValue(response, XMsBlobContentLengthHeaderName), "x-ms-blob-content-length")
-            .value_or(0U);
+    result.BlobContentLength = ParseOptionalUnsigned(FindHeaderValue(response, XMsBlobContentLengthHeaderName),
+                                                     FieldName{"x-ms-blob-content-length"})
+                                   .value_or(0U);
 
-    const auto tree = TryReadXmlOrThrow(response.GetBody(), "Get page ranges response", "PageList");
+    const auto tree =
+        TryReadXmlOrThrow(response.GetBody(), XmlDescription{"Get page ranges response"}, XmlRootName{"PageList"});
     const XmlNode* root = tree->Root();
 
     result.NextMarker = GetChildTextOrEmpty(*root, "NextMarker");
@@ -1007,7 +1010,7 @@ namespace {
 
 Models::ListBlobsResult ParseListBlobsResultXml(std::string_view xml) {
     Models::ListBlobsResult result;
-    const auto tree = TryReadXmlOrThrow(xml, "List blobs response", "EnumerationResults");
+    const auto tree = TryReadXmlOrThrow(xml, XmlDescription{"List blobs response"}, XmlRootName{"EnumerationResults"});
     const XmlNode* root = tree->Root();
 
     result.Prefix = GetChildTextOrEmpty(*root, "Prefix");
@@ -1026,8 +1029,8 @@ Models::ListBlobsResult ParseListBlobsResultXml(std::string_view xml) {
             }
             // VersionId and IsCurrentVersion are siblings of <Properties>.
             item.Properties.VersionId = GetChildTextOrEmpty(block, "VersionId");
-            item.Properties.IsCurrentVersion =
-                ParseOptionalFlag<VersionCurrency>(GetChildTextOrEmpty(block, "IsCurrentVersion"), "IsCurrentVersion");
+            item.Properties.IsCurrentVersion = ParseOptionalFlag<VersionCurrency>(
+                GetChildTextOrEmpty(block, "IsCurrentVersion"), FieldName{"IsCurrentVersion"});
             // The service returns <Metadata> as a sibling of <Properties>.
             if (const XmlNode* metadata = FindChildByLocalName(block, "Metadata"); metadata != nullptr) {
                 item.Properties.Metadata = ParseMetadataXml(*metadata);

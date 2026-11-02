@@ -62,8 +62,10 @@ using namespace std::chrono_literals;
 }
 
 void ExpectMalformedExtendedHeaderIsRejected(std::string_view name, std::string_view value) {
-    EXPECT_THROW(static_cast<void>(Private::ParseBlobProperties(
-                     HttpResponse{AVEVA::HttpStatus::Ok, {{std::string{name}, std::string{value}}}, ""})),
+    EXPECT_THROW(static_cast<void>(Private::ParseBlobProperties(HttpResponse{
+                     AVEVA::HttpStatus::Ok,
+                     {AVEVA::HttpHeader(AVEVA::HeaderName{std::string{name}}, AVEVA::HeaderValue{std::string{value}})},
+                     ""})),
                  std::invalid_argument)
         << name;
 }
@@ -78,35 +80,32 @@ void ExpectMalformedExtendedHeadersAreRejected() {
     }
 }
 
-void ExpectAcquireLeaseRejectsInvalidDurations(BlobClient& client, FakeHttpClient& httpClient,
-                                               std::initializer_list<std::chrono::seconds> durations) {
+void ExpectLeaseDurationRejects(std::initializer_list<std::chrono::seconds> durations) {
     for (const auto duration : durations) {
-        const auto result =
-            RunAwaitable(httpClient, client.AcquireLeaseAsync(AcquireLeaseOptions{
-                                         .Conditions = {}, .ProposedLeaseId = {}, .Duration = duration}));
-        ASSERT_FALSE(result.has_value());
-        EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument)) << duration.count();
+        EXPECT_THROW((void)AVEVA::AzureClient::LeaseDuration{duration}, std::invalid_argument) << duration.count();
     }
 }
 } // namespace
 
 TEST(ModelTests, GetPropertiesParsesExtendedHeaders) {
-    const HttpResponse response{AVEVA::HttpStatus::Ok,
-                                {{"ETag", "\"0x1\""},
-                                 {"Content-Length", "10"},
-                                 {"Content-Encoding", "gzip"},
-                                 {"Content-Language", "en-GB"},
-                                 {"Content-Disposition", "attachment; filename=a.txt"},
-                                 {"x-ms-blob-type", "AppendBlob"},
-                                 {"x-ms-creation-time", "Wed, 01 Oct 2025 10:00:00 GMT"},
-                                 {"x-ms-lease-status", "locked"},
-                                 {"x-ms-lease-state", "leased"},
-                                 {"x-ms-lease-duration", "infinite"},
-                                 {"x-ms-server-encrypted", "true"},
-                                 {"x-ms-version-id", "2025-10-01T10:00:00.0000000Z"},
-                                 {"x-ms-is-current-version", "false"},
-                                 {"x-ms-blob-sequence-number", "42"}},
-                                ""};
+    const HttpResponse response{
+        AVEVA::HttpStatus::Ok,
+        {AVEVA::HttpHeader(AVEVA::HeaderName{"ETag"}, AVEVA::HeaderValue{"\"0x1\""}),
+         AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Length"}, AVEVA::HeaderValue{"10"}),
+         AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Encoding"}, AVEVA::HeaderValue{"gzip"}),
+         AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Language"}, AVEVA::HeaderValue{"en-GB"}),
+         AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Disposition"}, AVEVA::HeaderValue{"attachment; filename=a.txt"}),
+         AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-blob-type"}, AVEVA::HeaderValue{"AppendBlob"}),
+         AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-creation-time"},
+                           AVEVA::HeaderValue{"Wed, 01 Oct 2025 10:00:00 GMT"}),
+         AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-lease-status"}, AVEVA::HeaderValue{"locked"}),
+         AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-lease-state"}, AVEVA::HeaderValue{"leased"}),
+         AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-lease-duration"}, AVEVA::HeaderValue{"infinite"}),
+         AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-server-encrypted"}, AVEVA::HeaderValue{"true"}),
+         AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-version-id"}, AVEVA::HeaderValue{"2025-10-01T10:00:00.0000000Z"}),
+         AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-is-current-version"}, AVEVA::HeaderValue{"false"}),
+         AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-blob-sequence-number"}, AVEVA::HeaderValue{"42"})},
+        ""};
 
     const auto properties = Private::ParseBlobProperties(response);
 
@@ -125,8 +124,8 @@ TEST(ModelTests, GetPropertiesParsesExtendedHeaders) {
 }
 
 TEST(ModelTests, GetPropertiesLeavesAbsentExtendedFieldsUnset) {
-    const auto properties =
-        Private::ParseBlobProperties(HttpResponse{AVEVA::HttpStatus::Ok, {{"ETag", "\"0x1\""}}, ""});
+    const auto properties = Private::ParseBlobProperties(HttpResponse{
+        AVEVA::HttpStatus::Ok, {AVEVA::HttpHeader(AVEVA::HeaderName{"ETag"}, AVEVA::HeaderValue{"\"0x1\""})}, ""});
 
     EXPECT_FALSE(properties.CreatedOn.has_value());
     EXPECT_EQ(properties.LeaseStatus, LeaseStatus::Unknown);
@@ -173,15 +172,15 @@ TEST(ModelTests, ListBlobsParsesExtendedPropertiesAndVersionSiblings) {
 TEST(ModelTests, SharedKeyStringToSignIncludesContentEncodingAndLanguage) {
     HttpRequest request;
     request.SetMethod(HttpMethod::Put);
-    request.SetUrl("https://account.blob.core.windows.net/c/b");
-    request.AddHeader(HttpHeader{"Content-Encoding", "gzip"});
-    request.AddHeader(HttpHeader{"Content-Language", "en"});
+    request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/c/b"});
+    request.AddHeader(HttpHeader(AVEVA::HeaderName{"Content-Encoding"}, AVEVA::HeaderValue{"gzip"}));
+    request.AddHeader(HttpHeader(AVEVA::HeaderName{"Content-Language"}, AVEVA::HeaderValue{"en"}));
 
     EXPECT_TRUE(Private::BuildSharedKeyStringToSign("account", request).starts_with("PUT\ngzip\nen\n\n"));
 
     HttpRequest plain;
     plain.SetMethod(HttpMethod::Get);
-    plain.SetUrl("https://account.blob.core.windows.net/c/b");
+    plain.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/c/b"});
     EXPECT_TRUE(Private::BuildSharedKeyStringToSign("account", plain).starts_with("GET\n\n\n\n\n\n\n"));
 }
 
@@ -192,12 +191,16 @@ TEST(ModelTests, AcquireLeaseDurationIsInfiniteByDefaultAndValidated) {
     static_cast<void>(RunAwaitable(httpClient, client.AcquireLeaseAsync()));
     EXPECT_EQ(Header(httpClient.LastRequest(), "x-ms-lease-duration"), "-1");
 
-    static_cast<void>(RunAwaitable(httpClient, client.AcquireLeaseAsync(AcquireLeaseOptions{
-                                                   .Conditions = {}, .ProposedLeaseId = {}, .Duration = 15s})));
+    static_cast<void>(RunAwaitable(
+        httpClient, client.AcquireLeaseAsync(AcquireLeaseOptions{
+                        .Conditions = {},
+                        .ProposedLeaseId = {},
+                        .Duration = AVEVA::AzureClient::LeaseDuration{AVEVA::AzureClient::LeaseDuration::Min}})));
     EXPECT_EQ(Header(httpClient.LastRequest(), "x-ms-lease-duration"), "15");
     const std::size_t sent = httpClient.RequestCount();
 
-    ExpectAcquireLeaseRejectsInvalidDurations(client, httpClient, {14s, 61s, 0s});
+    ExpectLeaseDurationRejects(
+        {AVEVA::AzureClient::LeaseDuration::Min - 1s, AVEVA::AzureClient::LeaseDuration::Max + 1s, 0s});
     EXPECT_EQ(httpClient.RequestCount(), sent);
 }
 
@@ -207,7 +210,9 @@ TEST(ModelTests, ResizeUsesResizePageBlobOptionsConditions) {
 
     ResizePageBlobOptions options;
     options.Conditions.IfMatch = "\"etag\"";
-    static_cast<void>(RunAwaitable(httpClient, client.ResizeAsync(1024U, std::move(options))));
+    static_cast<void>(RunAwaitable(
+        httpClient, client.ResizeAsync(AVEVA::AzureClient::PageBlobSize{2U * AVEVA::AzureClient::PageBlobPageSize},
+                                       std::move(options))));
 
     EXPECT_EQ(Header(httpClient.LastRequest(), "x-ms-blob-content-length"), "1024");
     EXPECT_EQ(Header(httpClient.LastRequest(), "If-Match"), "\"etag\"");

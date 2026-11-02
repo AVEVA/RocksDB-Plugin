@@ -4,6 +4,7 @@
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/AzureContainerClient.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobAttributes.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobOperations.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientRuntimeTransport.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/DirectoryImpl.hpp"
@@ -14,6 +15,7 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/SequentialFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/SignedBytes.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Models/ChainedCredentialInfo.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Models/ServicePrincipalStorageInfo.hpp"
@@ -28,6 +30,7 @@
 #include <chrono>
 #include <concepts>
 #include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -46,7 +49,7 @@
 #endif
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 /// <summary>The largest count the signed 64-bit sizes of the blob client can represent.</summary>
-inline constexpr Core::ByteCount MaxSignedBytes{static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())};
+inline constexpr Core::ByteCount MaxSignedBytes = SignedByteCount::Max;
 
 /// <summary>
 /// Returns why the data-file sizes cannot be used, or an empty view when they are valid. Page blobs are written in
@@ -134,7 +137,7 @@ template <typename THttp> class BasicBlobFilesystemImpl {
     // Bytes held by per-file prefetch buffers across all open files; caps Prefetch memory.
     std::shared_ptr<std::atomic<int64_t>> m_prefetchBytes = std::make_shared<std::atomic<int64_t>>(0);
     // Cap on m_prefetchBytes; set before files are opened.
-    Core::ByteCount m_maxPrefetchBytes = Configuration::DefaultPrefetchBudgetBytes;
+    Core::ByteCount m_maxPrefetchBytes = Defaults::MaxPrefetchBytes.Bytes();
     mutable std::atomic<FenceLogState> m_fencedLogged{FenceLogState::NotLogged};
     mutable std::mutex m_lockFilesMutex;
     boost::intrusive::list<LockFileType, boost::intrusive::constant_time_size<false>> m_locks;
@@ -154,49 +157,46 @@ template <typename THttp> class BasicBlobFilesystemImpl {
     // Declared last: Stop()ped first thing in the destructor, before anything its callbacks use is released.
     std::shared_ptr<LeaseRenewal> m_leaseRenewal;
 
+    // What the destructor hands to m_asyncReads when it gives up waiting for reads, so late completions never see
+    // the runtime, clients or caches freed underneath them.
+    struct SharedState {
+        std::shared_ptr<BasicClientRuntime<THttp>> Runtime;
+        std::unordered_map<std::string, std::shared_ptr<BlobContainerClientOn<THttp>>, Core::StringHash,
+                           Core::StringEqual>
+            Clients;
+        std::unordered_map<std::string, std::shared_ptr<Core::FileCache>, Core::StringHash, Core::StringEqual>
+            FileCaches;
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> Logger;
+    };
+
   public:
     // Every io_context constructor takes the host-owned io_context that all Azure I/O runs on. The filesystem never
     // runs, stops or destroys it; the host must keep it alive and running for the filesystem's whole lifetime and must
     // not call into the filesystem from the threads running it.
     BasicBlobFilesystemImpl(
-        boost::asio::io_context& ioContext, const std::string& name, const std::string& storageAccountUrl,
-        const std::string& storageAccountKey, Core::ByteCount dataFileInitialSize, Core::ByteCount dataFileBufferSize,
-        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-        std::optional<std::string_view> cachePath = {}, Core::ByteCount maxCacheSize = Configuration::MaxCacheSize);
-    BasicBlobFilesystemImpl(
-        boost::asio::io_context& ioContext, const std::string& name, const std::string& storageAccountUrl,
-        const std::string& servicePrincipalId, const std::string& servicePrincipalSecret, const std::string& tenantId,
-        Core::ByteCount dataFileInitialSize, Core::ByteCount dataFileBufferSize,
-        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-        std::optional<std::string_view> cachePath = {}, Core::ByteCount maxCacheSize = Configuration::MaxCacheSize);
-    BasicBlobFilesystemImpl(
-        boost::asio::io_context& ioContext, const std::string& name, const std::string& storageAccountUrl,
-        const std::string& tenantId, const std::string& clientId, const std::string& serviceConnectionId,
-        const std::string& accessToken, Core::ByteCount dataFileInitialSize, Core::ByteCount dataFileBufferSize,
-        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-        std::optional<std::string_view> cachePath = {}, Core::ByteCount maxCacheSize = Configuration::MaxCacheSize);
-    BasicBlobFilesystemImpl(
         boost::asio::io_context& ioContext, Models::ChainedCredentialInfo primary,
         std::optional<Models::ChainedCredentialInfo> backup, Core::ByteCount dataFileInitialSize,
         Core::ByteCount dataFileBufferSize,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-        std::optional<std::string_view> cachePath = {}, Core::ByteCount maxCacheSize = Configuration::MaxCacheSize);
+        std::optional<std::filesystem::path> cachePath = {},
+        Core::ByteCount maxCacheSize = Configuration::MaxCacheSize);
     BasicBlobFilesystemImpl(
         boost::asio::io_context& ioContext, Models::ServicePrincipalStorageInfo primary,
         std::optional<Models::ServicePrincipalStorageInfo> backup, Core::ByteCount dataFileInitialSize,
         Core::ByteCount dataFileBufferSize,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-        std::optional<std::string_view> cachePath = {}, Core::ByteCount maxCacheSize = Configuration::MaxCacheSize);
+        std::optional<std::filesystem::path> cachePath = {},
+        Core::ByteCount maxCacheSize = Configuration::MaxCacheSize);
 
     // Builds the filesystem on an already-constructed runtime (and therefore any HTTP client). Used with shared-key
     // credentials. The tests pass a runtime that owns an in-memory fake and a short lock timeout, so that contention
     // does not take the production 20 seconds to give up.
     BasicBlobFilesystemImpl(
-        std::shared_ptr<BasicClientRuntime<THttp>> runtime, const std::string& name,
-        const std::string& storageAccountUrl, const std::string& storageAccountKey, Core::ByteCount dataFileInitialSize,
-        Core::ByteCount dataFileBufferSize,
+        std::shared_ptr<BasicClientRuntime<THttp>> runtime, const Models::DbName& name,
+        const Models::AccountUrl& storageAccountUrl, const StorageAccountKey& storageAccountKey,
+        Core::ByteCount dataFileInitialSize, Core::ByteCount dataFileBufferSize,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
-        std::optional<std::string_view> cachePath = {}, Core::ByteCount maxCacheSize = Configuration::MaxCacheSize,
+        std::optional<std::filesystem::path> cachePath = {}, Core::ByteCount maxCacheSize = Configuration::MaxCacheSize,
         std::optional<std::chrono::milliseconds> lockAcquireTimeout = {});
 
     // Stops lease renewal, then blocks until reads abandoned by RocksDB mid-flight have completed, so that their
@@ -214,7 +214,7 @@ template <typename THttp> class BasicBlobFilesystemImpl {
     [[nodiscard]] WriteableFileType CreateWriteableFile(const std::string& filePath);
     [[nodiscard]] ReadWriteFileType CreateReadWriteFile(const std::string& filePath);
     [[nodiscard]] WriteableFileType ReopenWriteableFile(const std::string& filePath);
-    LoggerImpl CreateLogger(const std::string& filePath, int logLevel,
+    LoggerImpl CreateLogger(const std::string& filePath,
                             std::chrono::seconds cooldown = Configuration::LogRateLimiterCooldown);
     std::shared_ptr<LockFileType> LockFile(const std::string& filePath);
     void UnlockFile(LockFileType& lock);
@@ -223,8 +223,12 @@ template <typename THttp> class BasicBlobFilesystemImpl {
     [[nodiscard]] AzureClient::Existence FileExists(const std::string& name);
     // Present when at least one blob lives below the directory; stops at the first one rather than listing every page.
     [[nodiscard]] DirectoryContents HasChildren(const std::string& directoryPath);
+    // How many names one List Blobs page asks for; clamped to [1, Configuration::Transfer::MaxListPageSize].
+    using ListPageSize = Core::StrongInteger<struct ListPageSizeTag, std::uint32_t>;
+    // Lists every child, however many pages that takes; `pageSize` only changes how many requests it needs.
     std::vector<std::string> GetChildren(const std::string& directoryPath,
-                                         int32_t sizeHint = 10000 /* hopefully plenty for now */);
+                                         ListPageSize pageSize = ListPageSize{
+                                             static_cast<std::uint32_t>(Configuration::Transfer::MaxListPageSize)});
     std::vector<BlobAttributes> GetChildrenFileAttributes(const std::string& directoryPath);
     [[nodiscard]] AzureClient::PriorState DeleteFile(const std::string& filePath) const;
     // NonEmpty when something is left under the directory after the delete (a delete that raced with a create).
@@ -246,14 +250,15 @@ template <typename THttp> class BasicBlobFilesystemImpl {
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>&& logger,
         std::shared_ptr<BasicClientRuntime<THttp>> runtime, Core::ByteCount dataFileInitialSize,
         Core::ByteCount dataFileBufferSize, std::optional<std::chrono::milliseconds> lockAcquireTimeout = {});
-    void AddContainer(const BlobServiceClientOn<THttp>& serviceClient, const std::string& storageAccountUrl,
-                      const std::string& name, std::optional<std::string_view> cachePath, Core::ByteCount maxCacheSize);
+    void AddContainer(const BlobServiceClientOn<THttp>& serviceClient, const Models::AccountUrl& storageAccountUrl,
+                      const Models::DbName& name, std::optional<std::filesystem::path> cachePath,
+                      Core::ByteCount maxCacheSize);
     // Deletes the temporary blobs a rename left behind when it crashed or could not clean up after itself. Only safe
     // while holding the container's DB lock, since the lock holder is the only process that renames.
     void PurgeOrphanedRenameTemps(std::string_view prefix, std::string_view lockPath) const;
     template <class TInfo>
     void AddContainers(const TInfo& primary, const std::optional<TInfo>& backup,
-                       std::optional<std::string_view> cachePath, Core::ByteCount maxCacheSize);
+                       std::optional<std::filesystem::path> cachePath, Core::ByteCount maxCacheSize);
     // Runs `fn` with the container registered for the account prefix. The reference is valid only for the call;
     // throws when the prefix is unknown.
     template <class TFn> decltype(auto) WithContainer(std::string_view prefix, TFn&& fn) const;
@@ -267,22 +272,34 @@ template <typename THttp> class BasicBlobFilesystemImpl {
     [[nodiscard]] ResolvedBlob ResolveBlob(const std::string& path) const;
     void EnsureLiveness(std::source_location location = std::source_location::current()) const;
 
-    // The steps of RenameFile, as coroutines so the whole rename is one blocking call. The clients are referenced,
-    // not copied, so the caller keeps them alive until the rename completes.
+    // The steps of RenameFile, as coroutines so the whole rename is one blocking call. Each owns what it uses, so
+    // nothing it holds can dangle across a suspension; the copy and cleanup steps borrow the clients of the rename that
+    // awaits them, which stays suspended (and so alive) until they finish.
     using BlobClient = PageBlobClientOn<THttp>;
-    [[nodiscard]] boost::asio::awaitable<void> RenameBlobAsync(BlobContainerClientOn<THttp>& container,
-                                                               BlobClient& source, BlobClient& destination,
-                                                               std::string_view sourceName,
-                                                               std::string_view destinationName) const;
+    // Every blob a rename may touch, named so they cannot be swapped. The temporary blob is used only when an
+    // existing destination has to be replaced.
+    struct RenameBlobs {
+        BlobClient Source;
+        BlobClient Destination;
+        BlobClient Temporary;
+        std::string SourceName;
+        std::string DestinationName;
+        std::string TemporaryName;
+    };
+    [[nodiscard]] boost::asio::awaitable<void> RenameBlobAsync(RenameBlobs blobs) const;
     // Server-side copy first; falls back to copying through this process when the service cannot authorize the source.
-    [[nodiscard]] boost::asio::awaitable<void> CopyBlobPagesAsync(BlobClient& source, BlobClient& target, int64_t size,
-                                                                  const std::string& etag, std::string_view name) const;
+    [[nodiscard]] boost::asio::awaitable<void> CopyBlobPagesAsync(BlobOperations::Source<BlobClient> source,
+                                                                  BlobOperations::Destination<BlobClient> target,
+                                                                  Core::ByteCount size, std::string etag,
+                                                                  std::string name) const;
     // Copies the content and logical size into `target`; returns its ETag after the final write.
-    [[nodiscard]] boost::asio::awaitable<std::string> CopyIntoAsync(BlobClient& source, BlobClient& target,
-                                                                    int64_t size, const std::string& etag,
-                                                                    std::string_view name) const;
-    // Best-effort cleanup that never masks the failure being unwound.
-    [[nodiscard]] boost::asio::awaitable<void> DeleteQuietlyAsync(BlobClient& blob, std::string_view name) const;
+    [[nodiscard]] boost::asio::awaitable<std::string> CopyIntoAsync(BlobOperations::Source<BlobClient> source,
+                                                                    BlobOperations::Destination<BlobClient> target,
+                                                                    Core::ByteCount size, std::string etag,
+                                                                    std::string name) const;
+    // Best-effort cleanup of a blob the rename wrote, which never masks the failure being unwound.
+    [[nodiscard]] boost::asio::awaitable<void> DeleteQuietlyAsync(BlobOperations::Destination<BlobClient> blob,
+                                                                  std::string name) const;
 };
 extern template class BasicBlobFilesystemImpl<::AVEVA::HttpClient>;
 

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
-#include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/RocksDBHelpers.hpp"
+#include "FileCacheImpl.hpp"
 #include <algorithm>
 #include <boost/log/trivial.hpp>
 #include <cassert>
@@ -42,7 +42,7 @@ PartialDownloadName ClassifyDownloadName(const std::string& name) {
 }
 } // namespace
 
-FileCache::FileCache(
+FileCacheImpl::FileCacheImpl(
     std::filesystem::path cachePath, ByteCount maxCacheSize, std::shared_ptr<ContainerClient> containerClient,
     std::shared_ptr<Filesystem> filesystem,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
@@ -53,7 +53,7 @@ FileCache::FileCache(
     m_backgroundDownloader = std::jthread([this](std::stop_token stopToken) { BackgroundDownload(stopToken); });
 }
 
-FileCache::~FileCache() {
+FileCacheImpl::~FileCacheImpl() {
     {
         std::scoped_lock lock(m_mutex);
         m_backgroundDownloader.request_stop();
@@ -66,7 +66,7 @@ FileCache::~FileCache() {
 // The Azure client downloads into `<name>.partial-<id>` and renames on success, so a crash leaves only such files
 // behind. They are never read, so deleting them is always safe. Only the exact staging name is matched, so a user
 // file such as `report.partial-backup.txt` is left alone.
-void FileCache::PurgePartialDownloads() noexcept {
+void FileCacheImpl::PurgePartialDownloads() noexcept {
     std::error_code error;
     if (!std::filesystem::is_directory(m_cachePath, error)) {
         return;
@@ -96,7 +96,7 @@ void FileCache::PurgePartialDownloads() noexcept {
             << "Scanning '" << m_cachePath.string() << "' for partial downloads stopped early: " << error.message();
     }
 }
-CachePresence FileCache::HasFile(std::string_view filePath) const {
+CachePresence FileCacheImpl::HasFile(std::string_view filePath) const {
     std::scoped_lock lock(m_mutex);
     auto it = m_cache.find(filePath);
     // The intrusive hook answers "is it in the entry list" in O(1); a list scan per call made Debug runs with large
@@ -106,7 +106,7 @@ CachePresence FileCache::HasFile(std::string_view filePath) const {
     return it != m_cache.end() ? CachePresence::Present : CachePresence::Absent;
 }
 
-void FileCache::MarkFileAsStaleIfExists(const std::string& filePath) {
+void FileCacheImpl::MarkFileAsStaleIfExists(const std::string& filePath) {
     std::scoped_lock lock(m_mutex);
     auto it = m_cache.find(filePath);
     if (it != m_cache.end()) {
@@ -141,8 +141,8 @@ void FileCache::MarkFileAsStaleIfExists(const std::string& filePath) {
     }
 }
 
-std::optional<ByteCount> FileCache::ReadFile(const std::string_view filePath, const ByteOffset offset,
-                                             const ByteCount bytesToRead, char* buffer) {
+std::optional<ByteCount> FileCacheImpl::ReadFile(const std::string_view filePath, const ByteOffset offset,
+                                                 const std::span<char> buffer) {
     // If there are extensions that should be filtered on then we need to process that first.
     const auto fileType = RocksDBHelpers::GetFileType(filePath);
     if (fileType != RocksDBHelpers::FileClass::SST) {
@@ -198,15 +198,15 @@ std::optional<ByteCount> FileCache::ReadFile(const std::string_view filePath, co
 
         EntryAccessedUnsafe(fileEntry);
 
-        if (buffer == nullptr) {
+        if (buffer.empty()) {
             return ByteCount{};
         }
 
-        const auto handle = fileEntry.GetOrCreateReadHandle();
+        const auto handle = fileEntry.GetOrCreateReadHandle(lock);
         // Taken under the lock: the entry may be replaced or evicted once it is released.
         const ByteCount entrySize = fileEntry.GetSize();
         const auto generation = fileEntry.GetGeneration();
-        const ByteCount expectedBytes = std::min(bytesToRead, BytesAfter(entrySize, offset));
+        const ByteCount expectedBytes = std::min(ByteCount{buffer.size()}, BytesAfter(entrySize, offset));
 
         // The read is disk I/O, so it must not hold the cache-wide mutex. If an eviction closes the handle after the
         // lock is released, the read fails and the caller falls back to the blob.
@@ -234,7 +234,7 @@ std::optional<ByteCount> FileCache::ReadFile(const std::string_view filePath, co
             };
             ByteCount bytesRead;
             try {
-                bytesRead = file->Read(buffer, offset, bytesToRead);
+                bytesRead = file->Read(buffer, offset);
             } catch (...) {
                 // Do not keep a handle that just failed; the next read reopens the file.
                 dropFile();
@@ -273,25 +273,25 @@ std::optional<ByteCount> FileCache::ReadFile(const std::string_view filePath, co
     }
 }
 
-void FileCache::RemoveFile(const std::string_view filePath) {
+void FileCacheImpl::RemoveFile(const std::string_view filePath) {
     std::scoped_lock lock(m_mutex);
     (void)RemoveFileUnsafe(filePath);
 }
 
-ByteCount FileCache::CacheSize() const {
+ByteCount FileCacheImpl::CacheSize() const {
     std::scoped_lock lock(m_mutex);
     ValidateCountersUnsafe();
     return GetCurrentSizeUnsafe();
 }
 
-void FileCache::SetCacheSize(const ByteCount size) {
+void FileCacheImpl::SetCacheSize(const ByteCount size) {
     std::scoped_lock lock(m_mutex);
     // The new maximum is set first so eviction is measured against it, not against the size being replaced.
     m_maxSize = size;
     (void)ShrinkToMaxUnsafe();
 }
 
-IdleWaitResult FileCache::WaitUntilIdle(const std::optional<std::chrono::milliseconds> timeout) {
+IdleWaitResult FileCacheImpl::WaitUntilIdle(const std::optional<std::chrono::milliseconds> timeout) {
     std::unique_lock lock(m_mutex);
     const auto idle = [this] {
         return m_fileDownloadQueue.empty() && m_pendingReleases.empty() && m_downloadState == DownloadState::Idle;
@@ -305,7 +305,7 @@ IdleWaitResult FileCache::WaitUntilIdle(const std::optional<std::chrono::millise
 
 // A delete that failed earlier gets one last attempt at shutdown; anything still left would otherwise sit in the cache
 // directory unnoticed, so it is logged for the operator.
-void FileCache::RetryFailedDeletesOnShutdown() {
+void FileCacheImpl::RetryFailedDeletesOnShutdown() {
     std::vector<std::string> leftovers;
     {
         std::scoped_lock lock(m_mutex);
@@ -318,12 +318,12 @@ void FileCache::RetryFailedDeletesOnShutdown() {
         }
     }
 }
-void FileCache::BackgroundDownload(std::stop_token stopToken) {
+void FileCacheImpl::BackgroundDownload(std::stop_token stopToken) {
     while (true) {
         try {
             // Declared before any lock in this iteration so it runs last and can safely take the mutex.
             struct InFlightGuard {
-                FileCache& cache;
+                FileCacheImpl& cache;
                 InFlightArming armed = InFlightArming::Disarmed;
                 ~InFlightGuard() {
                     if (armed == InFlightArming::Armed) {
@@ -351,8 +351,15 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                 // Take the pending releases first: a download of a path must never start before an earlier delete of
                 // the same path has run.
                 releases.swap(m_pendingReleases);
-                // A failed delete is dropped if the path was cached again, since the new download overwrites it.
-                std::erase_if(m_failedDeletes, [this](const std::string& key) { return m_cache.contains(key); });
+                // Only a download overwrites the file, so a retry is dropped once its key was queued for download
+                // again (or got further). A metadata-only entry of the same name, recorded while the delete was
+                // pending, must not cancel it: that entry can be pruned without a delete of its own, and the file
+                // would then be left on disk uncounted.
+                std::erase_if(m_failedDeletes, [this](const std::string& key) {
+                    const auto entry = m_cache.find(key);
+                    return entry != m_cache.end() && (entry->second.GetState() != FileCacheEntry::State::Stale ||
+                                                      entry->second.GetSize() != ByteCount{});
+                });
                 retryDeletes.swap(m_failedDeletes);
                 if (!releases.empty() || !retryDeletes.empty()) {
                     m_downloadState = DownloadState::InFlight;
@@ -411,7 +418,7 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
 
             ByteCount fileSize;
             try {
-                fileSize = m_containerClient->GetBlobSize(filePath, stopToken);
+                fileSize = m_containerClient->GetBlobSize(BlobName{filePath}, stopToken);
             } catch (std::exception& e) {
                 BOOST_LOG_SEV(*m_logger, error)
                     << "Failed to get file size for '" << filePath << "'. Error: " << e.what();
@@ -481,7 +488,18 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
                 SetEntryStateUnsafe(it->second, FileCacheEntry::State::Downloading);
                 evicted.swap(m_pendingReleases);
             }
-            ReleaseOnBackgroundThread(evicted);
+            try {
+                ReleaseOnBackgroundThread(evicted);
+            } catch (...) {
+                // Nothing else would ever move the entry out of Downloading, so it must not be left there.
+                std::scoped_lock lock(m_mutex);
+                if (const auto stuck = m_cache.find(filePath);
+                    stuck != m_cache.end() && stuck->second.GetState() == FileCacheEntry::State::Downloading &&
+                    stuck->second.GetGeneration() == generation) {
+                    (void)RemoveFileUnsafe(filePath);
+                }
+                throw;
+            }
 
             try {
                 const auto actualFilePath = m_cachePath / filePath;
@@ -491,7 +509,8 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
 
                 // No need to download the _whole_ blob. There could be lots of padding
                 // at the end of the file. We can just download the actual size.
-                m_containerClient->DownloadBlobTo(filePath, actualFilePath, ByteOffset{}, fileSize, stopToken);
+                m_containerClient->DownloadBlobTo(BlobName{filePath}, actualFilePath, ByteOffset{}, fileSize,
+                                                  stopToken);
             } catch (std::exception& e) {
                 // NOTE: We're not putting the filePath back on the download queue because
                 // this operation could _also_ throw. Let the next read be a cache miss which
@@ -549,7 +568,7 @@ void FileCache::BackgroundDownload(std::stop_token stopToken) {
     }
 }
 
-void FileCache::ReservePendingReleaseUnsafe() {
+void FileCacheImpl::ReservePendingReleaseUnsafe() {
     if (m_pendingReleases.size() == m_pendingReleases.capacity()) {
         m_pendingReleases.reserve(std::max<size_t>(8, m_pendingReleases.capacity() * 2));
     }
@@ -558,7 +577,7 @@ void FileCache::ReservePendingReleaseUnsafe() {
 // Everything that can throw (the path copy and the vector growth) happens before the entry is touched, so a failure
 // leaves it fully cached. The commit that follows cannot throw. The map node is extracted so its key moves into the
 // PendingRelease instead of being copied and rehashed; `filePath` may view that key and is not used afterwards.
-FileCache::RemovalOutcome FileCache::RemoveFileUnsafe(const std::string_view filePath) {
+FileCacheImpl::RemovalOutcome FileCacheImpl::RemoveFileUnsafe(const std::string_view filePath) {
     const auto it = m_cache.find(filePath);
     if (it == m_cache.end()) {
         return RemovalOutcome::NotRemoved;
@@ -598,7 +617,7 @@ FileCache::RemovalOutcome FileCache::RemoveFileUnsafe(const std::string_view fil
 
 // Allocation-free and noexcept: an entry that never had a download has no file or handle to release, so it only
 // leaves the accounting and the lists.
-void FileCache::DropNeverDownloadedEntryUnsafe(const std::string_view filePath) {
+void FileCacheImpl::DropNeverDownloadedEntryUnsafe(const std::string_view filePath) {
     const auto it = m_cache.find(filePath);
     assert(it != m_cache.end() && it->second.Disk == DiskPresence::KnownAbsent);
     it->second.unlink();
@@ -608,7 +627,7 @@ void FileCache::DropNeverDownloadedEntryUnsafe(const std::string_view filePath) 
 
 // Allocation-free fallback: the entry stays cached but Stale, so it never serves old bytes and a later read
 // downloads it afresh. Eviction removes it (and its file) once an allocation succeeds.
-void FileCache::InvalidateEntryUnsafe(FileCacheEntry& entry) noexcept {
+void FileCacheImpl::InvalidateEntryUnsafe(FileCacheEntry& entry) noexcept {
     entry.SetGeneration(++m_nextGeneration);
     SetEntryStateUnsafe(entry, FileCacheEntry::State::Stale);
     (void)entry.TakeReadHandle();
@@ -634,13 +653,13 @@ Contribution ContributionOf(const FileCacheEntry& entry) noexcept {
 }
 } // namespace
 
-void FileCache::SubtractContributionUnsafe(const FileCacheEntry& entry) noexcept {
+void FileCacheImpl::SubtractContributionUnsafe(const FileCacheEntry& entry) noexcept {
     const auto contribution = ContributionOf(entry);
     m_activeBytes -= contribution.Bytes;
     m_undownloadedStaleCount -= contribution.UndownloadedStale;
 }
 
-void FileCache::AddContributionUnsafe(FileCacheEntry& entry) noexcept {
+void FileCacheImpl::AddContributionUnsafe(FileCacheEntry& entry) noexcept {
     const auto contribution = ContributionOf(entry);
     m_activeBytes += contribution.Bytes;
     m_undownloadedStaleCount += contribution.UndownloadedStale;
@@ -651,21 +670,50 @@ void FileCache::AddContributionUnsafe(FileCacheEntry& entry) noexcept {
     }
 }
 
-void FileCache::SetEntryStateUnsafe(FileCacheEntry& entry, const FileCacheEntry::State state) noexcept {
+void FileCacheImpl::SetEntryStateUnsafe(FileCacheEntry& entry, const FileCacheEntry::State state) noexcept {
     SubtractContributionUnsafe(entry);
     entry.SetState(state);
     AddContributionUnsafe(entry);
 }
 
-void FileCache::SetEntrySizeUnsafe(FileCacheEntry& entry, const ByteCount size) noexcept {
+void FileCacheImpl::SetEntrySizeUnsafe(FileCacheEntry& entry, const ByteCount size) noexcept {
     SubtractContributionUnsafe(entry);
     entry.SetSize(size);
     AddContributionUnsafe(entry);
 }
 
-void FileCache::UntrackEntryUnsafe(FileCacheEntry& entry) noexcept {
+void FileCacheImpl::UntrackEntryUnsafe(FileCacheEntry& entry) noexcept {
     SubtractContributionUnsafe(entry);
     entry.MetadataOnly.unlink();
+}
+
+FileCache::FileCache(
+    std::filesystem::path cachePath, ByteCount maxCacheSize, std::shared_ptr<ContainerClient> containerClient,
+    std::shared_ptr<Filesystem> filesystem,
+    std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
+    : m_impl(std::make_unique<FileCacheImpl>(std::move(cachePath), maxCacheSize, std::move(containerClient),
+                                             std::move(filesystem), std::move(logger))) {}
+
+FileCache::~FileCache() = default;
+
+CachePresence FileCache::HasFile(const std::string_view filePath) const { return m_impl->HasFile(filePath); }
+
+void FileCache::MarkFileAsStaleIfExists(const std::string& filePath) { m_impl->MarkFileAsStaleIfExists(filePath); }
+
+std::optional<ByteCount> FileCache::ReadFile(const std::string_view filePath, const ByteOffset offset,
+                                             const std::span<char> buffer) {
+    return m_impl->ReadFile(filePath, offset, buffer);
+}
+
+void FileCache::RemoveFile(const std::string_view filePath) { m_impl->RemoveFile(filePath); }
+
+ByteCount FileCache::CacheSize() const { return m_impl->CacheSize(); }
+
+void FileCache::SetCacheSize(const ByteCount size) { m_impl->SetCacheSize(size); }
+
+IdleWaitResult FileCacheTestAccess::WaitUntilIdle(FileCache& cache,
+                                                  const std::optional<std::chrono::milliseconds> timeout) {
+    return cache.m_impl->WaitUntilIdle(timeout);
 }
 
 } // namespace AVEVA::RocksDB::Plugin::Core

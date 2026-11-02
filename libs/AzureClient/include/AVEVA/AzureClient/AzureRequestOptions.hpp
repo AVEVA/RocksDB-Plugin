@@ -3,20 +3,20 @@
 
 #pragma once
 
+#include <AVEVA/AzureClient/Types.hpp>
 #include <AVEVA/HttpClient/HttpRequestOptions.hpp>
 
 #include <algorithm>
 #include <chrono>
 #include <optional>
-#include <stdexcept>
 #include <type_traits>
 #include <utility>
 
 namespace AVEVA::AzureClient {
 /// <summary>
 /// Per-request options for the Azure clients: everything <see cref="HttpRequestOptions"/> offers, plus the
-/// retry budget and retry count that only the retrying request pipeline honours. An HttpRequestOptions
-/// converts implicitly, so callers that do not need the extras can keep passing one.
+/// retry budget and retry count that only the retrying request pipeline honours. An HttpRequestOptions is
+/// adopted explicitly, so the conversion is always visible at the call site.
 /// </summary>
 class AzureRequestOptions : public HttpRequestOptions {
   public:
@@ -29,7 +29,8 @@ class AzureRequestOptions : public HttpRequestOptions {
     /// Adopts the plain HTTP options, leaving the retry budget and count unset.
     /// </summary>
     /// <param name="options">The HTTP-level options.</param>
-    AzureRequestOptions(HttpRequestOptions options) noexcept(std::is_nothrow_move_constructible_v<HttpRequestOptions>)
+    explicit AzureRequestOptions(HttpRequestOptions options) noexcept(
+        std::is_nothrow_move_constructible_v<HttpRequestOptions>)
         : HttpRequestOptions(std::move(options)) {}
 
     /// <summary>
@@ -42,7 +43,7 @@ class AzureRequestOptions : public HttpRequestOptions {
     /// The number of retries after the first attempt that replaces the client's retry policy for this request.
     /// </summary>
     /// <returns>The override; empty when the client's policy applies.</returns>
-    std::optional<int> GetMaxRetries() const noexcept { return m_maxRetries; }
+    std::optional<RetryCount> GetMaxRetries() const noexcept { return m_maxRetries; }
 
     /// <summary>
     /// Bounds the whole operation, retries and backoff included. When it elapses the in-flight attempt is
@@ -64,16 +65,10 @@ class AzureRequestOptions : public HttpRequestOptions {
     /// Replaces the client's retry count for this request (0 disables retries).
     /// </summary>
     /// <param name="maxRetries">Retries after the first attempt.</param>
-    /// <exception cref="std::invalid_argument">Thrown when <paramref name="maxRetries"/> is negative.</exception>
-    void SetMaxRetries(int maxRetries) {
-        if (maxRetries < 0) {
-            throw std::invalid_argument("The retry count must not be negative.");
-        }
-        m_maxRetries = maxRetries;
-    }
+    void SetMaxRetries(RetryCount maxRetries) noexcept { m_maxRetries = maxRetries; }
 
   private:
     std::optional<std::chrono::milliseconds> m_totalDeadline;
-    std::optional<int> m_maxRetries;
+    std::optional<RetryCount> m_maxRetries;
 };
 } // namespace AVEVA::AzureClient

@@ -44,32 +44,41 @@ struct FileUtil {
     /// then removes the phantom index entry.  This is acceptable for a best-effort cache.
     /// </summary>
     static void CommitEviction(Filesystem& fs, Logger& logger,
-                               const std::optional<std::pair<std::string, std::string>>& pair) noexcept {
-        if (pair) {
-            CommitPair(fs, logger, *pair);
+                               const std::optional<PendingEviction>& eviction) noexcept {
+        if (eviction) {
+            CommitPair(fs, logger, *eviction);
         }
     }
 
     /// <summary>Commits all rename+delete pairs produced by EvictUntilSizeLocked.</summary>
-    static void CommitEvictions(Filesystem& fs, Logger& logger,
-                                const std::vector<std::pair<std::string, std::string>>& pairs) noexcept {
-        for (const auto& p : pairs) {
-            CommitPair(fs, logger, p);
+    static void CommitEvictions(Filesystem& fs, Logger& logger, const LruFileIndex::EvictList& evictions) noexcept {
+        for (const auto& eviction : evictions) {
+            CommitPair(fs, logger, eviction);
         }
     }
 
   private:
-    static void CommitPair(Filesystem& fs, Logger& logger, const std::pair<std::string, std::string>& p) noexcept {
-        if (fs.RenameFile(p.first, p.second) == FilesystemResult::Succeeded) {
-            (void)fs.DeleteFile(p.second);
-            return;
-        }
-        // On Windows the rename fails while a reader still has the file open. The entry has already left the index,
-        // so a file left behind would stay on disk uncounted; delete it directly instead.
-        if (fs.DeleteFile(p.first) == FilesystemResult::Failed) {
+    // Path construction allocates; a failure leaves the file behind, which the cache tolerates (see above).
+    static void CommitPair(Filesystem& fs, Logger& logger, const PendingEviction& p) noexcept {
+        try {
+            const std::filesystem::path graveyard{p.GraveyardPath.Value()};
+            if (fs.RenameFile(RenameSource{std::filesystem::path{p.OriginalPath.Value()}},
+                              RenameDestination{graveyard}) == FilesystemResult::Succeeded) {
+                (void)fs.DeleteFile(graveyard);
+                return;
+            }
+            // On Windows the rename fails while a reader still has the file open. The entry has already left the
+            // index, so a file left behind would stay on disk uncounted; delete it directly instead.
+            if (fs.DeleteFile(std::filesystem::path{p.OriginalPath.Value()}) == FilesystemResult::Failed) {
+                BOOST_LOG_SEV(logger, warning)
+                    << "Could not evict '" << p.OriginalPath.Value() << "'; the file was left on disk";
+            }
+        } catch (const std::exception& e) {
             try {
-                BOOST_LOG_SEV(logger, warning) << "Could not evict '" << p.first << "'; the file was left on disk";
+                BOOST_LOG_SEV(logger, warning)
+                    << "Could not evict '" << p.OriginalPath.Value() << "': " << e.what() << "; the file may be left";
             } catch (...) {
+                // Logging is best effort: this runs from cleanup paths that must not throw.
             }
         }
     }
@@ -231,7 +240,7 @@ class FileBasedCompressedSecondaryCache::Impl {
                 return nullptr;
             }
 
-            std::optional<std::pair<std::string, std::string>> deferredEviction;
+            std::optional<PendingEviction> deferredEviction;
             if (advice == EraseAdvice::Erase) {
                 deferredEviction = m_lruIndex.Remove(filename);
                 if (!deferredEviction) {

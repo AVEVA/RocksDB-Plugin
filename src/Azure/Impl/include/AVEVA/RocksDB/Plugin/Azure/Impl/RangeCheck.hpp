@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #pragma once
+#include "AVEVA/RocksDB/Plugin/Core/Units.hpp"
+
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -27,6 +29,12 @@ enum class Bounds : std::uint8_t { OutOfRange, InRange };
 // Throws std::invalid_argument (translated to IOStatus::InvalidArgument) for an unusable range.
 inline void ThrowIfInvalid(const int64_t offset, const int64_t length, const char* what) {
     if (Check(offset, length) == Bounds::OutOfRange) {
+        throw std::invalid_argument(std::string(what) + " range is out of bounds");
+    }
+}
+
+inline void ThrowIfInvalid(const Core::ByteOffset offset, const Core::ByteCount length, const char* what) {
+    if (Check(offset.Value(), length.Value()) == Bounds::OutOfRange) {
         throw std::invalid_argument(std::string(what) + " range is out of bounds");
     }
 }

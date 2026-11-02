@@ -59,7 +59,7 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::Read(const uint64_t offset, const si
         *result = rocksdb::Slice(scratch, static_cast<size_t>(bytesRead));
         return rocksdb::IOStatus::OK();
     } catch (...) {
-        return AzureErrorTranslator::FromCurrentException(*m_logger, "Read");
+        return AzureErrorTranslator::FromException(*m_logger, std::current_exception(), "Read");
     }
 }
 
@@ -109,10 +109,10 @@ BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& req, std::function<v
             // whatever the read is waiting on (a prefetch, a metadata refresh or the transfer). The prefetch and
             // metadata refresh are shared and keep going for their other waiters. Every continuation below holds the
             // guard, so the timer is disarmed as soon as the last of them is released.
-            const auto expiredStatus =
-                AzureErrorTranslator::FromException(Impl::ReadableFileDetail::ReadTimedOutError());
-            const auto deadlineGuard =
-                std::make_shared<const Impl::RequestDeadline>(m_file->ClientExecutor(), deadline, request, expiredStatus);
+            const auto expiredStatus = AzureErrorTranslator::FromException(
+                *m_logger, Impl::ReadableFileDetail::ReadTimedOutError(), "ReadAsync");
+            const auto deadlineGuard = std::make_shared<const Impl::RequestDeadline>(m_file->ClientExecutor(), deadline,
+                                                                                     request, expiredStatus);
 
             auto makeDownload = [&] {
                 return [file = m_file, offset, length, deadline, request, logger = m_logger, deadlineGuard,
@@ -152,12 +152,15 @@ BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& req, std::function<v
                                                           deadlineGuard]() mutable {
                     try {
                         if (request->TryCompleteInline([&](char* scratch) {
-                                return file->TryReadFromCompletedPrefetch(offset, length, scratch);
+                                const auto hit = file->TryReadFromCompletedPrefetch(
+                                    offset, length, scratch, Impl::ReadableFileDetail::SlotRetirement::Immediate);
+                                return hit ? std::optional<size_t>{hit->Bytes} : std::nullopt;
                             }) == Impl::Completion::Pending) {
                             download();
                         }
                     } catch (...) {
-                        request->Complete(AzureErrorTranslator::FromCurrentException(*logger, "ReadAsync"), {});
+                        request->Complete(
+                            AzureErrorTranslator::FromException(*logger, std::current_exception(), "ReadAsync"), {});
                     }
                 };
                 chain = m_file->ChainOntoPendingPrefetch(offset, length, resume);
@@ -176,7 +179,7 @@ BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& req, std::function<v
         if (request) {
             request->Abort();
         }
-        return AzureErrorTranslator::FromCurrentException(*m_logger, "ReadAsync");
+        return AzureErrorTranslator::FromException(*m_logger, std::current_exception(), "ReadAsync");
     }
 }
 
@@ -198,7 +201,7 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
         Impl::ReadableFileDetail::DeadlineAfter(std::chrono::ceil<std::chrono::milliseconds>(opts.timeout));
     try {
         // The waits below need completions that run on the host io_context, so they would hang on one of its threads.
-        Impl::AssertNotRunningOn(m_file->ClientExecutor());
+        Impl::ThrowIfRunningOn(m_file->ClientExecutor());
 
         // One merged download: the member requests it serves (the run [FirstMember, EndMember) of `order`, which is
         // sorted by offset) and, when it serves more than one, the buffer the merged range is fetched into. The buffer
@@ -232,14 +235,14 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
         for (size_t i = 0; i < num_reqs; ++i) {
             if (Impl::RangeCheck::Check(reqs[i].offset, reqs[i].len) == Impl::RangeCheck::Bounds::InRange) {
                 if (reqs[i].len > 0) {
-                    uint64_t retireId = 0;
-                    if (const auto hit = m_file->TryReadFromCompletedPrefetch(static_cast<int64_t>(reqs[i].offset),
-                                                                              static_cast<int64_t>(reqs[i].len),
-                                                                              reqs[i].scratch, &retireId)) {
-                        if (retireId != 0 && std::ranges::find(exhausted, retireId) == exhausted.end()) {
-                            exhausted.push_back(retireId);
+                    if (const auto hit = m_file->TryReadFromCompletedPrefetch(
+                            static_cast<int64_t>(reqs[i].offset), static_cast<int64_t>(reqs[i].len), reqs[i].scratch,
+                            Impl::ReadableFileDetail::SlotRetirement::Deferred)) {
+                        if (hit->ExhaustedSlot &&
+                            std::ranges::find(exhausted, *hit->ExhaustedSlot) == exhausted.end()) {
+                            exhausted.push_back(*hit->ExhaustedSlot);
                         }
-                        reqs[i].result = rocksdb::Slice(reqs[i].scratch, *hit);
+                        reqs[i].result = rocksdb::Slice(reqs[i].scratch, hit->Bytes);
                         resolved[i] = 1;
                         continue;
                     }
@@ -405,7 +408,7 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
     } catch (...) {
         // RocksDB does not expect exceptions from a file. The try block's locals (and so the in-flight handles) are
         // already released here.
-        auto status = AzureErrorTranslator::FromCurrentException(*m_logger, "MultiRead");
+        auto status = AzureErrorTranslator::FromException(*m_logger, std::current_exception(), "MultiRead");
         // Requests without an outcome must not keep the caller's stale status or result.
         for (size_t i = 0; i < num_reqs; ++i) {
             if (resolved.size() != num_reqs || resolved[i] == 0) {
@@ -430,7 +433,7 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::Prefetch(const uint64_t offset, cons
         std::ignore = TImpl::Prefetch(m_file, static_cast<int64_t>(offset), static_cast<int64_t>(n));
         return rocksdb::IOStatus::OK();
     } catch (...) {
-        return AzureErrorTranslator::FromCurrentException(*m_logger, "Prefetch");
+        return AzureErrorTranslator::FromException(*m_logger, std::current_exception(), "Prefetch");
     }
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure

@@ -32,15 +32,8 @@ class CloseState {
 
     [[nodiscard]] CloseStatus Status() const noexcept { return m_status; }
 
-    // For coroutine closers, which run their own (awaited) sync and then record success here.
+    // The closer runs its own (awaited) sync and then records success here.
     void MarkClosed() noexcept { m_status = CloseStatus::Closed; }
-
-    template <typename SyncFn> void Close(SyncFn&& sync) {
-        if (m_status == CloseStatus::Open) {
-            sync();
-            m_status = CloseStatus::Closed;
-        }
-    }
 
     // For destructors, which must not retry or block: reports data that never reached durable storage.
     template <typename Logger>

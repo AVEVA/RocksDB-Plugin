@@ -25,6 +25,7 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <variant>
 
 namespace AVEVA::Private {
 namespace {
@@ -41,39 +42,6 @@ void ThrowIfAborted(const boost::system::error_code& error) {
 }
 
 /// <summary>
-/// Releases a DNS lookup the leading request abandons, so requests joined to it are not left waiting. Also
-/// runs if the coroutine is destroyed without resuming (the io_context was torn down).
-/// </summary>
-class LeaderClaim {
-  public:
-    LeaderClaim(std::string_view host, std::string_view service, const void* scope)
-        : m_host(host), m_service(service), m_scope(scope) {}
-    LeaderClaim(const LeaderClaim&) = delete;
-    LeaderClaim& operator=(const LeaderClaim&) = delete;
-
-    ~LeaderClaim() {
-        if (m_claim == Claim::Held) {
-            DnsCache::Shared().Finish(m_host, m_service, asio::error::operation_aborted, {}, m_scope);
-        }
-    }
-
-    /// <summary>
-    /// Publishes the lookup's real outcome to the cache and its waiters.
-    /// </summary>
-    void Publish(boost::system::error_code error, const ResolveResults& results) {
-        m_claim = Claim::Published;
-        DnsCache::Shared().Finish(m_host, m_service, error, results, m_scope);
-    }
-
-  private:
-    enum class Claim : std::uint8_t { Held, Published };
-    std::string_view m_host;
-    std::string_view m_service;
-    const void* m_scope;
-    Claim m_claim = Claim::Held;
-};
-
-/// <summary>
 /// Sends close_notify so the peer can tell a finished exchange from a truncation, bounded by a grace period.
 /// Runs detached so the caller's result does not wait for it.
 /// </summary>
@@ -88,10 +56,9 @@ asio::awaitable<void> ShutdownTls(std::unique_ptr<TlsStream> stream) {
 } // namespace
 
 template <typename Stream>
-Exchange<Stream>::Exchange(Environment environment, const Route& route, HttpRequest request, HttpRequestOptions options,
-                           HttpRequestPhase& phase)
-    : m_env(std::move(environment)), m_route(route), m_key{route.Host, route.Port}, m_stagedRequest(std::move(request)),
-      m_options(std::move(options)), m_phase(phase) {}
+Exchange<Stream>::Exchange(Environment environment, Route route, HttpRequest request, HttpRequestOptions options)
+    : m_env(std::move(environment)), m_route(std::move(route)), m_key{m_route.Host, m_route.Port},
+      m_stagedRequest(std::move(request)), m_options(std::move(options)) {}
 
 template <typename Stream> asio::awaitable<HttpResult> Exchange<Stream>::Run() {
     BuildRequest();
@@ -102,15 +69,15 @@ template <typename Stream> asio::awaitable<HttpResult> Exchange<Stream>::Run() {
     } else {
         NewStream();
         if (const auto error = ConfigureTlsForHost()) {
-            co_return std::unexpected(error);
+            co_return std::unexpected(HttpFailure{error});
         }
     }
 
     for (;;) {
         if (m_connection == Connection::Fresh) {
-            if (const auto error = co_await Connect()) {
+            if (auto failure = co_await Connect()) {
                 Close();
-                co_return std::unexpected(error);
+                co_return std::unexpected(*failure);
             }
         }
         auto reply = co_await Transfer();
@@ -120,7 +87,7 @@ template <typename Stream> asio::awaitable<HttpResult> Exchange<Stream>::Run() {
         }
         if (ShouldRetry(reply.error()) == RetryDecision::GiveUp) {
             Close();
-            co_return std::unexpected(reply.error().error);
+            co_return std::unexpected(reply.error().failure);
         }
 
         // The pooled connection was closed by the peer while idle; the request never reached it in a way that
@@ -134,7 +101,7 @@ template <typename Stream> asio::awaitable<HttpResult> Exchange<Stream>::Run() {
         m_buffer.consume(m_buffer.size());
         ResetParser();
         if (const auto error = ConfigureTlsForHost()) {
-            co_return std::unexpected(error);
+            co_return std::unexpected(HttpFailure{error});
         }
     }
 }
@@ -164,7 +131,9 @@ template <typename Stream> void Exchange<Stream>::BuildRequest() {
     req.method(verb);
     req.target(m_route.Target);
     for (const auto& header : m_stagedRequest.GetHeaders()) {
-        const auto field = http::string_to_field(header.GetName());
+        const auto& name = header.GetName();
+        const auto& value = header.GetValue();
+        const auto field = http::string_to_field(name);
         switch (field) {
         case http::field::host:
         case http::field::content_length:
@@ -172,39 +141,23 @@ template <typename Stream> void Exchange<Stream>::BuildRequest() {
         case http::field::connection:
             continue;
         case http::field::unknown:
-            req.insert(header.GetName(), header.GetValue());
+            req.insert(name, value);
             break;
         default:
-            req.insert(field, header.GetValue());
+            req.insert(field, value);
             break;
         }
     }
     req.set(http::field::host, m_route.Authority);
     req.keep_alive(true);
-    if (m_stagedRequest.GetBodyStorage() == BodyStorage::View) {
-        const auto view = m_stagedRequest.GetBodyView();
-        m_ownedBodyStorage.clear();
-        m_bodyKeepAlive = m_stagedRequest.GetBodyKeepAlive();
-        // Beast's buffer_body wants a mutable pointer but only reads it when sending.
-        GSL_SUPPRESS(type.3)
-        req.body().data = const_cast<void*>(static_cast<const void*>(view.data()));
-        req.body().size = view.size();
-    } else {
-        m_bodyKeepAlive.reset();
-        m_ownedBodyStorage = m_stagedRequest.ReleaseBody();
-        GSL_SUPPRESS(type.3)
-        req.body().data = m_ownedBodyStorage.empty()
-                              ? nullptr
-                              : const_cast<void*>(static_cast<const void*>(m_ownedBodyStorage.data()));
-        req.body().size = m_ownedBodyStorage.size();
-    }
-    req.body().more = false;
-    // buffer_body has no BodyWriter::size(), so message::prepare_payload() cannot be used; set Content-Length
-    // manually. A bodyless GET, HEAD or DELETE carries none, but a bodyless POST, PUT or PATCH must state zero.
+    m_body = m_stagedRequest.GetBody();
+    const auto bytes = m_body.Bytes();
+    req.body() = RequestBody::value_type(bytes.data(), bytes.size());
+    // Set by hand because message::prepare_payload() omits a zero length for PATCH: a bodyless GET, HEAD or DELETE
+    // carries none, but a bodyless POST, PUT or PATCH must state zero.
     const auto method = req.method();
-    if (req.body().size != 0 || method == http::verb::post || method == http::verb::put ||
-        method == http::verb::patch) {
-        req.content_length(req.body().size);
+    if (!bytes.empty() || method == http::verb::post || method == http::verb::put || method == http::verb::patch) {
+        req.content_length(bytes.size());
     }
     ResetParser();
 }
@@ -223,7 +176,7 @@ template <typename Stream> void Exchange<Stream>::ResetParser() {
 template <typename Stream> std::error_code Exchange<Stream>::ConfigureTlsForHost() {
     if constexpr (std::is_same_v<Stream, TlsStream>) {
         SSL* const ssl = m_stream->native_handle();
-        PrepareTlsSessionResumption(ssl, m_key.host, m_key.service);
+        PrepareTlsSessionResumption(ssl, m_key);
         if (SSL_get_verify_mode(ssl) != SSL_VERIFY_NONE) {
             // Native OpenSSL host/IP checks run inside the built-in verifier, avoiding a type-erased callback.
             int verifyHostResult = 0;
@@ -237,19 +190,25 @@ template <typename Stream> std::error_code Exchange<Stream>::ConfigureTlsForHost
                 return HttpClientError::TlsFailed;
             }
         }
-        // SSL_set_tlsext_host_name is a macro with an old-style cast, so call SSL_ctrl directly.
-        // SSL_ctrl takes the name as void* but only reads it.
-        GSL_SUPPRESS(type.3)
-        char* const hostName = const_cast<char*>(m_key.host.c_str());
-        if (m_route.Kind == HostKind::Name &&
-            !SSL_ctrl(ssl, SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_host_name, hostName)) {
-            return HttpClientError::TlsFailed;
+        if (m_route.Kind == HostKind::Name) {
+            // SSL_set_tlsext_host_name is a macro with an old-style cast, so call SSL_ctrl directly. It takes the name
+            // as a mutable void* (it only copies it), so hand it a copy rather than casting away const.
+            std::string hostName = m_key.host;
+            if (SSL_ctrl(ssl, SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_host_name, hostName.data()) == 0) {
+                return HttpClientError::TlsFailed;
+            }
         }
     }
     return {};
 }
 
-template <typename Stream> asio::awaitable<std::expected<ResolveResults, std::error_code>> Exchange<Stream>::Resolve() {
+/// <summary>
+/// The leader of a lookup starts the resolve detached and then waits on a channel like every joiner. getaddrinfo cannot
+/// be cancelled, so awaiting the resolver directly would hold the request past its deadline; waiting on the channel
+/// lets the deadline or a cancellation end the wait at once while the lookup completes in the background and still
+/// publishes its answer to the cache and to the requests that joined it.
+/// </summary>
+template <typename Stream> asio::awaitable<std::expected<ResolveResults, HttpFailure>> Exchange<Stream>::Resolve() {
     m_phase = HttpRequestPhase::Resolve;
     m_resolveSource = ResolveSource::Network;
     auto& cache = DnsCache::Shared();
@@ -257,52 +216,52 @@ template <typename Stream> asio::awaitable<std::expected<ResolveResults, std::er
     const auto executor = m_env.context.get_executor();
 
     for (;;) {
-        std::shared_ptr<ResolveChannel> joined;
-        const auto admission = cache.Acquire(
+        // Only created once the request has to wait, so a cache hit allocates nothing.
+        std::shared_ptr<ResolveChannel> outcome;
+        auto admission = cache.Acquire(
             m_key.host, m_key.service,
             [&] {
-                joined = std::make_shared<ResolveChannel>(executor, 1);
-                return ResolveWaiter(joined);
+                outcome = std::make_shared<ResolveChannel>(executor, 1);
+                return ResolveWaiter(outcome, m_env.diagnostics);
             },
-            scope);
+            scope, m_env.diagnostics);
 
-        if (admission.Kind == Admission::Cached) {
+        if (auto* const cached = std::get_if<DnsCache::CachedAnswer>(&admission)) {
             m_resolveSource = ResolveSource::Cache;
-            co_return admission.Results;
+            co_return std::move(cached->results);
+        }
+        if (auto* const token = std::get_if<DnsCache::LeaderToken>(&admission)) {
+            outcome = std::make_shared<ResolveChannel>(executor, 1);
+            auto resolver = std::make_shared<Tcp::resolver>(executor);
+            auto& lookup = *resolver;
+            lookup.async_resolve(m_key.host, m_key.service,
+                                 [resolver = std::move(resolver), claim = std::move(*token),
+                                  waiter = ResolveWaiter(outcome, m_env.diagnostics)](
+                                     const boost::system::error_code& error, const ResolveResults& results) mutable {
+                                     std::move(claim).Publish(error, results);
+                                     waiter(error, results);
+                                 });
         }
 
-        if (admission.Kind == Admission::Leader) {
-            LeaderClaim claim(m_key.host, m_key.service, scope);
-            Tcp::resolver resolver(executor);
-            const auto [error, results] = co_await resolver.async_resolve(m_key.host, m_key.service, Await);
-            ThrowIfAborted(error); // The claim's destructor releases the joined requests.
-            claim.Publish(error, results);
-            if (error) {
-                co_return std::unexpected(std::error_code(HttpClientError::ResolveFailed));
-            }
-            co_return results;
-        }
-
-        const auto [error, results] = co_await joined->async_receive(Await);
+        const auto [error, results] = co_await outcome->async_receive(Await);
         if (error == asio::error::operation_aborted) {
-            continue; // The leader was cancelled or timed out, which says nothing about this request's lookup.
+            continue; // The leading lookup was abandoned, which says nothing about this request's lookup.
         }
         if (error == asio::experimental::error::channel_cancelled) {
-            // This request's own deadline or cancellation fired while it was waiting on the leader, not a failure of
-            // the lookup itself; let it unwind as cancellation instead of being reported as ResolveFailed.
+            // This request's own deadline or cancellation fired while it waited for the lookup, not a failure of the
+            // lookup itself; let it unwind as cancellation instead of being reported as ResolveFailed.
             ThrowIfAborted(asio::error::operation_aborted);
         }
         if (error == asio::experimental::error::channel_closed) {
-            co_return std::unexpected(std::make_error_code(std::errc::not_enough_memory));
+            co_return std::unexpected(HttpFailure{std::make_error_code(std::errc::not_enough_memory)});
         }
         if (error) {
-            co_return std::unexpected(std::error_code(HttpClientError::ResolveFailed));
+            co_return std::unexpected(HttpFailure{HttpClientError::ResolveFailed, TransportCause{error}});
         }
         co_return results;
     }
 }
-
-template <typename Stream> asio::awaitable<std::error_code> Exchange<Stream>::Connect() {
+template <typename Stream> asio::awaitable<std::optional<HttpFailure>> Exchange<Stream>::Connect() {
     const auto resolved = co_await Resolve();
     if (!resolved) {
         co_return resolved.error();
@@ -317,7 +276,7 @@ template <typename Stream> asio::awaitable<std::error_code> Exchange<Stream>::Co
             Report(HttpDiagnosticKind::DnsInvalidated, connectError,
                    "Connecting to a cached address failed; dropped the cached DNS answer");
         }
-        co_return std::error_code(HttpClientError::ConnectFailed);
+        co_return HttpFailure{HttpClientError::ConnectFailed, TransportCause{connectError}};
     }
 
     if constexpr (std::is_same_v<Stream, TlsStream>) {
@@ -325,10 +284,10 @@ template <typename Stream> asio::awaitable<std::error_code> Exchange<Stream>::Co
         const auto [handshakeError] = co_await m_stream->async_handshake(asio::ssl::stream_base::client, Await);
         if (handshakeError) {
             ThrowIfAborted(handshakeError);
-            co_return std::error_code(HttpClientError::TlsFailed);
+            co_return HttpFailure{HttpClientError::TlsFailed, TransportCause{handshakeError}};
         }
     }
-    co_return std::error_code{};
+    co_return std::nullopt;
 }
 
 template <typename Stream>
@@ -348,7 +307,7 @@ Exchange<Stream>::Transfer() {
     if (writeError) {
         ThrowIfAborted(writeError);
         co_return std::unexpected(
-            Failure{HttpClientError::WriteFailed,
+            Failure{HttpFailure{HttpClientError::WriteFailed, TransportCause{writeError}},
                     ReplayAfter(bytesWritten != 0 ? RequestDelivery::MaybeSent : RequestDelivery::NotSent)});
     }
 
@@ -367,14 +326,15 @@ Exchange<Stream>::Transfer() {
             const auto classified = ClassifyReadError(readError);
             // Limit errors are the response's fault, not the connection's, so they are never retried. For the
             // rest, the request was fully written before the read started.
-            co_return std::unexpected(Failure{classified, classified == HttpClientError::ResponseTooLarge
-                                                              ? Replay::Unsafe
-                                                              : ReplayAfter(RequestDelivery::MaybeSent)});
+            co_return std::unexpected(Failure{HttpFailure{classified, TransportCause{readError}},
+                                              classified == HttpClientError::ResponseTooLarge
+                                                  ? Replay::Unsafe
+                                                  : ReplayAfter(RequestDelivery::MaybeSent)});
         }
 
         const auto status = m_parser->get().result_int();
         if (status == 101) {
-            co_return std::unexpected(Failure{HttpClientError::ProtocolError, Replay::Unsafe});
+            co_return std::unexpected(Failure{HttpFailure{HttpClientError::ProtocolError}, Replay::Unsafe});
         }
         if (status < 200) {
             m_interim = InterimResponse::Seen; // The server has the request; ResetParser() would hide that.
@@ -389,7 +349,7 @@ Exchange<Stream>::Transfer() {
     const auto keepAlive = m_parser->keep_alive() && m_buffer.size() == 0 ? KeepAlive::Reuse : KeepAlive::Close;
     auto response = BuildResponse();
     if (!response) {
-        co_return std::unexpected(Failure{response.error(), Replay::Unsafe});
+        co_return std::unexpected(Failure{HttpFailure{response.error()}, Replay::Unsafe});
     }
     co_return Reply{std::move(*response), keepAlive};
 }
@@ -443,7 +403,8 @@ template <typename Stream> std::expected<HttpResponse, std::error_code> Exchange
         // Walking Beast's linked list twice is cheaper than the reallocations of a growing vector.
         headers.reserve(gsl::narrow_cast<std::size_t>(std::distance(message.base().begin(), message.base().end())));
         for (const auto& header : message.base()) {
-            headers.emplace_back(std::string(header.name_string()), std::string(header.value()));
+            headers.emplace_back(HeaderName{std::string(header.name_string())},
+                                 HeaderValue{std::string(header.value())});
         }
         return HttpResponse(HttpStatusCode{message.result_int()}, std::move(headers), std::move(message.body()));
     } catch (...) {

@@ -68,7 +68,6 @@ DownloadToOptions ToDownloadToOptions(DownloadBlobOptions options) {
     result.Range = options.Range;
     result.Conditions = std::move(options.Conditions);
     result.MaxSize = options.MaxSize;
-    result.WriteScheduler = std::move(options.WriteScheduler);
     return result;
 }
 
@@ -183,9 +182,6 @@ Validity WireValidityOf(const HttpHeader& header) noexcept {
 
     return ((value.size() / 4U) * 3U) - paddingCount;
 }
-
-// Reservation hint only; an under- or over-estimate costs at most one reallocation.
-constexpr std::size_t TypicalRequestHeaderCount = 16U;
 
 namespace {
 struct ParsedErrorBody {
@@ -394,8 +390,7 @@ template <class TOptions>
 [[nodiscard]] HttpRequest BuildRequest(const TOptions& options, HttpMethod method, std::string url) {
     HttpRequest request;
     request.SetMethod(method);
-    request.SetUrl(std::move(url));
-    request.GetHeaders().reserve(TypicalRequestHeaderCount);
+    request.SetUrl(AVEVA::HttpUrl{std::move(url)});
     AddHeader(request, XMsVersionHeaderName, options.ApiVersion);
     AddHeader(request, XMsClientRequestIdHeaderName, CreateClientRequestId());
     return request;
@@ -507,11 +502,13 @@ std::string BuildRangeHeaderValue(const Models::BlobByteRange& range) {
     return FormatBytesRange(range.Offset, std::nullopt);
 }
 
-RequestFailure DetermineBlobStorageFailure(std::error_code transportError, const HttpResponse& response) {
-    if (transportError) {
+RequestFailure DetermineBlobStorageFailure(const std::optional<HttpFailure>& transportFailure,
+                                           const HttpResponse& response) {
+    if (transportFailure) {
+        const std::error_code transportError = transportFailure->Error();
         // The coarse HttpClientError hides what actually failed (e.g. a certificate rejection vs a refused
         // connection), so the lower-level cause is surfaced in the message.
-        if (const auto cause = response.GetCause()) {
+        if (const auto cause = transportFailure->Cause().Error()) {
             BlobStorageError details;
             details.Message = transportError.message() + ": " + cause.message();
             return {.Error = transportError, .Details = std::move(details)};
@@ -599,8 +596,10 @@ ContainerTarget MakeContainerTarget(std::shared_ptr<const ConnectionState> conne
                            .EncodedResource = std::move(encodedResource)};
 }
 
-BlobTarget MakeBlobTarget(std::shared_ptr<const ConnectionState> connection, std::string containerName,
-                          std::string blobName) {
+BlobTarget MakeBlobTarget(std::shared_ptr<const ConnectionState> connection, ContainerNameText containerNameText,
+                          BlobNameText blobNameText) {
+    std::string containerName = std::move(containerNameText).Value();
+    std::string blobName = std::move(blobNameText).Value();
     ValidateContainerName(containerName);
     if (blobName.empty()) {
         throw std::invalid_argument("BlobName must not be empty.");
@@ -625,7 +624,8 @@ ContainerTarget MakeContainerTarget(const BlobContainerClientOptions& options, C
 }
 
 BlobTarget MakeBlobTarget(const BlobClientOptions& options, CredentialPresence tokenCredential) {
-    return MakeBlobTarget(MakeConnectionState(options, tokenCredential), options.ContainerName, options.BlobName);
+    return MakeBlobTarget(MakeConnectionState(options, tokenCredential), ContainerNameText{options.ContainerName},
+                          BlobNameText{options.BlobName});
 }
 
 RequestAuth MakeRequestAuth(const ConnectionState& connection, CredentialPresence tokenCredential) {
@@ -708,33 +708,12 @@ HttpRequest BuildContainerRequest(const ContainerTarget& target, HttpMethod meth
     return BuildRequest(*target.Connection, method, BuildContainerUrl(target, queryString));
 }
 
-std::string BuildBlobUrl(const BlobClientOptions& options, std::string_view queryString) {
-    return BuildBlobUrl(MakeBlobTarget(options, CredentialPresence::Absent), queryString);
-}
-
-HttpRequest BuildBlobRequest(const BlobClientOptions& options, HttpMethod method, std::string_view queryString) {
-    return BuildBlobRequest(MakeBlobTarget(options, CredentialPresence::Absent), method, queryString);
-}
-
-std::string BuildContainerUrl(const BlobContainerClientOptions& options, std::string_view queryString) {
-    return BuildContainerUrl(MakeContainerTarget(options, CredentialPresence::Absent), queryString);
-}
-
-HttpRequest BuildContainerRequest(const BlobContainerClientOptions& options, HttpMethod method,
-                                  std::string_view queryString) {
-    return BuildContainerRequest(MakeContainerTarget(options, CredentialPresence::Absent), method, queryString);
-}
-
-std::string BuildServiceUrl(const BlobServiceClientOptions& options, std::string_view queryString) {
-    return BuildServiceUrl(*MakeConnectionState(options, CredentialPresence::Absent), queryString);
-}
-
 void AddHeader(HttpRequest& request, std::string_view name, std::string_view value) {
-    request.AddHeader(HttpHeader{std::string{name}, std::string{value}});
+    request.AddHeader(HttpHeader(HeaderName{std::string{name}}, HeaderValue{std::string{value}}));
 }
 
 void AddHeader(HttpRequest& request, std::string_view name, std::string&& value) {
-    request.AddHeader(HttpHeader{std::string{name}, std::move(value)});
+    request.AddHeader(HttpHeader(HeaderName{std::string{name}}, HeaderValue{std::move(value)}));
 }
 
 void AddHeaderIfNotEmpty(HttpRequest& request, std::string_view name, std::string_view value) {
@@ -777,10 +756,6 @@ void ApplyMetadata(HttpRequest& request, const Models::MetadataMap& metadata) {
     }
 }
 
-void AuthorizeRequest(const SharedKeyCredentialOptions& options, HttpRequest& request) {
-    AuthorizeRequest(SharedKeySigner{options.AccountName, options.AccountKey}, request);
-}
-
 void AuthorizeRequest(const SharedKeySigner& signer, HttpRequest& request) {
     AddHeader(request, AuthorizationHeaderName, signer.Authorize(request));
 }
@@ -808,7 +783,6 @@ std::string MakeBearerValue(std::string_view token) {
 HttpRequest BuildCreateContainerRequest(const ContainerTarget& target, const CreateBlobContainerOptions& options) {
     HttpRequest request = BuildContainerRequest(target, HttpMethod::Put);
     ApplyMetadata(request, options.Metadata);
-    ApplyBlobRequestConditions(request, options.Conditions);
     return request;
 }
 
@@ -820,15 +794,15 @@ std::optional<std::string> ValidatePageAligned(std::uint64_t value, gsl::not_nul
     return std::nullopt;
 }
 
-std::expected<std::string, std::string> BuildPageWriteRangeHeaderValue(std::uint64_t offset, std::uint64_t length) {
-    if (length == 0U) {
+std::expected<std::string, std::string> BuildPageWriteRangeHeaderValue(std::uint64_t offset, PageLength length) {
+    if (length.Value() == 0U) {
         return std::unexpected("length must be greater than zero.");
     }
-    if ((length - 1U) > (std::numeric_limits<std::uint64_t>::max() - offset)) {
+    if ((length.Value() - 1U) > (std::numeric_limits<std::uint64_t>::max() - offset)) {
         return std::unexpected("offset + length exceeds the maximum representable page range.");
     }
 
-    return FormatBytesRange(offset, offset + length - 1U);
+    return FormatBytesRange(offset, offset + length.Value() - 1U);
 }
 
 void ApplyLeaseRequestConditions(HttpRequest& request, Models::BlobRequestConditions conditions) {

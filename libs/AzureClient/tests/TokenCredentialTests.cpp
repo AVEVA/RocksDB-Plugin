@@ -54,6 +54,17 @@ void operator delete(void* memory) noexcept { std::free(memory); }
 void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
 
 namespace {
+// How long before expiry the cache refreshes a token.
+constexpr std::chrono::minutes RefreshWindow{5};
+// Token lifetimes on either side of RefreshWindow.
+constexpr std::chrono::seconds InsideRefreshWindow{30};
+constexpr std::chrono::seconds DeepInsideRefreshWindow{10};
+constexpr std::chrono::seconds BarelyValid{100};
+constexpr std::chrono::minutes OutsideRefreshWindow{10};
+constexpr std::chrono::minutes PastRefreshedTokenStart{6};
+// An arbitrary fixed "now" for clocked tests.
+constexpr std::chrono::hours FixedEpochOffset{1000};
+
 using AVEVA::AzureClient::AccessToken;
 using AVEVA::AzureClient::CachingTokenCredential;
 using AVEVA::AzureClient::TokenResult;
@@ -131,7 +142,7 @@ TEST(TokenCredentialTests, CachingTokenCredential_ConcurrentCallersDuringRefresh
     constexpr int Threads = 8;
     constexpr int CallsPerThread = 200;
     auto credential = CachingTokenCredential<ShortLivedTokenCredential>::Create(
-        std::make_shared<ShortLivedTokenCredential>(), std::chrono::minutes(5));
+        std::make_shared<ShortLivedTokenCredential>(), RefreshWindow);
 
     std::atomic<int> completions{0};
     std::vector<std::thread> threads;
@@ -163,7 +174,7 @@ TEST(TokenCredentialTests, CachingTokenCredential_InvalidateForcesANewInnerReque
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueImmediate({}, MakeToken("first", std::chrono::hours(1)));
     inner->EnqueueImmediate({}, MakeToken("second", std::chrono::hours(1)));
-    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+    auto credential = TestCachingCredential::Create(inner, RefreshWindow);
 
     EXPECT_EQ(TokenOf(Get(context, credential)), "first");
 
@@ -181,7 +192,7 @@ TEST(TokenCredentialTests, CachingTokenCredential_InvalidateWithRejectedTokenKee
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueImmediate({}, MakeToken("first", std::chrono::hours(1)));
     inner->EnqueueImmediate({}, MakeToken("second", std::chrono::hours(1)));
-    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+    auto credential = TestCachingCredential::Create(inner, RefreshWindow);
     const auto scopes = std::make_shared<const std::vector<std::string>>(std::vector<std::string>{"scope-a"});
 
     EXPECT_EQ(TokenOf(Get(context, credential)), "first");
@@ -198,7 +209,7 @@ TEST(TokenCredentialTests, CachingTokenCredential_ReusesCachedTokenOutsideRefres
     boost::asio::io_context context;
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueImmediate({}, MakeToken("cached-token", std::chrono::hours(1)));
-    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+    auto credential = TestCachingCredential::Create(inner, RefreshWindow);
 
     EXPECT_EQ(TokenOf(Get(context, credential)), "cached-token");
     EXPECT_EQ(TokenOf(Get(context, credential)), "cached-token");
@@ -210,7 +221,7 @@ TEST(TokenCredentialTests, CachingTokenCredential_SharedScopeListIsServedFromThe
     boost::asio::io_context context;
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueImmediate({}, MakeToken("cached-token", std::chrono::hours(1)));
-    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+    auto credential = TestCachingCredential::Create(inner, RefreshWindow);
     const auto scopes = std::make_shared<const std::vector<std::string>>(std::vector<std::string>{"scope-a"});
 
     std::vector<std::string> receivedTokens;
@@ -228,9 +239,9 @@ TEST(TokenCredentialTests, CachingTokenCredential_SharedScopeListIsServedFromThe
 TEST(TokenCredentialTests, CachingTokenCredential_ServesCachedTokenAndRefreshesInBackgroundInsideRefreshWindow) {
     boost::asio::io_context context;
     auto inner = std::make_shared<ScriptedTokenCredential>();
-    inner->EnqueueImmediate({}, MakeToken("old-token", std::chrono::seconds(30)));
+    inner->EnqueueImmediate({}, MakeToken("old-token", InsideRefreshWindow));
     inner->EnqueueDeferred({}, MakeToken("new-token", std::chrono::hours(1)));
-    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+    auto credential = TestCachingCredential::Create(inner, RefreshWindow);
 
     static_cast<void>(Get(context, credential));
 
@@ -240,7 +251,7 @@ TEST(TokenCredentialTests, CachingTokenCredential_ServesCachedTokenAndRefreshesI
     EXPECT_EQ(inner->CallCount(), 2);
     EXPECT_EQ(inner->PendingCount(), 1U);
 
-    EXPECT_TRUE(inner->CompleteNext());
+    EXPECT_EQ(inner->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     Poll(context);
 
     EXPECT_EQ(TokenOf(Get(context, credential)), "new-token");
@@ -250,9 +261,9 @@ TEST(TokenCredentialTests, CachingTokenCredential_ServesCachedTokenAndRefreshesI
 TEST(TokenCredentialTests, CachingTokenCredential_TokenShorterThanRefreshWindowIsServedBeforeRefreshCompletes) {
     boost::asio::io_context context;
     auto inner = std::make_shared<ScriptedTokenCredential>();
-    inner->EnqueueImmediate({}, MakeToken("short-lived", std::chrono::seconds(10)));
+    inner->EnqueueImmediate({}, MakeToken("short-lived", DeepInsideRefreshWindow));
     inner->EnqueueDeferred({}, MakeToken("refreshed", std::chrono::hours(1)));
-    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+    auto credential = TestCachingCredential::Create(inner, RefreshWindow);
 
     static_cast<void>(Get(context, credential));
 
@@ -260,7 +271,7 @@ TEST(TokenCredentialTests, CachingTokenCredential_TokenShorterThanRefreshWindowI
     EXPECT_EQ(inner->CallCount(), 2);
     EXPECT_EQ(inner->PendingCount(), 1U);
 
-    EXPECT_TRUE(inner->CompleteNext());
+    EXPECT_EQ(inner->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     Poll(context);
 
     EXPECT_EQ(TokenOf(Get(context, credential)), "refreshed");
@@ -271,7 +282,7 @@ TEST(TokenCredentialTests, CachingTokenCredential_ExpiredTokenWaitsForTheRefresh
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueImmediate({}, MakeToken("expired-token", -std::chrono::seconds(1)));
     inner->EnqueueDeferred({}, MakeToken("new-token", std::chrono::hours(1)));
-    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+    auto credential = TestCachingCredential::Create(inner, RefreshWindow);
 
     static_cast<void>(Get(context, credential));
 
@@ -279,7 +290,7 @@ TEST(TokenCredentialTests, CachingTokenCredential_ExpiredTokenWaitsForTheRefresh
     EXPECT_FALSE(operation.Done());
     EXPECT_EQ(inner->PendingCount(), 1U);
 
-    EXPECT_TRUE(inner->CompleteNext());
+    EXPECT_EQ(inner->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     Poll(context);
 
     ASSERT_TRUE(operation.Done());
@@ -291,7 +302,7 @@ TEST(TokenCredentialTests, CachingTokenCredential_InvalidatesCacheWhenScopesChan
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueImmediate({}, MakeToken("token-a", std::chrono::hours(1)));
     inner->EnqueueImmediate({}, MakeToken("token-b", std::chrono::hours(1)));
-    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+    auto credential = TestCachingCredential::Create(inner, RefreshWindow);
 
     static_cast<void>(Get(context, credential, {"scope-a"}));
     EXPECT_EQ(TokenOf(Get(context, credential, {"scope-b"})), "token-b");
@@ -307,7 +318,7 @@ TEST(TokenCredentialTests, CachingTokenCredential_RefreshFailureDoesNotDiscardPr
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueImmediate({}, MakeToken("token-a", std::chrono::hours(1)));
     inner->EnqueueImmediate(std::make_error_code(std::errc::permission_denied), {});
-    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+    auto credential = TestCachingCredential::Create(inner, RefreshWindow);
 
     static_cast<void>(Get(context, credential, {"scope-a"}));
     const auto failed = Get(context, credential, {"scope-b"});
@@ -321,11 +332,11 @@ TEST(TokenCredentialTests, CachingTokenCredential_RefreshFailureDoesNotDiscardPr
 
 TEST(TokenCredentialTests, CachingTokenCredential_RemembersFailureBrieflyWhenNoValidTokenExists) {
     boost::asio::io_context context;
-    auto now = std::chrono::system_clock::time_point{std::chrono::hours(1000)};
+    auto now = std::chrono::system_clock::time_point{FixedEpochOffset};
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueImmediate(std::make_error_code(std::errc::permission_denied), {});
     inner->EnqueueImmediate({}, MakeToken("token-a", std::chrono::hours(1)));
-    auto credential = ClockedCachingCredential::Create(inner, std::chrono::minutes(5), NowRef{&now});
+    auto credential = ClockedCachingCredential::Create(inner, RefreshWindow, NowRef{&now});
 
     const auto first = Get(context, credential);
     const auto second = Get(context, credential);
@@ -345,9 +356,9 @@ TEST(TokenCredentialTests, CachingTokenCredential_RemembersFailureBrieflyWhenNoV
 TEST(TokenCredentialTests, CachingTokenCredential_ServesStaleTokenDuringRefreshBackoff) {
     boost::asio::io_context context;
     auto inner = std::make_shared<ScriptedTokenCredential>();
-    inner->EnqueueImmediate({}, MakeToken("token-a", std::chrono::seconds(30)));
+    inner->EnqueueImmediate({}, MakeToken("token-a", InsideRefreshWindow));
     inner->EnqueueImmediate(std::make_error_code(std::errc::permission_denied), {});
-    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+    auto credential = TestCachingCredential::Create(inner, RefreshWindow);
 
     static_cast<void>(Get(context, credential));
 
@@ -363,9 +374,9 @@ TEST(TokenCredentialTests, CachingTokenCredential_ServesStaleTokenDuringRefreshB
 TEST(TokenCredentialTests, CachingTokenCredential_ConcurrentInWindowCallersShareOneBackgroundRefresh) {
     boost::asio::io_context context;
     auto inner = std::make_shared<ScriptedTokenCredential>();
-    inner->EnqueueImmediate({}, MakeToken("old-token", std::chrono::seconds(10)));
+    inner->EnqueueImmediate({}, MakeToken("old-token", DeepInsideRefreshWindow));
     inner->EnqueueDeferred({}, MakeToken("refreshed-token", std::chrono::hours(1)));
-    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+    auto credential = TestCachingCredential::Create(inner, RefreshWindow);
 
     static_cast<void>(Get(context, credential));
     EXPECT_EQ(TokenOf(Get(context, credential)), "old-token");
@@ -373,7 +384,7 @@ TEST(TokenCredentialTests, CachingTokenCredential_ConcurrentInWindowCallersShare
 
     EXPECT_EQ(inner->CallCount(), 2);
     EXPECT_EQ(inner->PendingCount(), 1U);
-    EXPECT_TRUE(inner->CompleteNext());
+    EXPECT_EQ(inner->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     Poll(context);
     EXPECT_EQ(TokenOf(Get(context, credential)), "refreshed-token");
 }
@@ -383,7 +394,7 @@ TEST(TokenCredentialTests, CachingTokenCredential_CoalescesConcurrentCallersWith
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueImmediate({}, MakeToken("expired-token", -std::chrono::seconds(1)));
     inner->EnqueueDeferred({}, MakeToken("refreshed-token", std::chrono::hours(1)));
-    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+    auto credential = TestCachingCredential::Create(inner, RefreshWindow);
 
     static_cast<void>(Get(context, credential));
     auto first = Start(context, credential);
@@ -394,7 +405,7 @@ TEST(TokenCredentialTests, CachingTokenCredential_CoalescesConcurrentCallersWith
     EXPECT_FALSE(first.Done());
     EXPECT_FALSE(second.Done());
 
-    EXPECT_TRUE(inner->CompleteNext());
+    EXPECT_EQ(inner->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     Poll(context);
 
     ASSERT_TRUE(first.Done());
@@ -405,7 +416,7 @@ TEST(TokenCredentialTests, CachingTokenCredential_CoalescesConcurrentCallersWith
 
 TEST(TokenCredentialTests, CachingTokenCredential_NullInnerFailsEveryCallWithoutHanging) {
     boost::asio::io_context context;
-    auto credential = TestCachingCredential::Create(nullptr, std::chrono::minutes(5));
+    auto credential = TestCachingCredential::Create(nullptr, RefreshWindow);
 
     const auto first = Get(context, credential);
     ASSERT_FALSE(first.has_value());
@@ -424,7 +435,7 @@ TEST(TokenCredentialTests, CachingTokenCredential_InnerThrowFailsTheRequestAndAl
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueThrow();
     inner->EnqueueImmediate({}, MakeToken("recovered", std::chrono::hours(1)));
-    auto credential = ClockedCachingCredential::Create(inner, std::chrono::minutes(5), NowRef{&now});
+    auto credential = ClockedCachingCredential::Create(inner, RefreshWindow, NowRef{&now});
 
     const auto failed = Get(context, credential);
     ASSERT_FALSE(failed.has_value());
@@ -443,10 +454,10 @@ TEST(TokenCredentialTests, CachingTokenCredential_InnerThrowDuringBackgroundRefr
     boost::asio::io_context context;
     auto now = std::chrono::system_clock::now();
     auto inner = std::make_shared<ScriptedTokenCredential>();
-    inner->EnqueueImmediate({}, MakeToken("token", std::chrono::seconds(100)));
+    inner->EnqueueImmediate({}, MakeToken("token", BarelyValid));
     inner->EnqueueThrow();
     inner->EnqueueImmediate({}, MakeToken("fresh", std::chrono::hours(1)));
-    auto credential = ClockedCachingCredential::Create(inner, std::chrono::minutes(5), NowRef{&now});
+    auto credential = ClockedCachingCredential::Create(inner, RefreshWindow, NowRef{&now});
 
     static_cast<void>(Get(context, credential));
 
@@ -466,8 +477,7 @@ TEST(TokenCredentialTests, CachingTokenCredential_InnerThrowDuringBackgroundRefr
 TEST(TokenCredentialTests, CachingTokenCredential_InnerAbortedThrowMapsToCanceledAndIsNotNegativelyCached) {
     boost::asio::io_context context;
     auto inner = std::make_shared<AbortingThenRecoveringTokenCredential>(1);
-    auto credential =
-        CachingTokenCredential<AbortingThenRecoveringTokenCredential>::Create(inner, std::chrono::minutes(5));
+    auto credential = CachingTokenCredential<AbortingThenRecoveringTokenCredential>::Create(inner, RefreshWindow);
 
     const auto aborted = Get(context, credential);
     ASSERT_FALSE(aborted.has_value());
@@ -483,7 +493,7 @@ TEST(TokenCredentialTests, CachingTokenCredential_FanOutDeliversSameTokenToAllWa
     boost::asio::io_context context;
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueDeferred({}, MakeToken("shared-token", std::chrono::hours(1)));
-    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+    auto credential = TestCachingCredential::Create(inner, RefreshWindow);
 
     constexpr int WaiterCount = 5;
     std::vector<Operation<TokenResult>> operations;
@@ -492,7 +502,7 @@ TEST(TokenCredentialTests, CachingTokenCredential_FanOutDeliversSameTokenToAllWa
     }
 
     EXPECT_EQ(inner->PendingCount(), 1U);
-    EXPECT_TRUE(inner->CompleteNext());
+    EXPECT_EQ(inner->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     Poll(context);
 
     for (auto& operation : operations) {
@@ -506,11 +516,11 @@ TEST(TokenCredentialTests, CachingTokenCredential_DeliversInnerErrorToAllWaiters
     boost::asio::io_context context;
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueDeferred(std::make_error_code(std::errc::connection_reset), {});
-    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+    auto credential = TestCachingCredential::Create(inner, RefreshWindow);
 
     auto leader = Start(context, credential);
     auto waiter = Start(context, credential);
-    EXPECT_TRUE(inner->CompleteNext());
+    EXPECT_EQ(inner->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     Poll(context);
 
     for (auto* operation : {&leader, &waiter}) {
@@ -526,7 +536,7 @@ TEST(TokenCredentialTests, CachingTokenCredential_CancelledLeaderLetsWaitersAskA
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueDeferred({}, MakeToken("never-delivered", std::chrono::hours(1)));
     inner->EnqueueImmediate({}, MakeToken("second", std::chrono::hours(1)));
-    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+    auto credential = TestCachingCredential::Create(inner, RefreshWindow);
 
     auto leader = Start(context, credential);
     auto waiter = Start(context, credential);
@@ -548,7 +558,7 @@ TEST(TokenCredentialTests, CachingTokenCredential_CancelledWaiterStopsWaitingFor
     boost::asio::io_context context;
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueDeferred({}, MakeToken("never-delivered", std::chrono::hours(1)));
-    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+    auto credential = TestCachingCredential::Create(inner, RefreshWindow);
 
     auto leader = Start(context, credential);
     auto waiter = Start(context, credential);
@@ -563,12 +573,15 @@ TEST(TokenCredentialTests, CachingTokenCredential_CancelledWaiterStopsWaitingFor
     Poll(context);
 
     ASSERT_TRUE(waiter.Done());
-    EXPECT_THROW(waiter.Result(), boost::system::system_error);
+    // Cancellation is reported as a failure, like every other GetTokenAsync failure, rather than thrown.
+    const auto cancelled = waiter.Result();
+    ASSERT_FALSE(cancelled.has_value());
+    EXPECT_EQ(cancelled.error(), std::make_error_code(std::errc::operation_canceled));
     EXPECT_FALSE(leader.Done());
     EXPECT_EQ(inner->PendingCount(), 1U);
 
     // The leader is unaffected by the waiter's cancellation and still completes normally afterward.
-    EXPECT_TRUE(inner->CompleteNext());
+    EXPECT_EQ(inner->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     Poll(context);
     ASSERT_TRUE(leader.Done());
     EXPECT_EQ(TokenOf(leader.Result()), "never-delivered");
@@ -590,7 +603,7 @@ FanOutOutcome RunFanOutWithFailingTokenCopy(int failingAllocation) {
     auto inner = std::make_shared<ScriptedTokenCredential>();
     inner->EnqueueDeferred({}, MakeToken(std::string(TokenLength, 'x'), std::chrono::hours(1)));
     inner->EnqueueImmediate({}, MakeToken(std::string(TokenLength, 'y'), std::chrono::hours(1)));
-    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+    auto credential = TestCachingCredential::Create(inner, RefreshWindow);
 
     std::vector<Operation<TokenResult>> operations;
     for (std::size_t i = 0; i < WaiterCount; ++i) {
@@ -598,11 +611,13 @@ FanOutOutcome RunFanOutWithFailingTokenCopy(int failingAllocation) {
     }
 
     AllocationFailure::largeAllocationsUntilFailure = failingAllocation;
+    // The only exception allowed to surface is the injected allocation failure; whether it surfaces matters less than
+    // that it strands no caller (checked by the callers of this helper). Anything else propagates and fails the test.
     try {
-        EXPECT_TRUE(inner->CompleteNext());
+        EXPECT_EQ(inner->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
         Poll(context);
-    } catch (...) {
-        // The outcome below is what matters; a surfaced exception must not strand any caller.
+    } catch (const std::bad_alloc&) {
+        EXPECT_GE(failingAllocation, 0) << "an allocation failure surfaced although none was injected";
     }
     AllocationFailure::largeAllocationsUntilFailure = -1;
 
@@ -648,13 +663,13 @@ TEST(TokenCredentialTests, CachingTokenCredential_OutstandingRequestKeepsTheCred
     std::weak_ptr<TestCachingCredential> weakCredential;
     std::optional<Operation<TokenResult>> operation;
     {
-        auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+        auto credential = TestCachingCredential::Create(inner, RefreshWindow);
         weakCredential = credential;
         operation = Start(context, credential);
     }
 
     EXPECT_EQ(inner->PendingCount(), 1U);
-    EXPECT_TRUE(inner->CompleteNext());
+    EXPECT_EQ(inner->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     Poll(context);
 
     ASSERT_TRUE(operation->Done());
@@ -668,13 +683,13 @@ TEST(TokenCredentialTests, CachingTokenCredential_DeliversToCoalescedWaitersAfte
     inner->EnqueueDeferred({}, MakeToken("late-token", std::chrono::hours(1)));
     std::vector<Operation<TokenResult>> operations;
     {
-        auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+        auto credential = TestCachingCredential::Create(inner, RefreshWindow);
         operations.push_back(Start(context, credential));
         operations.push_back(Start(context, credential));
     }
 
     EXPECT_EQ(inner->CallCount(), 1);
-    EXPECT_TRUE(inner->CompleteNext());
+    EXPECT_EQ(inner->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     Poll(context);
 
     for (auto& operation : operations) {
@@ -690,27 +705,27 @@ TEST(TokenCredentialTests, CachingTokenCredential_FixedClockDrivesRefreshWindowA
     boost::asio::io_context context;
 
     auto inner = std::make_shared<ScriptedTokenCredential>();
-    AccessToken first{.Token = "first", .ExpiresOn = start + std::chrono::minutes(10)};
+    AccessToken first{.Token = "first", .ExpiresOn = start + OutsideRefreshWindow};
     AccessToken second{.Token = "second", .ExpiresOn = start + std::chrono::hours(2)};
     inner->EnqueueImmediate({}, first);
     inner->EnqueueImmediate({}, second);
-    auto credential = ClockedCachingCredential::Create(inner, std::chrono::minutes(5), NowRef{&now});
+    auto credential = ClockedCachingCredential::Create(inner, RefreshWindow, NowRef{&now});
 
     EXPECT_EQ(TokenOf(Get(context, credential)), "first");
     EXPECT_EQ(inner->CallCount(), 1);
 
     // One tick before the refresh window opens: still served from the cache.
-    now = start + std::chrono::minutes(5) - std::chrono::seconds(1);
+    now = start + RefreshWindow - std::chrono::seconds(1);
     EXPECT_EQ(TokenOf(Get(context, credential)), "first");
     EXPECT_EQ(inner->CallCount(), 1);
 
     // Exactly at the refresh-window boundary a refresh starts.
-    now = start + std::chrono::minutes(5);
+    now = start + RefreshWindow;
     static_cast<void>(Get(context, credential));
     EXPECT_EQ(inner->CallCount(), 2);
 
     // Past the refreshed token's start the new token is served without another call.
-    now = start + std::chrono::minutes(6);
+    now = start + PastRefreshedTokenStart;
     EXPECT_EQ(TokenOf(Get(context, credential)), "second");
     EXPECT_EQ(inner->CallCount(), 2);
 }

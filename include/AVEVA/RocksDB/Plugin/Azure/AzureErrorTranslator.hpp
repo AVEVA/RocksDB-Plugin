@@ -3,7 +3,6 @@
 
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
-#include <AVEVA/AzureClient/Outcomes.hpp>
 #include <rocksdb/io_status.h>
 
 #include <boost/log/sources/severity_logger.hpp>
@@ -26,36 +25,20 @@ struct AzureErrorTranslator {
     static rocksdb::IOStatus IOStatusFromError(const RequestFailedException& error);
 
     /// <summary>
-    /// Transient when retrying the same request may succeed: 408, 429, 5xx, and transport failures.
-    /// </summary>
-    static AzureClient::Transience TransienceOf(const RequestFailedException& error);
-
-    /// <summary>
     /// Lost when the service no longer recognises our lease (or another owner holds it), so the blob may be written
     /// by someone else and the request must never be retried.
     /// </summary>
     static LeaseLoss LeaseLossOf(const std::error_code& code);
 
     /// <summary>
-    /// Converts a captured exception to a status without logging (for callers that have no logger).
-    /// </summary>
-    static rocksdb::IOStatus FromException(const std::exception_ptr& error);
-
-    /// <summary>
-    /// For use inside a catch (...) block: logs the active exception (including the Azure request id for
-    /// RequestFailedException) and converts it to a status, so no exception escapes into RocksDB.
-    /// `operation` names what was being attempted and is used in the log and in the fallback message.
-    /// </summary>
-    static rocksdb::IOStatus
-    FromCurrentException(boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>& logger,
-                         std::string_view operation);
-
-    /// <summary>
-    /// As FromCurrentException, for a captured exception (e.g. one delivered to an async completion handler).
+    /// Logs a captured exception (including the Azure request id for RequestFailedException) and converts it to a
+    /// status, so no exception escapes into RocksDB. `operation` names what was being attempted and is used in the
+    /// log and in the fallback message. Never throws: if logging or building the message fails, a fixed IOError is
+    /// returned instead.
     /// </summary>
     static rocksdb::IOStatus
     FromException(boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>& logger,
-                  const std::exception_ptr& error, std::string_view operation);
+                  const std::exception_ptr& error, std::string_view operation) noexcept;
 
     /// <summary>
     /// Runs `f` (which returns an IOStatus) and converts any exception it throws to a logged status, so file wrappers
@@ -68,7 +51,7 @@ struct AzureErrorTranslator {
         try {
             return std::forward<F>(f)();
         } catch (...) {
-            return FromCurrentException(logger, operation);
+            return FromException(logger, std::current_exception(), operation);
         }
     }
 

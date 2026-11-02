@@ -4,27 +4,17 @@
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LoggerImpl.hpp"
 #include <format>
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
-LoggerImpl::LoggerImpl(std::unique_ptr<LogSink> file, int logLevel)
-    : m_file(std::move(file)), m_logLevel(logLevel), m_buffer(4096) {}
+LoggerImpl::LoggerImpl(std::unique_ptr<LogSink> sink, std::unique_ptr<LogRateLimiter> rateLimiter)
+    : m_file(std::move(sink)), m_buffer(4096), m_rateLimiter(std::move(rateLimiter)) {}
 
-LoggerImpl::LoggerImpl(std::unique_ptr<LogSink> file, int logLevel, std::unique_ptr<LogRateLimiter> rateLimiter)
-    : m_file(std::move(file)), m_logLevel(logLevel), m_buffer(4096), m_rateLimiter(std::move(rateLimiter)) {}
-
-LoggerImpl::LoggerImpl(std::unique_ptr<WriteableFileImpl> file, int logLevel)
-    : LoggerImpl(std::make_unique<FileLogSink<WriteableFileImpl>>(std::move(file)), logLevel) {}
-
-LoggerImpl::LoggerImpl(std::unique_ptr<WriteableFileImpl> file, int logLevel,
-                       std::unique_ptr<LogRateLimiter> rateLimiter)
-    : LoggerImpl(std::make_unique<FileLogSink<WriteableFileImpl>>(std::move(file)), logLevel, std::move(rateLimiter)) {}
-
-void LoggerImpl::Logv(const int logLevel, const char* format, ...) {
+void LoggerImpl::Logv(const rocksdb::InfoLogLevel logLevel, const char* format, ...) {
     va_list va;
     va_start(va, format);
     Logv(logLevel, format, va);
     va_end(va);
 }
 
-void LoggerImpl::Logv(const int logLevel, const char* format, va_list ap) {
+void LoggerImpl::Logv(const rocksdb::InfoLogLevel logLevel, const char* format, va_list ap) {
     // RocksDB has already filtered by the info log level it was configured with, so filtering again here would only
     // drop messages the user asked for.
     (void)logLevel;

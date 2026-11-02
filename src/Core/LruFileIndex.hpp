@@ -20,6 +20,31 @@
 #include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Core {
+/// <summary>A path string with a role of its own, so two paths of different roles cannot be swapped.</summary>
+template <typename Tag> class TaggedPathString {
+  public:
+    explicit TaggedPathString(std::string path) noexcept : m_path(std::move(path)) {}
+
+    // The string lives as long as this object.
+    [[nodiscard]] const std::string& Value() const noexcept { return m_path; }
+
+  private:
+    std::string m_path;
+};
+
+struct CacheFilePathTag;
+struct GraveyardFilePathTag;
+/// <summary>Where a cache entry's file lives.</summary>
+using CacheFilePath = TaggedPathString<CacheFilePathTag>;
+/// <summary>Where an evicted file is moved before it is deleted.</summary>
+using GraveyardFilePath = TaggedPathString<GraveyardFilePathTag>;
+
+/// <summary>A file rename+delete the caller must commit after the index has dropped the entry.</summary>
+struct PendingEviction {
+    CacheFilePath OriginalPath;
+    GraveyardFilePath GraveyardPath;
+};
+
 /// <summary>
 /// Thread-safe LRU index for a file-based cache. Tracks named entries (filename
 /// + size), enforces a capacity limit with an LRU eviction policy, and produces
@@ -42,11 +67,10 @@ class LruFileIndex {
     static constexpr size_t kMaxFilenameLen = 64;
 
     /// <summary>
-    /// Pending file-rename+delete pairs produced by mutating operations.
-    /// Each element is {originalPath, graveyardPath}; callers must commit them
-    /// after the call returns.
+    /// Pending file-rename+delete pairs produced by mutating operations; callers must commit them after the call
+    /// returns.
     /// </summary>
-    using EvictList = std::vector<std::pair<std::string, std::string>>;
+    using EvictList = std::vector<PendingEviction>;
 
     /// <summary>Whether an insert may be refused when the cache is over capacity.</summary>
     enum class InsertMode : std::uint8_t {
@@ -146,10 +170,10 @@ class LruFileIndex {
     /// </summary>
     ///
     /// <returns>
-    /// {origPath, graveyardPath}, or std::nullopt if the entry was not found.
-    /// The caller must commit the pair after the call returns.
+    /// The eviction to commit, or std::nullopt if the entry was not found.
+    /// The caller must commit it after the call returns.
     /// </returns>
-    [[nodiscard]] std::optional<std::pair<std::string, std::string>> Remove(std::string_view filename) noexcept;
+    [[nodiscard]] std::optional<PendingEviction> Remove(std::string_view filename) noexcept;
 
     /// <summary>
     /// Sets the capacity limit and evicts LRU entries as needed.
@@ -225,14 +249,14 @@ class LruFileIndex {
     void EvictUntilSizeLocked(ByteCount targetSize, EvictList& evictPairs);
 
     /// <summary>
-    /// Removes a single entry from the in-memory index and returns {origPath, graveyardPath}.
-    /// No filesystem operation is performed; the caller must commit the returned pair.
+    /// Removes a single entry from the in-memory index and returns the eviction to commit.
+    /// No filesystem operation is performed; the caller must commit the returned eviction.
     /// Must be called with m_mutex held.
     /// </summary>
-    [[nodiscard]] std::pair<std::string, std::string> RemoveEntryLocked(LruIterator it);
+    [[nodiscard]] PendingEviction RemoveEntryLocked(LruIterator it);
 
-    /// <summary>Builds {origPath, graveyardPath} for an entry without mutating the index.</summary>
-    [[nodiscard]] std::pair<std::string, std::string> BuildEvictionPair(const Entry& entry) const;
+    /// <summary>Builds the eviction for an entry without mutating the index.</summary>
+    [[nodiscard]] PendingEviction BuildEvictionPair(const Entry& entry) const;
 
     /// <summary>Drops an entry from the index, list and byte count.  Cannot throw; m_mutex must be held.</summary>
     void EraseEntryLocked(LruIterator it) noexcept;

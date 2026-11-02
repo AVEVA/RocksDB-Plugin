@@ -47,10 +47,11 @@ using FakeFilesystem = BasicBlobFilesystemImpl<FakeHttpClient>;
     return BlobFilesystemDetail::ClassifyBlobName(name) == BlobFilesystemDetail::BlobNameKind::RenameTemp;
 }
 
-constexpr const char* AccountUrl = "https://account.blob.core.windows.net";
+const Models::AccountUrl AccountUrl{"https://account.blob.core.windows.net"};
 // Shared-key credentials must be base64; the fake service does not verify the signature.
-constexpr const char* AccountKey = "dGVzdC1rZXk=";
-constexpr const char* Container = "testdb";
+const StorageAccountKey AccountKey{"dGVzdC1rZXk="};
+constexpr const char* ContainerName = "testdb";
+const Models::DbName Container{ContainerName};
 
 // The whole stack except the network: the production filesystem over the library clients, talking through the fake
 // HTTP transport to an in-memory page blob service.
@@ -96,7 +97,7 @@ class BlobFilesystemFakeTests : public ::testing::Test {
 
     // Runtime, fake transport (completing inline, with a background pump) and in-memory service, assembled once for
     // every Impl test; declared before m_fs so the filesystem is released first.
-    FakeBlobEnvironment m_env{Container, "unused"};
+    FakeBlobEnvironment m_env{ContainerName, "unused"};
     std::shared_ptr<BasicClientRuntime<FakeHttpClient>>& m_runtime = m_env.Runtime;
     std::shared_ptr<FakeBlobServer>& m_server = m_env.Blob;
     std::unique_ptr<FakeFilesystem> m_fs;
@@ -941,7 +942,7 @@ TEST_F(BlobFilesystemFakeTests, SecondFilesystemCannotLockWhileTheLeaseIsHeldAnd
         ADD_FAILURE() << "expected the lock to be contended";
     } catch (const std::runtime_error& ex) {
         EXPECT_NE(std::string(ex.what()).find("LOCK"), std::string::npos) << ex.what();
-        EXPECT_NE(std::string(ex.what()).find(Container), std::string::npos) << ex.what();
+        EXPECT_NE(std::string(ex.what()).find(ContainerName), std::string::npos) << ex.what();
     }
     EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(10));
     EXPECT_EQ(second.GetLeaseClientCount(), 0U);
@@ -968,8 +969,8 @@ TEST_F(BlobFilesystemFakeTests, LockFileOnADifferentBlobIsNotBlockedByAHeldLease
 
 TEST_F(BlobFilesystemFakeTests, LoggerWritesRateLimitedLinesToTheBlob) {
     {
-        auto logger = m_fs->CreateLogger(Path("LOG"), 0);
-        logger.Logv(1, "hello %s", "logger");
+        auto logger = m_fs->CreateLogger(Path("LOG"));
+        logger.Logv(rocksdb::InfoLogLevel::INFO_LEVEL, "hello %s", "logger");
         logger.Flush();
     }
 
@@ -1014,7 +1015,8 @@ TEST_F(BlobFilesystemFakeTests,
                             &deleter, nullptr)
                         .ok());
     }
-    ASSERT_TRUE(m_env.Http.RunUntil([&] { return m_server->PendingDownloads() > 0; }));
+    ASSERT_EQ(m_env.Http.RunUntil([&] { return m_server->PendingDownloads() > 0; }),
+              AVEVA::AzureClient::Tests::WaitOutcome::Done);
     auto download = m_server->TakeDownload();
 
     // The pump thread is stuck in the destructor, so a second thread must run the context for the read to drain.
@@ -1053,7 +1055,7 @@ TEST_F(BlobFilesystemFakeTests,
 
 TEST_F(BlobFilesystemFakeTests, UnlockFileStillReleasesTheLeaseWhenWritesAreFencedAndIsIdempotent) {
     auto lock = m_fs->LockFile(Path("LOCK"));
-    m_runtime->FenceWrites();
+    m_runtime->Fence().Fence();
 
     EXPECT_NO_THROW(m_fs->UnlockFile(*lock));
     EXPECT_EQ(m_server->LeaseReleases.Value(), 1);
@@ -1063,7 +1065,7 @@ TEST_F(BlobFilesystemFakeTests, UnlockFileStillReleasesTheLeaseWhenWritesAreFenc
 }
 
 TEST_F(BlobFilesystemFakeTests, FencedRuntimeRejectsFurtherOperations) {
-    m_runtime->FenceWrites();
+    m_runtime->Fence().Fence();
 
     EXPECT_THROW((void)m_fs->FileExists(Path("a.log")), std::runtime_error);
 }

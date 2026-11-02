@@ -11,15 +11,15 @@ TlsVersion HttpClientOptions::GetTlsVersion() const noexcept { return m_tlsVersi
 
 PeerVerification HttpClientOptions::GetPeerVerification() const noexcept { return m_peerVerification; }
 
-const std::string& HttpClientOptions::GetCaFile() const noexcept { return m_caFile; }
+std::filesystem::path HttpClientOptions::GetCaFile() const { return m_caFile; }
 
-const std::string& HttpClientOptions::GetCaDirectory() const noexcept { return m_caDirectory; }
+std::filesystem::path HttpClientOptions::GetCaDirectory() const { return m_caDirectory; }
 
-const std::string& HttpClientOptions::GetCaPem() const noexcept { return m_caPem; }
+PemText HttpClientOptions::GetCaPem() const { return m_caPem; }
 
 ConnectionCount HttpClientOptions::GetMaxIdleConnectionsPerHost() const noexcept { return m_maxIdleConnectionsPerHost; }
 
-std::chrono::seconds HttpClientOptions::GetIdleConnectionTimeout() const noexcept { return m_idleConnectionTimeout; }
+Timeout HttpClientOptions::GetIdleConnectionTimeout() const noexcept { return m_idleConnectionTimeout; }
 
 std::chrono::milliseconds HttpClientOptions::GetIdleProbeThreshold() const noexcept { return m_idleProbeThreshold; }
 
@@ -31,20 +31,17 @@ void HttpClientOptions::SetPeerVerification(PeerVerification peerVerification) n
     m_peerVerification = peerVerification;
 }
 
-void HttpClientOptions::SetCaFile(std::string caFile) { m_caFile = std::move(caFile); }
+void HttpClientOptions::SetCaFile(std::filesystem::path caFile) { m_caFile = std::move(caFile); }
 
-void HttpClientOptions::SetCaDirectory(std::string caDirectory) { m_caDirectory = std::move(caDirectory); }
+void HttpClientOptions::SetCaDirectory(std::filesystem::path caDirectory) { m_caDirectory = std::move(caDirectory); }
 
-void HttpClientOptions::SetCaPem(std::string caPem) { m_caPem = std::move(caPem); }
+void HttpClientOptions::SetCaPem(PemText caPem) { m_caPem = std::move(caPem); }
 
 void HttpClientOptions::SetMaxIdleConnectionsPerHost(ConnectionCount maxIdleConnectionsPerHost) noexcept {
     m_maxIdleConnectionsPerHost = maxIdleConnectionsPerHost;
 }
 
-void HttpClientOptions::SetIdleConnectionTimeout(std::chrono::seconds idleConnectionTimeout) {
-    if (idleConnectionTimeout < std::chrono::seconds::zero()) {
-        throw std::invalid_argument("The idle connection timeout must not be negative.");
-    }
+void HttpClientOptions::SetIdleConnectionTimeout(Timeout idleConnectionTimeout) noexcept {
     m_idleConnectionTimeout = idleConnectionTimeout;
 }
 
@@ -54,6 +51,7 @@ void HttpClientOptions::SetIdleProbeThreshold(std::chrono::milliseconds idleProb
     }
     m_idleProbeThreshold = idleProbeThreshold;
 }
+
 void HttpClientOptions::SetMaxConnectionsPerHost(ConnectionCount maxConnectionsPerHost) noexcept {
     m_maxConnectionsPerHost = maxConnectionsPerHost;
 }
@@ -62,7 +60,7 @@ void HttpClientOptions::SetDiagnosticsCallback(HttpDiagnosticsCallback callback)
     m_diagnosticsCallback = std::move(callback);
 }
 
-const HttpDiagnosticsCallback& HttpClientOptions::GetDiagnosticsCallback() const noexcept {
+std::optional<HttpDiagnosticsCallback> HttpClientOptions::GetDiagnosticsCallback() const {
     return m_diagnosticsCallback;
 }
 } // namespace AVEVA

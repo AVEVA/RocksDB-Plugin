@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 add_library(aveva-http-client STATIC
+    HttpBody.cpp
     HttpHeader.cpp
     HttpClient.cpp
     HttpClientOptions.cpp
@@ -21,11 +22,13 @@ set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../include")
 target_sources(aveva-http-client
     PUBLIC
     FILE_SET HEADERS BASE_DIRS "${base-include-dir}" FILES
+        "${base-include-dir}/AVEVA/HttpClient/HttpBody.hpp"
         "${base-include-dir}/AVEVA/HttpClient/HttpHeader.hpp"
         "${base-include-dir}/AVEVA/HttpClient/Detail/Lifetime.hpp"
         "${base-include-dir}/AVEVA/HttpClient/HttpClient.hpp"
         "${base-include-dir}/AVEVA/HttpClient/HttpClientError.hpp"
         "${base-include-dir}/AVEVA/HttpClient/HttpClientOptions.hpp"
+        "${base-include-dir}/AVEVA/HttpClient/HttpFailure.hpp"
         "${base-include-dir}/AVEVA/HttpClient/HttpMethod.hpp"
         "${base-include-dir}/AVEVA/HttpClient/HttpRequest.hpp"
         "${base-include-dir}/AVEVA/HttpClient/HttpRequestOptions.hpp"
