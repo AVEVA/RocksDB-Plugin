@@ -85,7 +85,7 @@ class AsyncReadRequest {
     /// settled (completed here, or already finished/aborted) and Pending when `fill` produced nothing and the request
     /// is still in flight. Exceptions from `fill` propagate and leave the request untouched.
     /// </summary>
-    template <class TFill> [[nodiscard]] Completion TryCompleteInline(TFill && fill) {
+    template <class TFill> [[nodiscard]] Completion TryCompleteInline(TFill&& fill) {
         {
             std::scoped_lock lock(m_mutex);
             if (m_state.load(std::memory_order_relaxed) != State::InFlight) {
@@ -111,7 +111,7 @@ class AsyncReadRequest {
     /// <summary>
     /// Describes a finished request the way RocksDB's callback would see it. Returns Pending while still in flight.
     /// </summary>
-    [[nodiscard]] Completion TryGetOutcome(rocksdb::FSReadRequest & outcome);
+    [[nodiscard]] Completion TryGetOutcome(rocksdb::FSReadRequest& outcome);
 
     /// <summary>
     /// Stops the request from touching the scratch buffer and cancels its private download. Does not block: the
@@ -135,7 +135,7 @@ class AsyncReadRequest {
     enum class State { InFlight, Completed, Aborted };
 
     void NotifyFinished();
-    void FillOutcomeLocked(rocksdb::FSReadRequest & outcome) const;
+    void FillOutcomeLocked(rocksdb::FSReadRequest& outcome) const;
 
     const uint64_t m_offset;
     const size_t m_length;
@@ -175,4 +175,4 @@ rocksdb::IOStatus PollAsyncReads(const std::vector<void*>& ioHandles);
 /// Implements FileSystem::AbortIO: aborts every handle and invokes the outstanding callbacks.
 /// </summary>
 rocksdb::IOStatus AbortAsyncReads(const std::vector<void*>& ioHandles);
- } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
+} // namespace AVEVA::RocksDB::Plugin::Azure::Impl

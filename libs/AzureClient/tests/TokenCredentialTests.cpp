@@ -7,7 +7,9 @@
 #include <AVEVA/AzureClient/TokenCredential.hpp>
 
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/error.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/system/system_error.hpp>
 #include <gtest/gtest.h>
 
 #include <atomic>
@@ -100,6 +102,28 @@ class ShortLivedTokenCredential final {
     boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> /*scopes*/) {
         co_return MakeToken("short-lived", std::chrono::seconds(1));
     }
+};
+
+// Throws boost::system::system_error(operation_aborted) (as a cancelled co_await would) for the first
+// `throwCount` calls, then answers normally. Used to verify that Refresh maps that exception to
+// operation_canceled instead of falling through to the generic io_error clause.
+class AbortingThenRecoveringTokenCredential final {
+  public:
+    explicit AbortingThenRecoveringTokenCredential(int throwCount) : m_throwCount(throwCount) {}
+
+    boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> /*scopes*/) {
+        ++m_callCount;
+        if (m_callCount <= m_throwCount) {
+            throw boost::system::system_error(boost::asio::error::operation_aborted);
+        }
+        co_return MakeToken("recovered", std::chrono::hours(1));
+    }
+
+    [[nodiscard]] int CallCount() const noexcept { return m_callCount; }
+
+  private:
+    int m_throwCount;
+    int m_callCount = 0;
 };
 } // namespace
 
@@ -439,6 +463,22 @@ TEST(TokenCredentialTests, CachingTokenCredential_InnerThrowDuringBackgroundRefr
     EXPECT_EQ(TokenOf(Get(context, credential)), "fresh");
 }
 
+TEST(TokenCredentialTests, CachingTokenCredential_InnerAbortedThrowMapsToCanceledAndIsNotNegativelyCached) {
+    boost::asio::io_context context;
+    auto inner = std::make_shared<AbortingThenRecoveringTokenCredential>(1);
+    auto credential =
+        CachingTokenCredential<AbortingThenRecoveringTokenCredential>::Create(inner, std::chrono::minutes(5));
+
+    const auto aborted = Get(context, credential);
+    ASSERT_FALSE(aborted.has_value());
+    EXPECT_EQ(aborted.error(), std::make_error_code(std::errc::operation_canceled));
+
+    // Publish skips caching operation_canceled, so the next call is not served from the negative cache: it
+    // reaches the inner credential again instead of replaying the aborted outcome.
+    EXPECT_EQ(TokenOf(Get(context, credential)), "recovered");
+    EXPECT_EQ(inner->CallCount(), 2);
+}
+
 TEST(TokenCredentialTests, CachingTokenCredential_FanOutDeliversSameTokenToAllWaiters) {
     boost::asio::io_context context;
     auto inner = std::make_shared<ScriptedTokenCredential>();
@@ -502,6 +542,36 @@ TEST(TokenCredentialTests, CachingTokenCredential_CancelledLeaderLetsWaitersAskA
     ASSERT_TRUE(waiter.Done());
     EXPECT_EQ(TokenOf(waiter.Result()), "second");
     EXPECT_EQ(inner->CallCount(), 2);
+}
+
+TEST(TokenCredentialTests, CachingTokenCredential_CancelledWaiterStopsWaitingForAHungLeader) {
+    boost::asio::io_context context;
+    auto inner = std::make_shared<ScriptedTokenCredential>();
+    inner->EnqueueDeferred({}, MakeToken("never-delivered", std::chrono::hours(1)));
+    auto credential = TestCachingCredential::Create(inner, std::chrono::minutes(5));
+
+    auto leader = Start(context, credential);
+    auto waiter = Start(context, credential);
+    EXPECT_EQ(inner->PendingCount(), 1U);
+    EXPECT_FALSE(leader.Done());
+    EXPECT_FALSE(waiter.Done());
+
+    // Models a follower bounded by its own deadline (e.g. GetTokenForScopes(...) || cancel_after/Expire):
+    // the leader refresh is still hung, yet the waiter must be released promptly instead of being held
+    // hostage until the leader eventually finishes.
+    waiter.Cancel();
+    Poll(context);
+
+    ASSERT_TRUE(waiter.Done());
+    EXPECT_THROW(waiter.Result(), boost::system::system_error);
+    EXPECT_FALSE(leader.Done());
+    EXPECT_EQ(inner->PendingCount(), 1U);
+
+    // The leader is unaffected by the waiter's cancellation and still completes normally afterward.
+    EXPECT_TRUE(inner->CompleteNext());
+    Poll(context);
+    ASSERT_TRUE(leader.Done());
+    EXPECT_EQ(TokenOf(leader.Result()), "never-delivered");
 }
 
 namespace {

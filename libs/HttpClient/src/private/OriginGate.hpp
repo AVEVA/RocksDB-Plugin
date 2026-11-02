@@ -12,9 +12,11 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <expected>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <unordered_map>
@@ -76,26 +78,35 @@ class OriginGate : public std::enable_shared_from_this<OriginGate> {
     /// <returns>The slot, or <c>operation_canceled</c> if the gate closed. Throws <c>operation_aborted</c> if the
     /// wait was cancelled.</returns>
     boost::asio::awaitable<std::expected<Slot, std::error_code>> Acquire(std::string origin) {
-        // Cancellation is handled below, after the queue entry and any handed-over slot are cleaned up.
+        // Cancellation is handled below, after the queue entry and any handed-over slot are cleaned up. The flag
+        // lives on the bottom-of-stack frame of the whole awaitable thread, not just this frame, so it must be
+        // restored to whatever the caller had before every exit instead of simply turned back on here.
+        const bool previous = co_await boost::asio::this_coro::throw_if_cancelled();
         co_await boost::asio::this_coro::throw_if_cancelled(false);
         std::shared_ptr<Waiter> waiter;
+        std::optional<std::expected<Slot, std::error_code>> immediate;
         {
             const std::scoped_lock lock(m_mutex);
             if (m_lifecycle == Lifecycle::Closed) {
-                co_return std::unexpected(std::make_error_code(std::errc::operation_canceled));
-            }
-            auto& state = m_origins[origin];
-            if (state.active < m_limit) {
+                immediate.emplace(std::unexpected(std::make_error_code(std::errc::operation_canceled)));
+            } else if (auto& state = m_origins[origin]; state.active < m_limit) {
                 ++state.active;
-                co_return Slot(shared_from_this(), std::move(origin));
+                immediate.emplace(Slot(shared_from_this(), std::move(origin)));
+            } else {
+                waiter = std::make_shared<Waiter>(m_executor);
+                state.queue.push_back(waiter);
             }
-            waiter = std::make_shared<Waiter>(m_executor);
-            state.queue.push_back(waiter);
+        }
+        if (immediate) {
+            co_await boost::asio::this_coro::throw_if_cancelled(previous);
+            co_return std::move(*immediate);
         }
 
         const auto [error] = co_await waiter->signal.async_receive(boost::asio::as_tuple(boost::asio::use_awaitable));
         if (!error) {
-            co_return Slot(shared_from_this(), std::move(origin));
+            Slot slot(shared_from_this(), std::move(origin));
+            co_await boost::asio::this_coro::throw_if_cancelled(previous);
+            co_return std::move(slot);
         }
 
         // Cancelled or closed. A slot may still have been handed over in the meantime; if so it must not leak.
@@ -112,8 +123,10 @@ class OriginGate : public std::enable_shared_from_this<OriginGate> {
         }
         if (error == boost::asio::experimental::error::channel_cancelled ||
             error == boost::asio::error::operation_aborted) {
+            co_await boost::asio::this_coro::throw_if_cancelled(previous);
             throw boost::system::system_error(boost::asio::error::operation_aborted);
         }
+        co_await boost::asio::this_coro::throw_if_cancelled(previous);
         co_return std::unexpected(std::make_error_code(std::errc::operation_canceled));
     }
 

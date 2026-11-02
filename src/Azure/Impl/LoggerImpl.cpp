@@ -90,4 +90,9 @@ void LoggerImpl::Flush() {
     std::scoped_lock lock(*m_mutex);
     m_file->Sync();
 }
+
+void LoggerImpl::Close() {
+    std::scoped_lock lock(*m_mutex);
+    m_file->Close();
+}
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl

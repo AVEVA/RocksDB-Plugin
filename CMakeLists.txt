@@ -6,11 +6,17 @@ Requires the vcpkg overlay port in infrastructure/vcpkg-overlays/rocksdb to \
 be active; it installs RocksDB's db_bench_tool as a static library (via \
 0004-install-db-bench-tool-lib.patch) that the wrapper links against." OFF)
 
+set(_aveva_rocksdb_overlay "${CMAKE_CURRENT_SOURCE_DIR}/infrastructure/vcpkg-overlays/rocksdb")
 if(AVEVA_ROCKSDB_BUILD_DB_BENCH)
     list(APPEND VCPKG_MANIFEST_FEATURES "db-bench")
     # The patched RocksDB port is only needed for db_bench; ordinary builds use the baseline port. This must be set
     # before project(), where the vcpkg toolchain reads it.
-    list(APPEND VCPKG_OVERLAY_PORTS "${CMAKE_CURRENT_SOURCE_DIR}/infrastructure/vcpkg-overlays/rocksdb")
+    if(NOT _aveva_rocksdb_overlay IN_LIST VCPKG_OVERLAY_PORTS)
+        list(APPEND VCPKG_OVERLAY_PORTS "${_aveva_rocksdb_overlay}")
+    endif()
+else()
+    # The vcpkg toolchain caches VCPKG_OVERLAY_PORTS, so drop the overlay left behind by an earlier db_bench configure.
+    list(REMOVE_ITEM VCPKG_OVERLAY_PORTS "${_aveva_rocksdb_overlay}")
 endif()
 
 project(aveva-rocksdb-plugin LANGUAGES CXX VERSION 0.2.0)

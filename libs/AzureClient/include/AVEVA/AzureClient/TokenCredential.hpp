@@ -5,13 +5,18 @@
 
 #include <boost/asio/any_completion_handler.hpp>
 #include <boost/asio/as_tuple.hpp>
+#include <boost/asio/associated_cancellation_slot.hpp>
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/cancellation_signal.hpp>
+#include <boost/asio/cancellation_type.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/error.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <boost/system/system_error.hpp>
 
 #include <chrono>
 #include <concepts>
@@ -107,8 +112,12 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
     struct CreateKey {
         explicit CreateKey() = default;
     };
-    // Waiters of one refresh; erased because callers resume on their own executors.
-    using Waiter = boost::asio::any_completion_handler<void()>;
+    // Waiters of one refresh; erased because callers resume on their own executors. Completed with an
+    // error_code so a cancelled wait can be told apart from a normal completion (see WaitFor).
+    using Waiter = boost::asio::any_completion_handler<void(boost::system::error_code)>;
+    // Identifies one waiter registration in RefreshState::Waiters so a cancellation can find and remove
+    // exactly that entry; the type-erased Waiter itself cannot be compared or inspected once stored.
+    using WaiterId = std::shared_ptr<void>;
 
   public:
     // The cache relies on shared ownership, so instances can only be created through this factory.
@@ -176,7 +185,7 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
     struct RefreshState {
         ScopeList Scopes;
         std::mutex Mutex;
-        std::vector<Waiter> Waiters;
+        std::vector<std::pair<WaiterId, Waiter>> Waiters;
         TokenResult Result = std::unexpected(std::make_error_code(std::errc::operation_canceled));
         RefreshProgress Progress = RefreshProgress::InFlight;
     };
@@ -256,25 +265,57 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         return result;
     }
 
-    // Suspends until `state` is done; resumes inline-free through post.
+    // Suspends until `state` is done; resumes inline-free through post. Cancellable: a connected
+    // cancellation slot removes this waiter from `state` (if Finish has not already claimed it) and
+    // completes it with operation_aborted, which is rethrown as a boost::system::system_error. Without
+    // this a follower bounded by `GetTokenForScopes(...) || Expire(limit)` would stay blocked until the
+    // leader's own refresh finished, past its own timeout.
     static boost::asio::awaitable<void> WaitFor(std::shared_ptr<RefreshState> state) {
         auto token = boost::asio::as_tuple(boost::asio::use_awaitable);
-        co_await boost::asio::async_initiate<decltype(token), void()>(
+        auto [ec] = co_await boost::asio::async_initiate<decltype(token), void(boost::system::error_code)>(
             [](auto handler, std::shared_ptr<RefreshState> st) {
                 auto executor = boost::asio::get_associated_executor(handler);
+                auto slot = boost::asio::get_associated_cancellation_slot(handler);
+                WaiterId id = std::make_shared<char>();
                 // Resuming an awaitable handler runs the coroutine in place, so hop to its executor first.
-                Waiter waiter = [executor, handler = std::move(handler)]() mutable {
-                    boost::asio::post(executor, std::move(handler));
+                Waiter waiter = [executor, handler = std::move(handler)](boost::system::error_code waitEc) mutable {
+                    boost::asio::post(executor,
+                                      [handler = std::move(handler), waitEc]() mutable { std::move(handler)(waitEc); });
                 };
+                if (slot.is_connected()) {
+                    slot.assign([st, id](boost::asio::cancellation_type_t /*type*/) mutable {
+                        // If the wait already completed normally, Finish has moved it out of st->Waiters
+                        // and this lookup simply finds nothing to cancel.
+                        Waiter fired;
+                        bool found = false;
+                        {
+                            std::scoped_lock const lock(st->Mutex);
+                            for (auto it = st->Waiters.begin(); it != st->Waiters.end(); ++it) {
+                                if (it->first == id) {
+                                    fired = std::move(it->second);
+                                    st->Waiters.erase(it);
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (found) {
+                            std::move(fired)(boost::asio::error::operation_aborted);
+                        }
+                    });
+                }
                 std::unique_lock lock(st->Mutex);
                 if (st->Progress == RefreshProgress::Done) {
                     lock.unlock();
-                    std::move(waiter)();
+                    std::move(waiter)(boost::system::error_code{});
                     return;
                 }
-                st->Waiters.emplace_back(std::move(waiter));
+                st->Waiters.emplace_back(std::move(id), std::move(waiter));
             },
             token, std::move(state));
+        if (ec) {
+            throw boost::system::system_error(ec);
+        }
     }
 
     void Finish(const std::shared_ptr<RefreshState>& state, TokenResult result) {
@@ -284,7 +325,7 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
                 m_inFlightRefresh.reset();
             }
         }
-        std::vector<Waiter> waiters;
+        std::vector<std::pair<WaiterId, Waiter>> waiters;
         {
             std::scoped_lock const lock(state->Mutex);
             state->Result = std::move(result);
@@ -292,7 +333,7 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
             waiters = std::move(state->Waiters);
         }
         for (auto& waiter : waiters) {
-            std::move(waiter)();
+            std::move(waiter.second)(boost::system::error_code{});
         }
     }
 
@@ -307,6 +348,13 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
                 result = std::unexpected(std::make_error_code(std::errc::not_enough_memory));
             } catch (const std::system_error& e) {
                 result = std::unexpected(e.code());
+            } catch (const boost::system::system_error& e) {
+                // boost::system::system_error derives from std::runtime_error, not std::system_error, so it
+                // needs its own clause; otherwise a cancelled inner request (e.g. from cancel_after) would
+                // fall through to the generic io_error catch below and be negative-cached as such.
+                result = std::unexpected(e.code() == boost::asio::error::operation_aborted
+                                             ? std::make_error_code(std::errc::operation_canceled)
+                                             : std::error_code(e.code()));
             } catch (...) {
                 result = std::unexpected(std::make_error_code(std::errc::io_error));
             }

@@ -11,6 +11,7 @@
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/experimental/channel_error.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
 #include <gsl/util>
@@ -285,6 +286,11 @@ template <typename Stream> asio::awaitable<std::expected<ResolveResults, std::er
         const auto [error, results] = co_await joined->async_receive(Await);
         if (error == asio::error::operation_aborted) {
             continue; // The leader was cancelled or timed out, which says nothing about this request's lookup.
+        }
+        if (error == asio::experimental::error::channel_cancelled) {
+            // This request's own deadline or cancellation fired while it was waiting on the leader, not a failure of
+            // the lookup itself; let it unwind as cancellation instead of being reported as ResolveFailed.
+            ThrowIfAborted(asio::error::operation_aborted);
         }
         if (error == asio::experimental::error::channel_closed) {
             co_return std::unexpected(std::make_error_code(std::errc::not_enough_memory));

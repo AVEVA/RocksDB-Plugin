@@ -818,6 +818,27 @@ TEST(HttpClientRobustness, DestroyingTheClientWhileLeadingASharedLookupCompletes
     EXPECT_EQ(completions, 2);
 }
 
+TEST(HttpClientRobustness, DestroyingTheClientBeforeTheIoContextRunsDoesNotTouchAFreedClient) {
+    asio::io_context context;
+    auto client = AVEVA::HttpClient::Create(context);
+
+    // SendAsync must copy what it needs from the client eagerly, synchronously, when called here: co_spawn's
+    // awaitable starts suspended and does not run any of its body until the context below processes it, by which
+    // time the client is already destroyed.
+    auto sendAwaitable = client->SendAsync(MakeRequest("http://no-such-host.invalid/"), AVEVA::HttpRequestOptions{});
+
+    bool completed = false;
+    asio::co_spawn(context, std::move(sendAwaitable), [&](std::exception_ptr error, AVEVA::HttpResult) {
+        EXPECT_FALSE(error);
+        completed = true;
+    });
+    client.reset();
+
+    RunBounded(context);
+
+    EXPECT_TRUE(completed);
+}
+
 TEST(HttpClientRobustness, StartedDnsLeaderKeepsItsPendingEntryWhileTheLookupIsInFlight) {
     asio::io_context context;
     auto client = AVEVA::HttpClient::Create(context);

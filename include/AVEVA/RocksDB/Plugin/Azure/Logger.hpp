@@ -24,5 +24,9 @@ class Logger final : public rocksdb::Logger {
     ~Logger() override;
     virtual void Logv(const rocksdb::InfoLogLevel log_level, const char* format, va_list ap) override;
     virtual void Flush() override;
+
+  protected:
+    // Persists the buffered tail of the log; RocksDB calls this through Close() when the DB shuts down.
+    rocksdb::Status CloseImpl() override;
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure

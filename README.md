@@ -147,9 +147,14 @@ and the list of [known plugins](https://github.com/facebook/rocksdb/blob/main/PL
 
 The Azure client is now trimmed and in-tree, which changed the public surface:
 
-* **`Core/BlobClient.hpp` and `Impl/PageBlob.hpp` are gone.** Code that included `AVEVA/RocksDB/Plugin/Core/BlobClient.hpp` should use `Core::ContainerClient` (`Core/ContainerClient.hpp`) for container-level operations, and the in-tree AzureClient types for blob I/O: `AVEVA::AzureClient::BlobContainerClient`, `PageBlobClient` and `BlobClient` (headers under `AVEVA/AzureClient/`, package `aveva-azure-client`, see [libs/README.md](libs/README.md)). Calls return `boost::asio::awaitable<std::expected<Response<T>, BlobStorageError>>` (coroutine-only, no completion token); co_await them from a coroutine on the client executor and never block on the host `io_context` thread.
-* The Azure implementation classes (`BlobFilesystem` and the file, lock and directory types behind it) now take the injected `io_context` and client types. Consumers should not construct them directly: register the filesystem through `Plugin::Register` and let RocksDB create it from its `azblobfs...` URI.
-* The six `Plugin::Register` overloads (including the deprecated ones without an `io_context`) are replaced by one entry point taking `Plugin::RegisterOptions`; the plugin never owns an `io_context`. The filesystem is registered under both the new `Plugin::NameFor` name and the legacy `Plugin::Name + db + backupDb` name so existing `azblobfs...` URIs keep resolving.
+* **`Core/BlobClient.hpp` and `Impl/PageBlob.hpp` are gone.** Code that included `AVEVA/RocksDB/Plugin/Core/BlobClient.hpp` should use the in-tree AzureClient types for blob I/O: `AVEVA::AzureClient::BlobContainerClient`, `PageBlobClient` and `BlobClient` (headers under `AVEVA/AzureClient/`, package `aveva-azure-client`, see [libs/README.md](libs/README.md)). Calls return `boost::asio::awaitable<std::expected<Response<T>, BlobStorageError>>` (coroutine-only, no completion token); co_await them from a coroutine on the client executor and never block on the host `io_context` thread.
+* **The `aveva-rocksdb-plugin-core` interface has breaking changes for implementers and mocks:**
+  - `Core::File::Read` is now `ByteCount Read(char*, ByteOffset, ByteCount)` using strong types from `Core/Units.hpp`; it was `int64_t(char*, int64_t, int64_t)`.
+  - `Core::Filesystem::DeleteFile`, `DeleteDir`, `CreateDir`, `RenameFile` return `FilesystemResult` instead of `bool`.
+  - `Filesystem::WriteFileAtomic(const char*, size_t)` is now `WriteFileAtomic(std::span<const char>)`.
+  - `Core::ContainerClient::GetBlobClient` was removed; implementers provide only `GetBlobSize` and `DownloadBlobTo`.
+  - `RocksDBHelpers::IsManifestFile`, `IsIdentityFile`, `IsLogFile` were removed; use `GetFileType()` and check the returned `FileClass` enum.
+  * The Azure implementation classes (`BlobFilesystem` and the file, lock and directory types behind it) now take the injected `io_context` and client types. Consumers should not construct them directly: register the filesystem through `Plugin::Register` and let RocksDB create it from its `azblobfs...` URI.* The six `Plugin::Register` overloads (including the deprecated ones without an `io_context`) are replaced by one entry point taking `Plugin::RegisterOptions`; the plugin never owns an `io_context`. The filesystem is registered under both the new `Plugin::NameFor` name and the legacy `Plugin::Name + db + backupDb` name so existing `azblobfs...` URIs keep resolving.
 * `http:` endpoints are rejected unless `AllowInsecureHttp = true` is set on the client options (credentials are still refused over non-loopback `http`).
 * Ranged downloads now require a valid `Content-Range` on every `206` response.
 * `AzureClient::AzureRequestOptions::SetMaxRetries` and `HttpClientOptions::SetIdleConnectionTimeout` throw `std::invalid_argument` for negative values.
@@ -181,7 +186,8 @@ Intentional breaks (no compatibility shim; use the replacement):
 | --- | --- |
 | `ReadableFile` was both `FSSequentialFile` and `FSRandomAccessFile` | `ReadableFile` is random access only; sequential reads use `SequentialFile` (obtain either through `rocksdb::FileSystem`) |
 | Public constructors of `ReadableFile`, `ReadWriteFile`, `WriteableFile`, `SequentialFile` taking `Impl::*` objects | Not constructible by consumers; create them through `Plugin::Register` and RocksDB |
-| `Impl/*` headers other than `Impl/Configuration.hpp` (`ReadableFileImpl.hpp`, `BlobFilesystemImpl.hpp`, `PageBlob.hpp`, ...) and `Core/BlobClient.hpp` | Not installed and unsupported; use the public API, `Core::ContainerClient`, or the `aveva-azure-client` package |
+| `Impl/*` headers other than `Impl/Configuration.hpp` (`ReadableFileImpl.hpp`, `BlobFilesystemImpl.hpp`, `PageBlob.hpp`, ...) and `Core/BlobClient.hpp` | Not installed and unsupported; use the public API or the `aveva-azure-client` package |
+| `Core::File`, `Core::Filesystem`, `Core::ContainerClient` and `RocksDBHelpers` signatures | Update implementations and mocks to the new signatures (see the list above) |
 | Azure SDK types in public headers | The in-tree `AVEVA::AzureClient` library |
 
 ## Building

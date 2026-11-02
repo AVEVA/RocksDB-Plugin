@@ -24,6 +24,8 @@ class RecordingSink final : public LogSink {
     bool overlapped = false;
     bool throwOnAppend = false;
     bool throwOnSync = false;
+    bool throwOnClose = false;
+    int* closeCount = nullptr;
 
     void Append(std::span<const char> data) override {
         if (throwOnAppend) {
@@ -40,6 +42,14 @@ class RecordingSink final : public LogSink {
     void Sync() override {
         if (throwOnSync) {
             throw std::runtime_error("sync failed");
+        }
+    }
+    void Close() override {
+        if (closeCount != nullptr) {
+            ++*closeCount;
+        }
+        if (throwOnClose) {
+            throw std::runtime_error("close failed");
         }
     }
 };
@@ -105,6 +115,43 @@ TEST(LoggerTests, Logger_SinkThrows_DoesNotEscape) {
     };
     logv("message %d", 1);
     EXPECT_NO_THROW(logger.Flush());
+}
+
+TEST(LoggerTests, Close_ClosesTheSinkOnce) {
+    int closeCount = 0;
+    auto sink = std::make_unique<RecordingSink>();
+    sink->closeCount = &closeCount;
+    {
+        AVEVA::RocksDB::Plugin::Azure::Logger logger(LoggerImpl(std::move(sink), 0));
+
+        EXPECT_TRUE(logger.Close().ok());
+        EXPECT_EQ(1, closeCount);
+    }
+
+    EXPECT_EQ(1, closeCount);
+}
+
+TEST(LoggerTests, Destructor_ClosesAnUnclosedSink) {
+    int closeCount = 0;
+    auto sink = std::make_unique<RecordingSink>();
+    sink->closeCount = &closeCount;
+
+    {
+        AVEVA::RocksDB::Plugin::Azure::Logger logger(LoggerImpl(std::move(sink), 0));
+    }
+
+    EXPECT_EQ(1, closeCount);
+}
+
+TEST(LoggerTests, Close_SinkThrows_ReturnsIOError) {
+    auto sink = std::make_unique<RecordingSink>();
+    sink->throwOnClose = true;
+    AVEVA::RocksDB::Plugin::Azure::Logger logger(LoggerImpl(std::move(sink), 0));
+
+    rocksdb::Status status;
+    EXPECT_NO_THROW(status = logger.Close());
+
+    EXPECT_TRUE(status.IsIOError());
 }
 
 TEST(LoggerTests, Logv_SeparatesTheTimestampAndTerminatesTheLine) {

@@ -17,6 +17,8 @@ class LogSink {
     virtual ~LogSink() = default;
     virtual void Append(std::span<const char> data) = 0;
     virtual void Sync() = 0;
+    // Persists everything appended so far and releases the underlying file.
+    virtual void Close() = 0;
 };
 
 // Adapts any writeable file type (Append + Sync) to a LogSink.
@@ -27,6 +29,7 @@ template <typename TFile> class FileLogSink final : public LogSink {
     explicit FileLogSink(std::unique_ptr<TFile> file) : m_file(std::move(file)) {}
     void Append(std::span<const char> data) override { m_file->Append(data); }
     void Sync() override { m_file->Sync(); }
+    void Close() override { m_file->Close(); }
 };
 
 class LoggerImpl {
@@ -49,5 +52,6 @@ class LoggerImpl {
     void Logv(int logLevel, const char* format, ...);
     void Logv(int logLevel, const char* format, va_list ap);
     void Flush();
+    void Close();
 };
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
