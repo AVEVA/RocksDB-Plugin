@@ -3,6 +3,8 @@
 
 #pragma once
 
+// Umbrella header: includes the whole public surface of the Azure client library.
+
 #include <AVEVA/AzureClient/BlobClient.hpp>
 #include <AVEVA/AzureClient/BlobClientOptions.hpp>
 #include <AVEVA/AzureClient/BlobContainerClient.hpp>

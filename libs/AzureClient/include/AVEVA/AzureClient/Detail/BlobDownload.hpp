@@ -58,10 +58,22 @@
 
 namespace AVEVA::AzureClient::Private {
 namespace DownloadDetail {
-// Runs a blocking task off the I/O thread: on the caller's scheduler, else the HTTP client's, and resumes the caller
-// on its own executor afterwards. Throws std::errc::operation_not_supported for a transport with neither, and
-// rethrows whatever the task throws. A task still queued when the caller is cancelled is skipped and the await throws
-// operation_aborted; a task that has started always runs to completion and the await then returns normally.
+/// <summary>
+/// Runs a blocking task off the I/O thread: on the caller's scheduler, else the HTTP client's, and resumes the caller
+/// on its own executor afterwards. A task still queued when the caller is cancelled is skipped and the await throws
+/// operation_aborted; a task that has started always runs to completion and the await then returns normally.
+/// </summary>
+/// <typeparam name="THttp">The HTTP client type, which may provide a download writer.</typeparam>
+/// <typeparam name="TTask">The callable type of the task.</typeparam>
+/// <param name="httpClient">The HTTP client whose download writer runs the task when no scheduler is given.</param>
+/// <param name="scheduler">The caller's scheduler, preferred over the HTTP client's writer when set.</param>
+/// <param name="task">The blocking work to run.</param>
+/// <exception cref="std::system_error">
+/// Thrown with std::errc::operation_not_supported for a transport with neither a scheduler nor a download writer.
+/// </exception>
+/// <exception cref="boost::system::system_error">Thrown with operation_aborted when canceled before the task
+/// started.</exception>
+/// <remarks>Whatever the task throws is rethrown.</remarks>
 template <class THttp, class TTask>
 boost::asio::awaitable<void> RunOnWriter(THttp& httpClient, const std::optional<DownloadWriteScheduler>& scheduler,
                                          TTask task) {
@@ -119,12 +131,21 @@ boost::asio::awaitable<void> RunOnWriter(THttp& httpClient, const std::optional<
                                 "The HTTP client has no download writer and no write scheduler was supplied.");
     }
 }
+/// <summary>The default parallel download chunk size, shared with <see cref="BlobTransferLimits"/>.</summary>
 inline constexpr std::size_t DefaultDownloadChunkSize = BlobTransferLimits::DefaultDownloadChunkSize;
+/// <summary>The headroom added to a request's response body limit, shared with
+/// <see cref="BlobTransferLimits"/>.</summary>
 inline constexpr std::uint64_t ResponseBodySlack = BlobTransferLimits::ResponseBodySlack;
+/// <summary>The cap on buffered download bytes, shared with <see cref="BlobTransferLimits"/>.</summary>
 inline constexpr std::uint64_t MaxBufferedDownloadBytes = BlobTransferLimits::MaxBufferedDownloadBytes;
 
-// Range-end arithmetic must never wrap: a wrapped end would make the download look complete or place data at the
-// wrong offset.
+/// <summary>
+/// Range-end arithmetic must never wrap: a wrapped end would make the download look complete or place data at the
+/// wrong offset.
+/// </summary>
+/// <param name="lhs">The first addend.</param>
+/// <param name="rhs">The second addend.</param>
+/// <returns>The sum, or nothing when it does not fit in 64 bits.</returns>
 [[nodiscard]] constexpr std::optional<std::uint64_t> CheckedAdd(std::uint64_t lhs, std::uint64_t rhs) noexcept {
     if (rhs > std::numeric_limits<std::uint64_t>::max() - lhs) {
         return std::nullopt;
@@ -132,18 +153,36 @@ inline constexpr std::uint64_t MaxBufferedDownloadBytes = BlobTransferLimits::Ma
     return lhs + rhs;
 }
 
+/// <summary>Builds a client-side failure from a standard error condition.</summary>
+/// <param name="error">The condition to report.</param>
+/// <param name="message">Detail for the failure; may be empty.</param>
+/// <returns>The failure carrying the matching error code.</returns>
 [[nodiscard]] BlobStorageError MakeFailure(std::errc error, std::string message = {});
 
-// Preserves the real error category so operational failures (disk full, permission denied)
-// are not reported as caller input errors.
+/// <summary>
+/// Preserves the real error category so operational failures (disk full, permission denied)
+/// are not reported as caller input errors.
+/// </summary>
+/// <param name="error">The error code to report unchanged.</param>
+/// <param name="message">Detail for the failure.</param>
+/// <returns>The failure carrying <paramref name="error"/>.</returns>
 [[nodiscard]] BlobStorageError MakeFailure(std::error_code error, std::string message);
 
-// errno is the only cause a failed stream open exposes.
+/// <summary>errno is the only cause a failed stream open exposes.</summary>
+/// <returns>The error code for the current errno, or an I/O error when errno is zero.</returns>
 [[nodiscard]] std::error_code LastOpenError() noexcept;
 
+/// <summary>Builds the failure for a response the service sent that cannot be a valid answer to the request.</summary>
+/// <param name="message">Detail for the failure.</param>
+/// <returns>The failure carrying the InvalidResponse error code.</returns>
 [[nodiscard]] BlobStorageError MakeInvalidResponse(std::string message);
 
-// A sink may throw anything; an exception must never unwind into the event loop, so it counts as a failed write.
+/// <summary>
+/// A sink may throw anything; an exception must never unwind into the event loop, so it counts as a failed write.
+/// </summary>
+/// <param name="sink">The sink to write to.</param>
+/// <param name="data">The chunk to write.</param>
+/// <returns>The sink's outcome, or Failed when it threw.</returns>
 [[nodiscard]] inline WriteOutcome TryWrite(DownloadSinkLike auto& sink, std::string data) noexcept {
     try {
         return sink.Write(std::move(data));
@@ -152,10 +191,18 @@ inline constexpr std::uint64_t MaxBufferedDownloadBytes = BlobTransferLimits::Ma
     }
 }
 
+/// <summary>Classifies the outcome of a request as a failure.</summary>
+/// <param name="error">The transport error of the request, if any.</param>
+/// <param name="response">The response received, consulted for the service's error status.</param>
+/// <returns>The failure to report, or nothing when the request succeeded.</returns>
 [[nodiscard]] std::optional<BlobStorageError> ToFailure(std::error_code error, const HttpResponse& response);
 
+/// <summary>Moves the body out of a response, leaving its headers in place.</summary>
+/// <param name="response">The response whose body is taken.</param>
+/// <returns>The body.</returns>
 [[nodiscard]] std::string TakeBody(HttpResponse& response);
 
+/// <summary>What a finished download reports.</summary>
 struct DownloadSummary {
     HttpResponse FirstResponse; // headers of the first response; its body has been consumed
     Models::BlobProperties Properties;
@@ -163,31 +210,52 @@ struct DownloadSummary {
     std::optional<Models::BlobByteRange> ContentRange;
 };
 
+/// <summary>The summary of a download, or the failure that ended it.</summary>
 using SummaryResult = std::expected<DownloadSummary, BlobStorageError>;
 
+/// <summary>A download's result together with the sink it wrote to, which the caller takes back.</summary>
+/// <typeparam name="TSink">The sink type the download wrote to.</typeparam>
 template <DownloadSinkLike TSink> struct DownloadOutcome {
     SummaryResult Result;
     TSink Sink;
 };
 
-// Thrown by a chunk worker once the download's failure is recorded, so the parallel group cancels its siblings.
+/// <summary>Thrown by a chunk worker once the download's failure is recorded, so the parallel group cancels its
+/// siblings.</summary>
 struct StopWorkers {};
 
+/// <summary>Builds the failure reported when the caller cancels a download.</summary>
+/// <returns>An operation_canceled failure.</returns>
 [[nodiscard]] inline BlobStorageError CanceledFailure() {
     return MakeFailure(std::errc::operation_canceled, "The operation was canceled.");
 }
 
-// One download (to a stream, file, or memory). The first ranged GET (run by the owning coroutine) learns the blob
-// size and ETag; the rest is fetched in ChunkSize ranges by up to Concurrency worker coroutines. Each worker claims the
-// next range, fetches it, waits until every earlier range has been written, then writes its own, so data reaches the
-// sink strictly in order and at most Concurrency chunks are buffered. Later chunks carry If-Match: <first ETag> so a
-// concurrent overwrite fails instead of tearing.
-//
-// The workers run on one strand, so their shared state needs no lock. They are awaited as a parallel group: the first
-// failure (or a cancellation of the awaiting coroutine) cancels the others, and the group completes only after all of
-// them have, so no worker outlives the owning coroutine that holds this object.
+/// <summary>
+/// One download (to a stream, file, or memory). The first ranged GET (run by the owning coroutine) learns the blob
+/// size and ETag; the rest is fetched in ChunkSize ranges by up to Concurrency worker coroutines. Each worker claims
+/// the
+/// next range, fetches it, waits until every earlier range has been written, then writes its own, so data reaches the
+/// sink strictly in order and at most Concurrency chunks are buffered. Later chunks carry If-Match: &lt;first ETag&gt;
+/// so a
+/// concurrent overwrite fails instead of tearing.
+///
+/// The workers run on one strand, so their shared state needs no lock. They are awaited as a parallel group: the first
+/// failure (or a cancellation of the awaiting coroutine) cancels the others, and the group completes only after all of
+/// them have, so no worker outlives the owning coroutine that holds this object.
+/// </summary>
+/// <typeparam name="THttp">The HTTP client type the requests are sent through.</typeparam>
+/// <typeparam name="TCred">The credential type the blob target authorizes with.</typeparam>
+/// <typeparam name="TSink">The sink type the data is written to.</typeparam>
 template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class DownloadEngine final {
   public:
+    /// <summary>Prepares a download; the HTTP client and target are borrowed and must outlive the engine.</summary>
+    /// <param name="httpClient">The HTTP client to send the requests through.</param>
+    /// <param name="target">The blob to download.</param>
+    /// <param name="options">The range, conditions, chunking and limits of the download.</param>
+    /// <param name="requestOptions">The options every request starts from; their total deadline covers the whole
+    /// download.</param>
+    /// <param name="sink">The destination the data is written to.</param>
+    /// <param name="start">When the download's total deadline budget began.</param>
     DownloadEngine(THttp& httpClient, const BasicBlobTarget<TCred>& target, DownloadToOptions options,
                    AzureRequestOptions requestOptions, TSink sink, std::chrono::steady_clock::time_point start)
         : m_httpClient(httpClient), m_target(target), m_options(std::move(options)),
@@ -196,6 +264,8 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
           m_concurrency(std::min(std::max<std::size_t>(1U, m_options.Concurrency),
                                  std::max<std::size_t>(1U, MaxBufferedDownloadBytes / m_chunkSize))) {}
 
+    /// <summary>Runs the download to completion; failures are returned in the outcome rather than thrown.</summary>
+    /// <returns>The download's result together with the sink, which is handed back to the caller.</returns>
     boost::asio::awaitable<DownloadOutcome<TSink>> Run() {
         const auto executor = co_await boost::asio::this_coro::executor;
 
@@ -216,9 +286,15 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
     }
 
   private:
+    /// <summary>
+    /// The purpose of a GET, which decides whether it carries a Range header. <c>Probe</c> is the first ranged GET,
+    /// which learns the blob's size and ETag; <c>Full</c> is the un-ranged GET that follows a probe that found the
+    /// blob empty; <c>Chunk</c> is a ranged GET for one of the remaining chunks.
+    /// </summary>
     enum class RequestKind : std::uint8_t { Probe, Full, Chunk };
 
-    // Records the first failure; later ones are consequences (cancelled siblings) and are dropped.
+    /// <summary>Records the first failure; later ones are consequences (cancelled siblings) and are dropped.</summary>
+    /// <param name="error">The failure to record.</param>
     void Fail(BlobStorageError error) {
         if (!m_failure.has_value()) {
             m_failure = std::move(error);
@@ -228,6 +304,10 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
         }
     }
 
+    /// <summary>
+    /// Validates the requested range, then runs the probe and, for an empty blob, the un-ranged GET. Failures are
+    /// recorded rather than thrown.
+    /// </summary>
     boost::asio::awaitable<void> RunFirstRequest() {
         m_begin = m_options.Range.has_value() ? m_options.Range->Offset : 0U;
         if (m_options.Range.has_value() && m_options.Range->Length.has_value()) {
@@ -253,8 +333,15 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
         }
     }
 
-    // Sends one GET and returns its transport outcome. Empty means the request could not even be built (or the budget
-    // is spent) and the failure is recorded.
+    /// <summary>
+    /// Sends one GET and returns its transport outcome. Empty means the request could not even be built (or the budget
+    /// is spent) and the failure is recorded.
+    /// </summary>
+    /// <param name="kind">The purpose of the request; a full fetch carries no Range header.</param>
+    /// <param name="offset">The first byte of the range.</param>
+    /// <param name="length">The length of the range; the response body limit is sized from it.</param>
+    /// <param name="conditions">The conditions the request is made conditional on.</param>
+    /// <returns>The transport outcome, or nothing when no request was sent.</returns>
     boost::asio::awaitable<std::optional<HttpResult>> Fetch(RequestKind kind, std::uint64_t offset,
                                                             std::uint64_t length,
                                                             const Models::BlobRequestConditions& conditions) {
@@ -284,6 +371,10 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
         co_return co_await SendAuthorizedRequest(m_httpClient, m_target, std::move(request), std::move(requestOptions));
     }
 
+    /// <summary>Separates a transport outcome into the error and the response, so both can be inspected
+    /// uniformly.</summary>
+    /// <param name="sent">The transport outcome.</param>
+    /// <returns>The error (empty on success) and the response (empty on a transport error).</returns>
     static std::pair<std::error_code, HttpResponse> Split(HttpResult sent) {
         if (sent) {
             return {std::error_code{}, std::move(*sent)};
@@ -291,6 +382,9 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
         return {sent.error(), HttpResponse{}};
     }
 
+    /// <summary>Takes the blob's properties and ETag from the first response; failures are recorded.</summary>
+    /// <param name="response">The first successful response.</param>
+    /// <returns>Invalid when the headers could not be parsed.</returns>
     [[nodiscard]] Validity CaptureFirstResponse(HttpResponse& response) {
         try {
             m_summary.Properties = ParseBlobProperties(response);
@@ -302,7 +396,12 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
         return Validity::Valid;
     }
 
-    // FullFetch::Needed when the blob turned out to be empty and one un-ranged GET must follow.
+    /// <summary>
+    /// Checks the probe response, learns the blob's extent, and writes the first chunk. Failures are recorded.
+    /// </summary>
+    /// <param name="sent">The transport outcome of the probe.</param>
+    /// <param name="probeLength">The length that was asked for.</param>
+    /// <returns>FullFetch::Needed when the blob turned out to be empty and one un-ranged GET must follow.</returns>
     boost::asio::awaitable<FullFetch> OnProbe(HttpResult sent, std::uint64_t probeLength) {
         auto [error, response] = Split(std::move(sent));
         // A 0-byte blob rejects any range with 416; fall back to one un-ranged GET. That is only
@@ -410,6 +509,8 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
         co_return FullFetch::NotNeeded;
     }
 
+    /// <summary>Checks the un-ranged response for an empty blob and writes its body. Failures are recorded.</summary>
+    /// <param name="sent">The transport outcome of the un-ranged GET.</param>
     boost::asio::awaitable<void> OnFull(HttpResult sent) {
         auto [error, response] = Split(std::move(sent));
         if (auto failure = ToFailure(error, response); failure.has_value()) {
@@ -432,7 +533,9 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
         static_cast<void>(co_await WriteBody(std::move(body)));
     }
 
-    // Fails the download when `size` is over the caller's limit.
+    /// <summary>Fails the download when <paramref name="size"/> is over the caller's limit.</summary>
+    /// <param name="size">The number of bytes the download would write.</param>
+    /// <returns>Exceeded when the limit was passed, in which case the failure is recorded.</returns>
     [[nodiscard]] SizeLimit ExceedsMaxSize(std::uint64_t size) {
         if (!m_options.MaxSize.has_value() || size <= *m_options.MaxSize) {
             return SizeLimit::Within;
@@ -441,7 +544,13 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
         return SizeLimit::Exceeded;
     }
 
-    // Checks a chunk response against the range that was asked for; Invalid means the failure is recorded.
+    /// <summary>Checks a chunk response against the range that was asked for; Invalid means the failure is
+    /// recorded.</summary>
+    /// <param name="sent">The transport outcome of the chunk request.</param>
+    /// <param name="offset">The first byte that was asked for.</param>
+    /// <param name="length">The number of bytes that were asked for.</param>
+    /// <param name="body">Receives the response body.</param>
+    /// <returns>Valid when the response is exactly the requested range.</returns>
     [[nodiscard]] Validity ValidateChunk(HttpResult sent, std::uint64_t offset, std::uint64_t length,
                                          std::string& body) {
         auto [error, response] = Split(std::move(sent));
@@ -470,9 +579,13 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
         return Validity::Valid;
     }
 
-    // Sinks that block on the disk are written from the writer scheduler (see RunOnWriter) so a slow write never
-    // stalls the I/O thread that is also servicing every other connection. Only the worker whose turn it is writes, so
-    // the sink is never used concurrently and receives data in offset order.
+    /// <summary>
+    /// Sinks that block on the disk are written from the writer scheduler (see RunOnWriter) so a slow write never
+    /// stalls the I/O thread that is also servicing every other connection. Only the worker whose turn it is writes, so
+    /// the sink is never used concurrently and receives data in offset order.
+    /// </summary>
+    /// <param name="data">The next chunk, in offset order.</param>
+    /// <returns>Failed when the write failed, in which case the failure is recorded.</returns>
     boost::asio::awaitable<WriteOutcome> WriteBody(std::string data) {
         const std::size_t size = data.size();
         WriteOutcome outcome = WriteOutcome::Failed;
@@ -495,6 +608,11 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
         co_return WriteOutcome::Written;
     }
 
+    /// <summary>
+    /// Claims, fetches and writes chunks until none is left or the download has failed.
+    /// </summary>
+    /// <exception cref="StopWorkers">Thrown once a failure has been recorded, to cancel the sibling
+    /// workers.</exception>
     boost::asio::awaitable<void> Worker() {
         try {
             for (;;) {
@@ -535,6 +653,8 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
         }
     }
 
+    /// <summary>Runs the chunk workers as a parallel group and waits for all of them.</summary>
+    /// <param name="executor">The executor the workers' strand is built on.</param>
     boost::asio::awaitable<void> RunWorkers(const boost::asio::any_io_executor& executor) {
         const auto strand = boost::asio::make_strand(executor);
         m_turn.emplace(strand);
@@ -557,6 +677,8 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
         m_turn.reset();
     }
 
+    /// <summary>Checks that everything arrived in time and builds the outcome.</summary>
+    /// <returns>The recorded failure if there is one, otherwise the summary of what was written.</returns>
     [[nodiscard]] SummaryResult Finish() {
         if (!m_failure.has_value() && (!m_end.has_value() || *m_end < m_begin || m_written != *m_end - m_begin)) {
             Fail(MakeInvalidResponse("The download ended before all data was received."));
@@ -599,9 +721,25 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
     DownloadSummary m_summary;
 };
 
+/// <summary>Converts a finished download's summary into the response returned to the caller.</summary>
+/// <param name="summary">The summary of the download.</param>
+/// <returns>The response carrying the result and the first HTTP response.</returns>
 [[nodiscard]] Response<Models::DownloadBlobToResult> ToDownloadToResponse(DownloadSummary summary);
 
-// The engine's state lives in this coroutine's frame, which is why the arguments are taken by value.
+/// <summary>
+/// The engine's state lives in this coroutine's frame, which is why the arguments are taken by value.
+/// </summary>
+/// <typeparam name="THttp">The HTTP client type the requests are sent through.</typeparam>
+/// <typeparam name="TCred">The credential type the blob target authorizes with.</typeparam>
+/// <typeparam name="TSink">The sink type the data is written to.</typeparam>
+/// <param name="httpClient">The HTTP client to send the requests through.</param>
+/// <param name="target">The blob to download.</param>
+/// <param name="options">The range, conditions, chunking and limits of the download.</param>
+/// <param name="sink">The destination the data is written to.</param>
+/// <param name="requestOptions">The options every request starts from; their total deadline covers the whole
+/// download.</param>
+/// <param name="start">When the total deadline budget began; defaults to now.</param>
+/// <returns>The download's result together with the sink.</returns>
 template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink>
 boost::asio::awaitable<DownloadOutcome<TSink>>
 RunDownload(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> target, DownloadToOptions options,
@@ -612,13 +750,24 @@ RunDownload(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> tar
     co_return co_await engine.Run();
 }
 
-// Closes the temporary file and, on success, renames it over `target`; any failure removes the temporary file.
+/// <summary>Closes the temporary file and, on success, renames it over <paramref name="target"/>; any failure removes
+/// the temporary file.</summary>
+/// <param name="file">The stream of the temporary file.</param>
+/// <param name="tempPath">The temporary file the data was written to.</param>
+/// <param name="target">The destination to publish the file to.</param>
+/// <param name="result">The result of the download.</param>
+/// <returns>The response on success, otherwise the download's failure or the one that closing or renaming
+/// caused.</returns>
 [[nodiscard]] std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>
 FinalizeFileDownload(std::ofstream& file, const std::filesystem::path& tempPath, const std::filesystem::path& target,
                      SummaryResult result);
 
+/// <summary>The response of a download to a file, or the failure that ended it.</summary>
 using FileResult = std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>;
 
+/// <summary>Converts the exception being handled into a failure.</summary>
+/// <returns>The failure for the current exception, or an out-of-memory failure when even that could not be
+/// built.</returns>
 [[nodiscard]] inline BlobStorageError CurrentFailure() {
     try {
         return MakeFailureFromCurrentException();
@@ -627,7 +776,11 @@ using FileResult = std::expected<Response<Models::DownloadBlobToResult>, BlobSto
     }
 }
 
-// Removes the temporary file (if any) and reports `error`. Blocks on the disk, so it runs on a writer thread.
+/// <summary>Removes the temporary file (if any) and reports <paramref name="error"/>. Blocks on the disk, so it runs on
+/// a writer thread.</summary>
+/// <param name="tempPath">The temporary file to remove; may be empty.</param>
+/// <param name="error">The failure to report.</param>
+/// <returns>A result holding <paramref name="error"/>.</returns>
 inline FileResult AbandonFileDownload(const std::filesystem::path& tempPath, BlobStorageError error) noexcept {
     if (!tempPath.empty()) {
         std::error_code ignored;
@@ -637,7 +790,15 @@ inline FileResult AbandonFileDownload(const std::filesystem::path& tempPath, Blo
 }
 } // namespace DownloadDetail
 
-// Downloads the blob into memory. See DownloadBlobToSpanAsync for the transfer behavior.
+/// <summary>Downloads the blob into memory. See <see cref="DownloadBlobToSpanAsync"/> for the transfer
+/// behavior.</summary>
+/// <typeparam name="THttp">The HTTP client type the requests are sent through.</typeparam>
+/// <typeparam name="TCred">The credential type the blob target authorizes with.</typeparam>
+/// <param name="httpClient">The HTTP client to send the requests through.</param>
+/// <param name="options">The blob to download.</param>
+/// <param name="operationOptions">The range, conditions, chunking and limits of the download.</param>
+/// <param name="requestOptions">The options every request starts from.</param>
+/// <returns>The content and properties, or the failure; failures are returned rather than thrown.</returns>
 template <HttpClientLike THttp, class TCred>
 boost::asio::awaitable<std::expected<Response<Models::DownloadBlobResult>, BlobStorageError>>
 DownloadBlobAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
@@ -656,6 +817,17 @@ DownloadBlobAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred
                                                    std::nullopt};
 }
 
+/// <summary>
+/// Downloads the blob into a caller-owned buffer, in parallel ranged chunks written in offset order.
+/// </summary>
+/// <typeparam name="THttp">The HTTP client type the requests are sent through.</typeparam>
+/// <typeparam name="TCred">The credential type the blob target authorizes with.</typeparam>
+/// <param name="httpClient">The HTTP client to send the requests through.</param>
+/// <param name="options">The blob to download.</param>
+/// <param name="operationOptions">The range, conditions, chunking and limits of the download.</param>
+/// <param name="destination">The buffer to copy into; a download larger than it fails.</param>
+/// <param name="requestOptions">The options every request starts from.</param>
+/// <returns>The bytes written and properties, or the failure; failures are returned rather than thrown.</returns>
 template <HttpClientLike THttp, class TCred>
 boost::asio::awaitable<std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>>
 DownloadBlobToSpanAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,
@@ -669,10 +841,21 @@ DownloadBlobToSpanAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget
     co_return DownloadDetail::ToDownloadToResponse(std::move(*outcome.Result));
 }
 
-// Every blocking filesystem call (directory check, open, close, rename, remove) runs on the write scheduler (see
-// RunOnWriter), never on the thread that runs the coroutine. The download goes to a sibling temporary file that is
-// renamed over `path` only on success, so a failed download never leaves a truncated target behind. A cancellation
-// that arrives before the rename removes the temporary file; the rename is the commit point.
+/// <summary>
+/// Every blocking filesystem call (directory check, open, close, rename, remove) runs on the write scheduler (see
+/// RunOnWriter), never on the thread that runs the coroutine. The download goes to a sibling temporary file that is
+/// renamed over <paramref name="path"/> only on success, so a failed download never leaves a truncated target behind. A
+/// cancellation that arrives before the rename removes the temporary file; the rename is the commit point.
+/// </summary>
+/// <typeparam name="THttp">The HTTP client type the requests are sent through.</typeparam>
+/// <typeparam name="TCred">The credential type the blob target authorizes with.</typeparam>
+/// <param name="httpClient">The HTTP client to send the requests through.</param>
+/// <param name="options">The blob to download.</param>
+/// <param name="operationOptions">The range, conditions, chunking, limits and write scheduler of the download.</param>
+/// <param name="path">The file to publish the download to.</param>
+/// <param name="requestOptions">The options every request starts from; their total deadline also covers the file
+/// work.</param>
+/// <returns>The bytes written and properties, or the failure; failures are returned rather than thrown.</returns>
 template <HttpClientLike THttp, class TCred>
 boost::asio::awaitable<std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>>
 DownloadBlobToFileAsync(THttp& httpClient, std::shared_ptr<const BasicBlobTarget<TCred>> options,

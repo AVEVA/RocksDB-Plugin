@@ -17,6 +17,9 @@ namespace AVEVA::AzureClient::Private {
 /// </summary>
 class AggregateDeadline {
   public:
+    /// <summary>
+    /// Starts the budget from the total deadline in the caller's options; without one, nothing is limited.
+    /// </summary>
     /// <param name="options">The caller's options; their total deadline, if any, is the budget.</param>
     /// <param name="start">When the budget began; defaults to now.</param>
     explicit AggregateDeadline(const AzureRequestOptions& options, std::chrono::steady_clock::time_point start =
@@ -47,6 +50,7 @@ class AggregateDeadline {
     /// Whether the budget is spent; used for work that cannot be interrupted, such as the last disk write, to decide
     /// whether an otherwise successful operation may still be reported as one.
     /// </summary>
+    /// <returns>Expired once the end has been reached; always Open when there is no budget.</returns>
     [[nodiscard]] DeadlineState State() const noexcept {
         return m_end.has_value() && std::chrono::steady_clock::now() >= *m_end ? DeadlineState::Expired
                                                                                : DeadlineState::Open;

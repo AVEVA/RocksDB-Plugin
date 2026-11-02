@@ -36,35 +36,63 @@
 #include <vector>
 
 namespace AVEVA::AzureClient {
+/// <summary>
+/// How long before expiry a cached token starts being refreshed.
+/// </summary>
 inline constexpr std::chrono::seconds DefaultTokenCredentialRefreshWindow{300};
+
+/// <summary>
+/// How long a still-valid cached token is reused after a failed refresh before another refresh is attempted.
+/// </summary>
 inline constexpr std::chrono::seconds DefaultTokenCredentialFailedRefreshBackoff{30};
-// After a failed acquisition with no usable token, the same failure is reported for this long without
-// calling the inner credential again, so a failing identity provider is not hammered by every request.
+
+/// <summary>
+/// After a failed acquisition with no usable token, the same failure is reported for this long without
+/// calling the inner credential again, so a failing identity provider is not hammered by every request.
+/// </summary>
 inline constexpr std::chrono::seconds DefaultTokenCredentialNegativeCacheWindow{5};
 
+/// <summary>
+/// A bearer token together with the moment it stops being valid.
+/// </summary>
 struct AccessToken {
+    /// <summary>The token text.</summary>
     std::string Token;
+    /// <summary>When the token expires; the maximum time point when it never does.</summary>
     std::chrono::system_clock::time_point ExpiresOn = std::chrono::system_clock::time_point::max();
 };
 
-// The outcome of every token acquisition. Every configuration, transport and parsing failure is reported as a
-// non-zero std::error_code; an acquisition does not throw for such failures.
+/// <summary>
+/// The outcome of every token acquisition. Every configuration, transport and parsing failure is reported as a
+/// non-zero std::error_code; an acquisition does not throw for such failures.
+/// </summary>
 using TokenResult = std::expected<AccessToken, std::error_code>;
 
-// A scope list shared between calls, so callers that ask for the same scopes on every request (and caches
-// that only compare them) need not copy the strings.
+/// <summary>
+/// A scope list shared between calls, so callers that ask for the same scopes on every request (and caches
+/// that only compare them) need not copy the strings.
+/// </summary>
 using ScopeList = std::shared_ptr<const std::vector<std::string>>;
 
-// A token credential is any type with
-//   boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> scopes)
-// A credential may additionally provide `awaitable<TokenResult> GetTokenForScopesAsync(ScopeList)`, which the
-// clients prefer because it avoids copying the scope list on every request.
+/// <summary>
+/// A token credential is any type with
+/// <c>boost::asio::awaitable&lt;TokenResult&gt; GetTokenAsync(std::vector&lt;std::string&gt; scopes)</c>.
+/// A credential may additionally provide <c>awaitable&lt;TokenResult&gt; GetTokenForScopesAsync(ScopeList)</c>,
+/// which the clients prefer because it avoids copying the scope list on every request.
+/// </summary>
+/// <typeparam name="T">The type to test.</typeparam>
 template <class T>
 concept TokenCredentialLike = requires(T& credential, std::vector<std::string> scopes) {
     { credential.GetTokenAsync(std::move(scopes)) } -> std::same_as<boost::asio::awaitable<TokenResult>>;
 };
 
-// Requests a token for `scopes` through the shared-scope overload when the credential has one.
+/// <summary>
+/// Requests a token for <paramref name="scopes"/> through the shared-scope overload when the credential has one.
+/// </summary>
+/// <typeparam name="TCred">The credential type.</typeparam>
+/// <param name="credential">The credential to ask.</param>
+/// <param name="scopes">The scopes the token must cover; null is treated as empty.</param>
+/// <returns>The credential's result.</returns>
 template <TokenCredentialLike TCred>
 [[nodiscard]] boost::asio::awaitable<TokenResult> GetTokenForScopes(TCred& credential, ScopeList scopes) {
     if constexpr (requires { credential.GetTokenForScopesAsync(scopes); }) {
@@ -74,59 +102,101 @@ template <TokenCredentialLike TCred>
     }
 }
 
-// The credential of clients that are not given one: every request fails with std::errc::operation_not_permitted.
-// Clients authorized by SAS or Shared Key use it as their TCred.
+/// <summary>
+/// The credential of clients that are not given one: every request fails with std::errc::operation_not_permitted.
+/// Clients authorized by SAS or Shared Key use it as their TCred.
+/// </summary>
 class NoTokenCredential {
   public:
+    /// <summary>
+    /// Always fails, because there is no credential to ask.
+    /// </summary>
+    /// <param name="scopes">Ignored.</param>
+    /// <returns>An error of <c>std::errc::operation_not_permitted</c>.</returns>
     [[nodiscard]] boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> /*scopes*/) {
         co_return std::unexpected(std::make_error_code(std::errc::operation_not_permitted));
     }
 };
 
-// "Now" for expiry, refresh-window and backoff decisions of CachingTokenCredential.
+/// <summary>
+/// "Now" for expiry, refresh-window and backoff decisions of <c>CachingTokenCredential</c>.
+/// </summary>
 struct SystemTokenClock {
+    /// <summary>
+    /// Reads the system clock.
+    /// </summary>
+    /// <returns>The current time.</returns>
     [[nodiscard]] std::chrono::system_clock::time_point operator()() const noexcept {
         return std::chrono::system_clock::now();
     }
 };
 
+/// <summary>
+/// A clock is any callable that returns a <c>std::chrono::system_clock::time_point</c>; tests substitute their own.
+/// </summary>
+/// <typeparam name="T">The type to test.</typeparam>
 template <class T>
 concept TokenClockLike =
     std::invocable<T&> && std::convertible_to<std::invoke_result_t<T&>, std::chrono::system_clock::time_point>;
 
-// Caches the inner credential's token. The cache holds one token keyed by the exact (ordered) scope
-// list; a request with different scopes does not reuse it. A refresh starts once less than
-// `refreshWindow` remains before expiry (the stale-but-valid token is served meanwhile), concurrent
-// requests for the same scopes coalesce into a single inner request, and after a failed refresh of a
-// still-valid token the cached token is reused for DefaultTokenCredentialFailedRefreshBackoff (30 s)
-// before another refresh is attempted. When there is no valid token at all, a failure is remembered for
-// DefaultTokenCredentialNegativeCacheWindow (5 s) and returned without calling the inner credential.
-//
-// Thread safety: GetTokenAsync may be called concurrently from several threads; internal state is
-// mutex-protected. The first caller without a usable token performs the inner request inside its own
-// coroutine and the others wait for its outcome; a background refresh runs as a detached coroutine on the
-// executor of the caller that triggered it. If the leading caller is cancelled, the waiters ask again.
+/// <summary>
+/// Caches the inner credential's token. The cache holds one token keyed by the exact (ordered) scope
+/// list; a request with different scopes does not reuse it. A refresh starts once less than
+/// <c>refreshWindow</c> remains before expiry (the stale-but-valid token is served meanwhile), concurrent
+/// requests for the same scopes coalesce into a single inner request, and after a failed refresh of a
+/// still-valid token the cached token is reused for <c>DefaultTokenCredentialFailedRefreshBackoff</c> (30 s)
+/// before another refresh is attempted. When there is no valid token at all, a failure is remembered for
+/// <c>DefaultTokenCredentialNegativeCacheWindow</c> (5 s) and returned without calling the inner credential.
+///
+/// Thread safety: <c>GetTokenAsync</c> may be called concurrently from several threads; internal state is
+/// mutex-protected. The first caller without a usable token performs the inner request inside its own
+/// coroutine and the others wait for its outcome; a background refresh runs as a detached coroutine on the
+/// executor of the caller that triggered it. If the leading caller is cancelled, the waiters ask again.
+/// </summary>
+/// <typeparam name="TInner">The credential whose tokens are cached.</typeparam>
+/// <typeparam name="TClock">The clock used for expiry and backoff decisions.</typeparam>
 template <TokenCredentialLike TInner, TokenClockLike TClock = SystemTokenClock>
 class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenCredential<TInner, TClock>> {
-    // Keeps the constructor unusable outside Create while still allowing std::make_shared.
+    /// <summary>
+    /// Keeps the constructor unusable outside Create while still allowing std::make_shared.
+    /// </summary>
     struct CreateKey {
         explicit CreateKey() = default;
     };
-    // Waiters of one refresh; erased because callers resume on their own executors. Completed with an
-    // error_code so a cancelled wait can be told apart from a normal completion (see WaitFor).
+    /// <summary>
+    /// Waiters of one refresh; erased because callers resume on their own executors. Completed with an
+    /// error_code so a cancelled wait can be told apart from a normal completion (see <c>WaitFor</c>).
+    /// </summary>
     using Waiter = boost::asio::any_completion_handler<void(boost::system::error_code)>;
-    // Identifies one waiter registration in RefreshState::Waiters so a cancellation can find and remove
-    // exactly that entry; the type-erased Waiter itself cannot be compared or inspected once stored.
+    /// <summary>
+    /// Identifies one waiter registration in <c>RefreshState::Waiters</c> so a cancellation can find and remove
+    /// exactly that entry; the type-erased Waiter itself cannot be compared or inspected once stored.
+    /// </summary>
     using WaiterId = std::shared_ptr<void>;
 
   public:
-    // The cache relies on shared ownership, so instances can only be created through this factory.
+    /// <summary>
+    /// The cache relies on shared ownership, so instances can only be created through this factory.
+    /// </summary>
+    /// <param name="inner">The credential to cache.</param>
+    /// <param name="refreshWindow">How long before expiry a refresh starts.</param>
+    /// <param name="clock">The clock to read the time from.</param>
+    /// <returns>The new cache.</returns>
+    /// <exception cref="std::invalid_argument">Thrown when <paramref name="refreshWindow"/> is negative.</exception>
     [[nodiscard]] static std::shared_ptr<CachingTokenCredential>
     Create(std::shared_ptr<TInner> inner, std::chrono::seconds refreshWindow = DefaultTokenCredentialRefreshWindow,
            TClock clock = {}) {
         return std::make_shared<CachingTokenCredential>(CreateKey{}, std::move(inner), refreshWindow, std::move(clock));
     }
 
+    /// <summary>
+    /// Builds the cache; reachable only through <c>Create</c>.
+    /// </summary>
+    /// <param name="key">Proof that the call came from <c>Create</c>.</param>
+    /// <param name="inner">The credential to cache.</param>
+    /// <param name="refreshWindow">How long before expiry a refresh starts.</param>
+    /// <param name="clock">The clock to read the time from.</param>
+    /// <exception cref="std::invalid_argument">Thrown when <paramref name="refreshWindow"/> is negative.</exception>
     CachingTokenCredential(CreateKey, std::shared_ptr<TInner> inner, std::chrono::seconds refreshWindow, TClock clock)
         : m_inner(std::move(inner)), m_refreshWindow(refreshWindow), m_clock(std::move(clock)) {
         // A negative window makes every token look about to expire, so each request would start a refresh.
@@ -135,11 +205,20 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         }
     }
 
+    /// <summary>
+    /// Serves the token from the cache, refreshing it from the inner credential when needed.
+    /// </summary>
+    /// <param name="scopes">The scopes the token must cover.</param>
+    /// <returns>The cached or freshly acquired token, or the inner credential's failure.</returns>
     [[nodiscard]] boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> scopes) {
         co_return co_await GetTokenForScopesAsync(std::make_shared<const std::vector<std::string>>(std::move(scopes)));
     }
 
-    // The cache-hit path compares against the shared list without copying it.
+    /// <summary>
+    /// As <c>GetTokenAsync</c>, but the cache-hit path compares against the shared list without copying it.
+    /// </summary>
+    /// <param name="scopes">The scopes the token must cover; null is treated as empty.</param>
+    /// <returns>The cached or freshly acquired token, or the inner credential's failure.</returns>
     [[nodiscard]] boost::asio::awaitable<TokenResult> GetTokenForScopesAsync(ScopeList scopes) {
         if (!scopes) {
             scopes = std::make_shared<const std::vector<std::string>>();
@@ -168,20 +247,35 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         }
     }
 
-    // Drops the cached token (and any remembered failure) for `scopes`, so the next request asks the inner
-    // credential again. Used after the service rejected the token with a 401.
+    /// <summary>
+    /// Drops the cached token (and any remembered failure) for <paramref name="scopes"/>, so the next request asks
+    /// the inner credential again. Used after the service rejected the token with a 401.
+    /// </summary>
+    /// <param name="scopes">The scopes whose entry is dropped.</param>
     void Invalidate(const ScopeList& scopes) { InvalidateIf(scopes, nullptr); }
 
-    // As above, but the cached token is dropped only while it still is `rejectedToken`. Concurrent requests that
-    // were all rejected with the same token then cause a single refresh instead of discarding each other's result.
+    /// <summary>
+    /// As above, but the cached token is dropped only while it still is <paramref name="rejectedToken"/>.
+    /// Concurrent requests that were all rejected with the same token then cause a single refresh instead of
+    /// discarding each other's result.
+    /// </summary>
+    /// <param name="scopes">The scopes whose entry is dropped.</param>
+    /// <param name="rejectedToken">The token the service rejected.</param>
     void Invalidate(const ScopeList& scopes, std::string_view rejectedToken) { InvalidateIf(scopes, &rejectedToken); }
 
   private:
+    /// <summary>Whether a refresh has published its outcome.</summary>
     enum class RefreshProgress : std::uint8_t { InFlight, Done };
+    /// <summary>Whether a caller performs a refresh itself or waits for another caller's.</summary>
     enum class RefreshRole : std::uint8_t { Follower, Leader };
+    /// <summary>Whether two scope lists hold the same scopes in the same order.</summary>
     enum class ScopeMatch : std::uint8_t { Different, Same };
+    /// <summary>Whether the cache holds a token.</summary>
     enum class CacheEntry : std::uint8_t { Empty, Filled };
 
+    /// <summary>
+    /// One in-flight refresh: the scopes it is for, its outcome once done, and the callers waiting for it.
+    /// </summary>
     struct RefreshState {
         ScopeList Scopes;
         std::mutex Mutex;
@@ -190,8 +284,10 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         RefreshProgress Progress = RefreshProgress::InFlight;
     };
 
-    // Result of consulting the cache under lock: a token or failure to serve right away (optionally alongside a
-    // background refresh to start), or a refresh to lead or to wait for.
+    /// <summary>
+    /// Result of consulting the cache under lock: a token or failure to serve right away (optionally alongside a
+    /// background refresh to start), or a refresh to lead or to wait for.
+    /// </summary>
     struct Lookup {
         std::optional<TokenResult> Immediate;
         std::shared_ptr<RefreshState> BackgroundRefresh;
@@ -199,6 +295,11 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         RefreshRole Role = RefreshRole::Follower;
     };
 
+    /// <summary>
+    /// Drops the cached token and remembered failure for the scopes, as selected by the caller's overload.
+    /// </summary>
+    /// <param name="scopes">The scopes whose entry is dropped.</param>
+    /// <param name="rejectedToken">When non-null, the cached token is dropped only if it equals this one.</param>
     void InvalidateIf(const ScopeList& scopes, const std::string_view* rejectedToken) {
         std::scoped_lock const lock(m_mutex);
         if (m_cacheEntry == CacheEntry::Filled && SameScopes(m_cachedScopes, scopes) == ScopeMatch::Same &&
@@ -212,8 +313,13 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         }
     }
 
-    // Callers normally share one list, so pointer identity answers the common case and the element-wise
-    // comparison only runs when two distinct lists are compared. A null list is an empty one.
+    /// <summary>
+    /// Callers normally share one list, so pointer identity answers the common case and the element-wise
+    /// comparison only runs when two distinct lists are compared. A null list is an empty one.
+    /// </summary>
+    /// <param name="left">The first list.</param>
+    /// <param name="right">The second list.</param>
+    /// <returns>Whether the lists hold the same scopes in the same order.</returns>
     static ScopeMatch SameScopes(const ScopeList& left, const ScopeList& right) {
         if (left == right) {
             return ScopeMatch::Same;
@@ -222,6 +328,11 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         return (left ? *left : empty) == (right ? *right : empty) ? ScopeMatch::Same : ScopeMatch::Different;
     }
 
+    /// <summary>
+    /// Registers a new in-flight refresh for the scopes. The caller must hold <c>m_mutex</c>.
+    /// </summary>
+    /// <param name="scopes">The scopes the refresh is for.</param>
+    /// <returns>The state the refresh publishes its outcome to.</returns>
     [[nodiscard]] std::shared_ptr<RefreshState> NewRefreshState(const ScopeList& scopes) {
         auto state = std::make_shared<RefreshState>();
         state->Scopes = scopes;
@@ -229,6 +340,11 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         return state;
     }
 
+    /// <summary>
+    /// Decides, under lock, whether the cache can answer the request and what refresh work it implies.
+    /// </summary>
+    /// <param name="scopes">The scopes the token must cover.</param>
+    /// <returns>What to serve immediately, and which refresh to start, lead or wait for.</returns>
     Lookup LookUp(const ScopeList& scopes) {
         std::scoped_lock const lock(m_mutex);
         const auto now = m_clock();
@@ -265,11 +381,15 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         return result;
     }
 
-    // Suspends until `state` is done; resumes inline-free through post. Cancellable: a connected
-    // cancellation slot removes this waiter from `state` (if Finish has not already claimed it) and
-    // completes it with operation_aborted, which is rethrown as a boost::system::system_error. Without
-    // this a follower bounded by `GetTokenForScopes(...) || Expire(limit)` would stay blocked until the
-    // leader's own refresh finished, past its own timeout.
+    /// <summary>
+    /// Suspends until <paramref name="state"/> is done; resumes inline-free through post. Cancellable: a connected
+    /// cancellation slot removes this waiter from <paramref name="state"/> (if Finish has not already claimed it)
+    /// and completes it with operation_aborted, which is rethrown as a boost::system::system_error. Without
+    /// this a follower bounded by <c>GetTokenForScopes(...) || Expire(limit)</c> would stay blocked until the
+    /// leader's own refresh finished, past its own timeout.
+    /// </summary>
+    /// <param name="state">The refresh to wait for.</param>
+    /// <exception cref="boost::system::system_error">Thrown when the wait is cancelled.</exception>
     static boost::asio::awaitable<void> WaitFor(std::shared_ptr<RefreshState> state) {
         auto token = boost::asio::as_tuple(boost::asio::use_awaitable);
         auto [ec] = co_await boost::asio::async_initiate<decltype(token), void(boost::system::error_code)>(
@@ -318,6 +438,11 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         }
     }
 
+    /// <summary>
+    /// Publishes a refresh's outcome and wakes every caller waiting for it.
+    /// </summary>
+    /// <param name="state">The refresh that completed.</param>
+    /// <param name="result">Its outcome.</param>
     void Finish(const std::shared_ptr<RefreshState>& state, TokenResult result) {
         {
             std::scoped_lock const lock(m_mutex);
@@ -337,7 +462,13 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         }
     }
 
-    // Asks the inner credential and publishes the outcome to the cache and to every waiter.
+    /// <summary>
+    /// Asks the inner credential and publishes the outcome to the cache and to every waiter.
+    /// </summary>
+    /// <param name="self">Keeps the cache alive while the inner request is pending.</param>
+    /// <param name="scopes">The scopes the token must cover.</param>
+    /// <param name="state">The refresh this call performs.</param>
+    /// <returns>The inner credential's result; an exception it throws is converted to an error code.</returns>
     static boost::asio::awaitable<TokenResult> Refresh(std::shared_ptr<CachingTokenCredential> self, ScopeList scopes,
                                                        std::shared_ptr<RefreshState> state) {
         TokenResult result = std::unexpected(std::make_error_code(std::errc::operation_not_permitted));
@@ -364,7 +495,12 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         co_return result;
     }
 
-    // Caching is an optimisation: a failure to publish must not prevent delivering the outcome.
+    /// <summary>
+    /// Stores a token, or remembers a failure, in the cache. Caching is an optimisation: a failure to publish must
+    /// not prevent delivering the outcome.
+    /// </summary>
+    /// <param name="scopes">The scopes the outcome is for.</param>
+    /// <param name="result">The outcome to remember; a cancellation is not remembered.</param>
     void Publish(const ScopeList& scopes, const TokenResult& result) noexcept {
         const auto now = m_clock();
         if (!result.has_value() && result.error() == std::make_error_code(std::errc::operation_canceled)) {
@@ -408,7 +544,16 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
     ScopeList m_failedScopes;
 };
 
-// Deduces the inner credential and clock types.
+/// <summary>
+/// Deduces the inner credential and clock types.
+/// </summary>
+/// <typeparam name="TInner">The credential whose tokens are cached.</typeparam>
+/// <typeparam name="TClock">The clock used for expiry and backoff decisions.</typeparam>
+/// <param name="inner">The credential to cache.</param>
+/// <param name="refreshWindow">How long before expiry a refresh starts.</param>
+/// <param name="clock">The clock to read the time from.</param>
+/// <returns>The new cache.</returns>
+/// <exception cref="std::invalid_argument">Thrown when <paramref name="refreshWindow"/> is negative.</exception>
 template <TokenCredentialLike TInner, TokenClockLike TClock = SystemTokenClock>
 [[nodiscard]] std::shared_ptr<CachingTokenCredential<TInner, TClock>>
 MakeCachingTokenCredential(std::shared_ptr<TInner> inner,
@@ -417,13 +562,20 @@ MakeCachingTokenCredential(std::shared_ptr<TInner> inner,
     return CachingTokenCredential<TInner, TClock>::Create(std::move(inner), refreshWindow, std::move(clock));
 }
 
+/// <summary>
+/// Whether a type is already a <c>CachingTokenCredential</c>.
+/// </summary>
+/// <typeparam name="T">The type to test.</typeparam>
 template <class T> struct IsCachingTokenCredential : std::false_type {};
 
 template <class TInner, class TClock>
 struct IsCachingTokenCredential<CachingTokenCredential<TInner, TClock>> : std::true_type {};
 
-// The credential a client actually uses for TCred: TCred itself when it already caches, otherwise TCred
-// wrapped in a CachingTokenCredential.
+/// <summary>
+/// The credential a client actually uses for TCred: TCred itself when it already caches, otherwise TCred
+/// wrapped in a <c>CachingTokenCredential</c>.
+/// </summary>
+/// <typeparam name="TCred">The credential type a client was given.</typeparam>
 template <TokenCredentialLike TCred>
 using CachedTokenCredential =
     std::conditional_t<IsCachingTokenCredential<TCred>::value, TCred, CachingTokenCredential<TCred>>;

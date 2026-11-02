@@ -44,59 +44,114 @@
 
 namespace AVEVA::AzureClient {
 namespace Private {
+/// <summary>
+/// Forward declaration of the immutable connection settings that a service client shares with the clients made from
+/// it.
+/// </summary>
 struct ConnectionState;
 
+/// <summary>
+/// Builds the Create Container request.
+/// </summary>
+/// <param name="target">The container to create.</param>
+/// <param name="options">The creation options.</param>
+/// <returns>The request, ready to send.</returns>
 [[nodiscard]] HttpRequest BuildCreateContainerRequest(const ContainerTarget& target,
                                                       const CreateBlobContainerOptions& options);
 } // namespace Private
 
-// Container operations, and the factory for clients of the blobs it contains.
-//
-// Every operation is a C++20 coroutine yielding std::expected<Response<T>, BlobStorageError>, e.g.
-// `co_await client.ListBlobsAsync();`. See BlobClient.hpp for the thread-safety, lifetime and cancellation
-// contract; it is the same here.
+/// <summary>
+/// Container operations, and the factory for clients of the blobs it contains.
+/// </summary>
+/// <remarks>
+/// Every operation is a C++20 coroutine yielding std::expected&lt;Response&lt;T&gt;, BlobStorageError&gt;, e.g.
+/// <c>co_await client.ListBlobsAsync();</c>. See BlobClient.hpp for the thread-safety, lifetime and cancellation
+/// contract; it is the same here.
+/// </remarks>
+/// <typeparam name="THttp">The HTTP transport the client sends its requests with.</typeparam>
+/// <typeparam name="TCred">The token credential the client authorizes with.</typeparam>
 template <HttpClientLike THttp, TokenCredentialLike TCred>
 class BasicBlobContainerClient : Private::ClientCore<THttp, Private::BasicContainerTarget<TCred>> {
     using Core = Private::ClientCore<THttp, Private::BasicContainerTarget<TCred>>;
 
   public:
+    /// <summary>The type of the blob clients this client creates.</summary>
     using PageBlobClientType = BasicPageBlobClient<THttp, TCred>;
 
+    /// <summary>
+    /// Creates a client that borrows the HTTP client.
+    /// </summary>
+    /// <param name="httpClient">The HTTP client to send requests with; it must outlive this client and everything
+    /// made from it.</param>
+    /// <param name="options">The container, endpoint and authentication settings.</param>
+    /// <param name="credential">The token credential to authorize with; null when the options carry the
+    /// authentication (SAS, Shared Key or a static bearer token).</param>
+    /// <exception cref="std::invalid_argument">Thrown when <paramref name="options"/> are invalid.</exception>
     BasicBlobContainerClient(THttp& httpClient, const BlobContainerClientOptions& options,
                              std::shared_ptr<TCred> credential = nullptr)
         : Core(httpClient, std::make_shared<const Private::BasicContainerTarget<TCred>>(
                                Private::MakeContainerTarget(options, std::move(credential)))) {}
-    // Shares ownership of the HTTP client for as long as this client or any client made from it exists. Operations
-    // already in flight borrow the HTTP client without owning it, so keep a client (or the shared_ptr) alive until they
-    // complete.
+
+    /// <summary>
+    /// Creates a client that shares ownership of the HTTP client for as long as this client or any client made from
+    /// it exists. Operations already in flight borrow the HTTP client without owning it, so keep a client (or the
+    /// shared_ptr) alive until they complete.
+    /// </summary>
+    /// <param name="httpClient">The HTTP client to send requests with.</param>
+    /// <param name="options">The container, endpoint and authentication settings.</param>
+    /// <param name="credential">The token credential to authorize with; null when the options carry the
+    /// authentication (SAS, Shared Key or a static bearer token).</param>
+    /// <exception cref="std::invalid_argument">Thrown when <paramref name="httpClient"/> is null or
+    /// <paramref name="options"/> are invalid.</exception>
     BasicBlobContainerClient(std::shared_ptr<THttp> httpClient, const BlobContainerClientOptions& options,
                              std::shared_ptr<TCred> credential = nullptr)
         : Core(std::move(httpClient), std::make_shared<const Private::BasicContainerTarget<TCred>>(
                                           Private::MakeContainerTarget(options, std::move(credential)))) {}
+    /// <summary>Not copyable: the client owns shared connection state that child clients reference.</summary>
     BasicBlobContainerClient(const BasicBlobContainerClient&) = delete;
+    /// <summary>Not copy-assignable.</summary>
     BasicBlobContainerClient& operator=(const BasicBlobContainerClient&) = delete;
+    /// <summary>Moves the client; the moved-from client must not be used.</summary>
     BasicBlobContainerClient(BasicBlobContainerClient&&) noexcept = default;
+    /// <summary>Move-assigns the client; the moved-from client must not be used.</summary>
     BasicBlobContainerClient& operator=(BasicBlobContainerClient&&) noexcept = default;
+    /// <summary>Destroys the client; clients made from it keep their own share of the connection state.</summary>
     ~BasicBlobContainerClient() = default;
 
-    // The executor associated with this client's underlying HTTP client; use it to schedule work that
-    // must run on the same executor as this client's operations.
+    /// <summary>
+    /// The executor associated with this client's underlying HTTP client; use it to schedule work that
+    /// must run on the same executor as this client's operations.
+    /// </summary>
     using executor_type = typename THttp::executor_type;
     using Core::get_executor;
     using Core::GetDefaultRequestOptions;
 
+    /// <summary>
+    /// Lists the blobs of the container, one page per call.
+    /// </summary>
+    /// <param name="options">Prefix, continuation marker, page size and metadata selection.</param>
+    /// <param name="requestOptions">Per-request options; the client's defaults apply when empty.</param>
+    /// <returns>The page of blobs, or the error that failed the request.</returns>
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::ListBlobsResult>>
     ListBlobsAsync(ListBlobsOptions options = {}, std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
         return ListBlobsImpl(*m_httpClient, m_target, std::move(options), Core::Resolve(std::move(requestOptions)));
     }
 
-    // Suppressed-error contract (applies to every *IfNotExists / *IfExists method): when the target already
-    // exists (or, for delete, is absent) the expected is engaged, Value() is default-constructed, and
-    // Response::Error() carries the suppressed service error. Any other failure arrives as
-    // `unexpected(BlobStorageError)`. Check Response::Error() before treating the call as a real success.
-    // Replay ambiguity: when a transient failure after the request was sent causes an automatic retry, the retry can
-    // find the container this very call created and report it as already existing, so an engaged Error() means
-    // "it exists", not "another caller created it".
+    /// <summary>
+    /// Creates the container unless it already exists.
+    /// </summary>
+    /// <remarks>
+    /// Suppressed-error contract (applies to every *IfNotExists / *IfExists method): when the target already
+    /// exists (or, for delete, is absent) the expected is engaged, Value() is default-constructed, and
+    /// Response::Error() carries the suppressed service error. Any other failure arrives as
+    /// <c>unexpected(BlobStorageError)</c>. Check Response::Error() before treating the call as a real success.
+    /// Replay ambiguity: when a transient failure after the request was sent causes an automatic retry, the retry can
+    /// find the container this very call created and report it as already existing, so an engaged Error() means
+    /// "it exists", not "another caller created it".
+    /// </remarks>
+    /// <param name="options">The metadata and request conditions of the new container.</param>
+    /// <param name="requestOptions">Per-request options; the client's defaults apply when empty.</param>
+    /// <returns>The ETag and last-modified time of the container, or the error that failed the request.</returns>
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::CreateBlobContainerResult>>
     CreateIfNotExistsAsync(CreateBlobContainerOptions options = {},
                            std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
@@ -104,13 +159,24 @@ class BasicBlobContainerClient : Private::ClientCore<THttp, Private::BasicContai
                                      Core::Resolve(std::move(requestOptions)));
     }
 
-    // Clients are cheap, movable values (one shared target allocation each); no heap-allocated wrapper is needed.
+    /// <summary>
+    /// Creates a client for one page blob of the container. Clients are cheap, movable values (one shared target
+    /// allocation each); no heap-allocated wrapper is needed.
+    /// </summary>
+    /// <param name="blobName">The name of the blob within the container.</param>
+    /// <returns>A page blob client that shares this client's connection state and HTTP client.</returns>
+    /// <exception cref="std::invalid_argument">Thrown when <paramref name="blobName"/> is empty.</exception>
     [[nodiscard]] PageBlobClientType GetPageBlobClient(std::string blobName) const {
         return PageBlobClientType{*m_httpClient, MakeBlobTarget(std::move(blobName)), m_httpOwner};
     }
 
-    // The ResourceUrl() that GetPageBlobClient(blobName) would report, built without constructing a client. For
-    // callers that only need the identity key of a blob, e.g. to consult a cache before paying for a client.
+    /// <summary>
+    /// The ResourceUrl() that GetPageBlobClient(blobName) would report, built without constructing a client. For
+    /// callers that only need the identity key of a blob, e.g. to consult a cache before paying for a client.
+    /// </summary>
+    /// <param name="blobName">The name of the blob within the container.</param>
+    /// <returns>The blob's URL without any query string.</returns>
+    /// <exception cref="std::invalid_argument">Thrown when <paramref name="blobName"/> is empty.</exception>
     [[nodiscard]] std::string BlobResourceUrl(std::string_view blobName) const {
         if (blobName.empty()) {
             throw std::invalid_argument("BlobName must not be empty.");
@@ -124,11 +190,17 @@ class BasicBlobContainerClient : Private::ClientCore<THttp, Private::BasicContai
         return url;
     }
 
-    // Deletes the named blobs with Blob Batch requests (up to 256 deletes per request; longer lists are split and
-    // run DeleteBlobsOptions::MaxConcurrentRequests at a time). The result holds one item per name, in order:
-    // a blob that no longer exists counts as deleted (like DeleteIfExistsAsync), any other per-blob failure is in
-    // that item's Error. Failure of a whole request, or an invalid name (empty or over 1024 characters), completes
-    // as `unexpected(BlobStorageError)`; blobs of the requests that did complete may then already be deleted.
+    /// <summary>
+    /// Deletes the named blobs with Blob Batch requests (up to 256 deletes per request; longer lists are split and
+    /// run DeleteBlobsOptions::MaxConcurrentRequests at a time). The result holds one item per name, in order:
+    /// a blob that no longer exists counts as deleted (like DeleteIfExistsAsync), any other per-blob failure is in
+    /// that item's Error. Failure of a whole request, or an invalid name (empty or over 1024 characters), completes
+    /// as <c>unexpected(BlobStorageError)</c>; blobs of the requests that did complete may then already be deleted.
+    /// </summary>
+    /// <param name="blobNames">The names of the blobs to delete.</param>
+    /// <param name="options">How many batch requests may run at once.</param>
+    /// <param name="requestOptions">Per-request options; the client's defaults apply when empty.</param>
+    /// <returns>One outcome per name, or the error that failed a whole request.</returns>
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::DeleteBlobsResult>>
     DeleteBlobsAsync(std::vector<std::string> blobNames, DeleteBlobsOptions options = {},
                      std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
@@ -138,11 +210,24 @@ class BasicBlobContainerClient : Private::ClientCore<THttp, Private::BasicContai
 
   private:
     template <HttpClientLike, TokenCredentialLike> friend class BasicBlobServiceClient;
+    /// <summary>Creates a client for a target already built by this class's friends.</summary>
+    /// <param name="httpClient">The HTTP client to send requests with.</param>
+    /// <param name="target">The validated container target.</param>
+    /// <param name="owner">The shared owner of the HTTP client; null when it is only borrowed.</param>
     BasicBlobContainerClient(THttp& httpClient, std::shared_ptr<const Private::BasicContainerTarget<TCred>> target,
                              std::shared_ptr<THttp> owner)
         : Core(httpClient, std::move(target), std::move(owner)) {}
 
-    // Shares the service client's validated connection state (no re-normalisation).
+    /// <summary>
+    /// Shares the service client's validated connection state (no re-normalisation).
+    /// </summary>
+    /// <param name="httpClient">The HTTP client to send requests with.</param>
+    /// <param name="connection">The service client's connection state.</param>
+    /// <param name="credential">The service client's cached token credential.</param>
+    /// <param name="containerName">The name of the container.</param>
+    /// <param name="owner">The shared owner of the HTTP client; null when it is only borrowed.</param>
+    /// <exception cref="std::invalid_argument">Thrown when <paramref name="containerName"/> is not a valid container
+    /// name.</exception>
     BasicBlobContainerClient(THttp& httpClient, std::shared_ptr<const Private::ConnectionState> connection,
                              std::shared_ptr<CachedTokenCredential<TCred>> credential, std::string containerName,
                              std::shared_ptr<THttp> owner = nullptr)
@@ -151,11 +236,22 @@ class BasicBlobContainerClient : Private::ClientCore<THttp, Private::BasicContai
                    std::move(connection), std::move(credential), std::move(containerName))),
                std::move(owner)) {}
 
+    /// <summary>Builds the target of a blob in this container.</summary>
+    /// <param name="blobName">The name of the blob within the container.</param>
+    /// <returns>The validated blob target.</returns>
+    /// <exception cref="std::invalid_argument">Thrown when <paramref name="blobName"/> is empty.</exception>
     [[nodiscard]] std::shared_ptr<const Private::BasicBlobTarget<TCred>> MakeBlobTarget(std::string blobName) const {
         return std::make_shared<const Private::BasicBlobTarget<TCred>>(Private::MakeBlobTarget<TCred>(
             m_target->Connection, m_target->Credential, m_target->ContainerName, std::move(blobName)));
     }
 
+    /// <summary>The body of ListBlobsAsync; a static coroutine so that its frame owns what the operation
+    /// uses.</summary>
+    /// <param name="httpClient">The HTTP client to send the request with.</param>
+    /// <param name="target">The container to list.</param>
+    /// <param name="options">The listing options.</param>
+    /// <param name="requestOptions">The resolved per-request options.</param>
+    /// <returns>The page of blobs, or the error that failed the request.</returns>
     static boost::asio::awaitable<BlobResult<Models::ListBlobsResult>>
     ListBlobsImpl(THttp& httpClient, std::shared_ptr<const Private::BasicContainerTarget<TCred>> target,
                   ListBlobsOptions options, AzureRequestOptions requestOptions) {
@@ -181,6 +277,13 @@ class BasicBlobContainerClient : Private::ClientCore<THttp, Private::BasicContai
             std::move(requestOptions));
     }
 
+    /// <summary>The body of CreateIfNotExistsAsync; a static coroutine so that its frame owns what the operation
+    /// uses.</summary>
+    /// <param name="httpClient">The HTTP client to send the request with.</param>
+    /// <param name="target">The container to create.</param>
+    /// <param name="options">The creation options.</param>
+    /// <param name="requestOptions">The resolved per-request options.</param>
+    /// <returns>The ETag and last-modified time of the container, or the error that failed the request.</returns>
     static boost::asio::awaitable<BlobResult<Models::CreateBlobContainerResult>>
     CreateIfNotExistsImpl(THttp& httpClient, std::shared_ptr<const Private::BasicContainerTarget<TCred>> target,
                           CreateBlobContainerOptions options, AzureRequestOptions requestOptions) {
@@ -196,7 +299,9 @@ class BasicBlobContainerClient : Private::ClientCore<THttp, Private::BasicContai
     using Core::m_target;
 };
 
-// The production client type.
+/// <summary>The production client type.</summary>
 using BlobContainerClient = BasicBlobContainerClient<HttpClient>;
+/// <summary>Explicit instantiation declaration of the production client; its members are instantiated
+/// elsewhere.</summary>
 extern template class BasicBlobContainerClient<HttpClient>;
 } // namespace AVEVA::AzureClient

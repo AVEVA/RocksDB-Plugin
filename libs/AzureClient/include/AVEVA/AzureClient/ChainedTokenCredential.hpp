@@ -20,24 +20,39 @@
 #include <vector>
 
 namespace AVEVA::AzureClient {
-// Called when a source fails, with its position in the chain and whether it was the last one to try. Failures of
-// earlier sources are routine when probing, so the chain itself stays silent and leaves reporting to this callback.
+/// <summary>
+/// Called when a source fails, with its position in the chain and whether it was the last one to try. Failures of
+/// earlier sources are routine when probing, so the chain itself stays silent and leaves reporting to this callback.
+/// </summary>
 using SourceFailureObserver = std::function<void(std::size_t index, std::error_code error, ChainPosition position)>;
 
-// Tries a list of credentials in order and returns the token of the first one that succeeds. Fails with the
-// error of the last source when none of them succeed (BlobStorageErrorCode::AuthenticationFailed when the chain is
-// empty). Null sources are dropped.
+/// <summary>
+/// Tries a list of credentials in order and returns the token of the first one that succeeds. Fails with the
+/// error of the last source when none of them succeed (<c>BlobStorageErrorCode::AuthenticationFailed</c> when the
+/// chain is empty). Null sources are dropped.
+/// </summary>
+/// <typeparam name="TSource">The credential type of every source in the chain.</typeparam>
 template <TokenCredentialLike TSource>
 class ChainedTokenCredential final : public std::enable_shared_from_this<ChainedTokenCredential<TSource>> {
     std::vector<std::shared_ptr<TSource>> m_sources;
     SourceFailureObserver m_observer;
 
   public:
+    /// <summary>
+    /// Builds the chain, dropping null sources.
+    /// </summary>
+    /// <param name="sources">The credentials to try, in order.</param>
+    /// <param name="observer">Told about each failing source; may be empty.</param>
     explicit ChainedTokenCredential(std::vector<std::shared_ptr<TSource>> sources, SourceFailureObserver observer = {})
         : m_sources(std::move(sources)), m_observer(std::move(observer)) {
         std::erase(m_sources, nullptr);
     }
 
+    /// <summary>
+    /// Asks each source in turn until one yields a token, reporting every failure to the observer.
+    /// </summary>
+    /// <param name="scopes">The scopes the token must cover.</param>
+    /// <returns>The first successful token; otherwise the last source's error.</returns>
     [[nodiscard]] boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> scopes) {
         // Keeps the chain alive while a source is pending.
         const auto self = this->shared_from_this();

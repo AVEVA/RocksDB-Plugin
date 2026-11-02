@@ -18,6 +18,7 @@ namespace AVEVA::AzureClient {
 /// What the Azure clients require of an HTTP client: an executor and a coroutine <c>SendAsync</c> that returns the
 /// response or the transport error. <c>AVEVA::HttpClient</c> models it; tests supply scripted implementations.
 /// </summary>
+/// <typeparam name="T">The candidate HTTP client type.</typeparam>
 template <class T>
 concept HttpClientLike = requires(T& client, const T& constClient, HttpRequest request, HttpRequestOptions options) {
     typename T::executor_type;

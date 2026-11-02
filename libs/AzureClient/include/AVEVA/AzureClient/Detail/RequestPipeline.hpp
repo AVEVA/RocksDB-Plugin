@@ -44,13 +44,30 @@
 
 namespace AVEVA::AzureClient::Private {
 namespace RetryDetail {
-// Backoff jitter and exponent bounds live in RetryPolicyConstants.
+/// <summary>
+/// The lower bound of the backoff jitter factor. Backoff jitter and exponent bounds live in RetryPolicyConstants.
+/// </summary>
 inline constexpr double MinBackoffJitter = RetryPolicyConstants::MinBackoffJitter;
+
+/// <summary>
+/// The upper bound of the backoff jitter factor.
+/// </summary>
 inline constexpr double MaxBackoffJitter = RetryPolicyConstants::MaxBackoffJitter;
+
+/// <summary>
+/// The largest exponent applied to the backoff.
+/// </summary>
 inline constexpr int MaxBackoffExponent = RetryPolicyConstants::MaxBackoffExponent;
 
-// Exponential backoff (InitialDelay * 2^(retry-1)) with +/- jitter in [0.8, 1.3), capped at MaxDelay. The generator is
-// a parameter so tests can make the jitter deterministic.
+/// <summary>
+/// Exponential backoff (InitialDelay * 2^(retry-1)) with +/- jitter in [0.8, 1.3), capped at MaxDelay. The generator is
+/// a parameter so tests can make the jitter deterministic.
+/// </summary>
+/// <typeparam name="Generator">A random number generator type.</typeparam>
+/// <param name="retry">The retry policy that supplies the initial and maximum delay.</param>
+/// <param name="retryNumber">The number of the retry that is about to wait, starting at 1.</param>
+/// <param name="generator">The source of the jitter.</param>
+/// <returns>The delay to wait before the retry.</returns>
 template <typename Generator>
 [[nodiscard]] std::chrono::milliseconds ComputeBackoff(const RetryOptions& retry, int retryNumber,
                                                        Generator& generator) {
@@ -67,37 +84,73 @@ template <typename Generator>
     return std::chrono::milliseconds{static_cast<std::int64_t>(std::llround(delay))};
 }
 
+/// <summary>
+/// As the generator overload, drawing the jitter from a per-thread random generator.
+/// </summary>
+/// <param name="retry">The retry policy that supplies the initial and maximum delay.</param>
+/// <param name="retryNumber">The number of the retry that is about to wait, starting at 1.</param>
+/// <returns>The delay to wait before the retry.</returns>
 [[nodiscard]] std::chrono::milliseconds ComputeBackoff(const RetryOptions& retry, int retryNumber);
 
-// Resolves the x-ms-copy-source-authorization placeholder (see CopySourceClientCredentialMarker): an empty
-// `bearerToken` means the client has no bearer token to forward, so the header is dropped before the request is
-// signed or sent.
+/// <summary>
+/// Resolves the x-ms-copy-source-authorization placeholder (see CopySourceClientCredentialMarker): an empty
+/// <paramref name="bearerToken"/> means the client has no bearer token to forward, so the header is dropped before
+/// the request is signed or sent.
+/// </summary>
+/// <param name="request">The request whose placeholder header is resolved; unchanged when it has none.</param>
+/// <param name="bearerToken">The token to forward, or empty when there is none.</param>
 void ResolveCopySourceAuthorization(HttpRequest& request, std::string_view bearerToken);
 
+/// <summary>
+/// The result of a request that was cancelled before it finished.
+/// </summary>
+/// <returns>An error of <c>std::errc::operation_canceled</c>.</returns>
 [[nodiscard]] std::error_code CanceledError() noexcept;
 
-// Replaces any Authorization header with the bearer token, so exactly one is ever sent.
+/// <summary>
+/// Replaces any Authorization header with the bearer token, so exactly one is ever sent.
+/// </summary>
+/// <param name="request">The request to authorize.</param>
+/// <param name="token">The bearer token.</param>
 void SetBearerAuthorization(HttpRequest& request, std::string_view token);
 
-// A request that cannot be replayed safely after an ambiguous transport failure: a conditional create
-// (If-None-Match: *) would answer 409 BlobAlreadyExists, a delete 404, and an ETag/unmodified-since conditional
-// mutation 412 if the first attempt had in fact succeeded.
+/// <summary>
+/// Classifies whether a request can be replayed safely after an ambiguous transport failure: a conditional create
+/// (If-None-Match: *) would answer 409 BlobAlreadyExists, a delete 404, and an ETag/unmodified-since conditional
+/// mutation 412 if the first attempt had in fact succeeded.
+/// </summary>
+/// <param name="request">The request to classify.</param>
+/// <returns>Whether replaying the request is safe.</returns>
 [[nodiscard]] ReplaySafety ReplaySafetyOf(const HttpRequest& request);
 
-// The timer that waits out a retry delay. A client type may name its own `retry_timer_type` so tests can observe
-// the requested delay without really waiting; every real client uses a steady_timer. It must offer
-// `expires_after` and an `async_wait` that accepts `as_tuple(use_awaitable)`.
+/// <summary>
+/// The timer that waits out a retry delay. A client type may name its own <c>retry_timer_type</c> so tests can observe
+/// the requested delay without really waiting; every real client uses a steady_timer. It must offer
+/// <c>expires_after</c> and an <c>async_wait</c> that accepts <c>as_tuple(use_awaitable)</c>.
+/// </summary>
+/// <typeparam name="THttp">The HTTP client type.</typeparam>
 template <class THttp> struct RetryTimerFor {
+    /// <summary>The timer type.</summary>
     using type = boost::asio::steady_timer;
 };
+
+/// <summary>
+/// The timer a client names through <c>retry_timer_type</c>.
+/// </summary>
+/// <typeparam name="THttp">The HTTP client type.</typeparam>
 template <class THttp>
     requires requires { typename THttp::retry_timer_type; }
 struct RetryTimerFor<THttp> {
+    /// <summary>The timer type the client names.</summary>
     using type = typename THttp::retry_timer_type;
 };
 
-// The error a failed preparation (request rebuild, signing) reports: an allocation failure, an error the failing
-// code attached, or an invalid request otherwise.
+/// <summary>
+/// The error a failed preparation (request rebuild, signing) reports: an allocation failure, an error the failing
+/// code attached, or an invalid request otherwise. Must be called from a catch handler, because it rethrows the
+/// current exception to classify it.
+/// </summary>
+/// <returns>The error code for the exception being handled.</returns>
 [[nodiscard]] inline std::error_code ErrorFromCurrentException() noexcept {
     try {
         throw;
@@ -110,15 +163,30 @@ struct RetryTimerFor<THttp> {
     }
 }
 
-// Builds the request of each attempt from the caller's request. The last possible attempt takes the request itself;
-// earlier ones copy only the headers and share the body.
+/// <summary>
+/// Builds the request of each attempt from the caller's request. The last possible attempt takes the request itself;
+/// earlier ones copy only the headers and share the body.
+/// </summary>
 class AttemptFactory {
   public:
+    /// <summary>
+    /// Takes the caller's request as the source of every attempt.
+    /// </summary>
+    /// <param name="request">The caller's request.</param>
     explicit AttemptFactory(HttpRequest request) : m_request(std::move(request)) {}
 
-    // The last possible attempt may take the request itself instead of a copy.
+    /// <summary>
+    /// Whether an attempt must copy the request (<c>Copy</c>, leaving it for later attempts) or, as the last possible
+    /// attempt, may take the request itself instead of a copy (<c>MayMove</c>).
+    /// </summary>
     enum class Reuse : std::uint8_t { Copy, MayMove };
 
+    /// <summary>
+    /// Builds one attempt's request, stamped with the current date.
+    /// </summary>
+    /// <param name="reuse">Whether the request may be moved out instead of copied; a request whose body was already
+    /// shared by an earlier attempt is copied regardless.</param>
+    /// <returns>The attempt's request.</returns>
     [[nodiscard]] HttpRequest Build(Reuse reuse) {
         HttpRequest attempt = reuse == Reuse::MayMove && !m_sharedBody ? std::move(m_request) : Copy();
         // Stamped right before signing, so a request that waited for a token or a backoff never carries a stale
@@ -127,9 +195,18 @@ class AttemptFactory {
         return attempt;
     }
 
+    /// <summary>
+    /// The caller's request, as far as it has not been moved into an attempt.
+    /// </summary>
+    /// <returns>The request the factory was built from.</returns>
     [[nodiscard]] const HttpRequest& Original() const noexcept { return m_request; }
 
   private:
+    /// <summary>
+    /// Copies the request for one attempt, moving an owned body into shared storage the first time so later attempts
+    /// view it instead of copying it.
+    /// </summary>
+    /// <returns>A copy of the request that shares the body.</returns>
     [[nodiscard]] HttpRequest Copy() {
         HttpRequest attempt;
         attempt.SetMethod(m_request.GetMethod());
@@ -150,8 +227,12 @@ class AttemptFactory {
         return attempt;
     }
 
-    // Every attempt copies the same header list, so the date header's position (or its absence) is learned once
-    // and later attempts skip the rescan. A hit is re-validated, so a stale index only costs the scan.
+    /// <summary>
+    /// Every attempt copies the same header list, so the date header's position (or its absence) is learned once
+    /// and later attempts skip the rescan. A hit is re-validated, so a stale index only costs the scan.
+    /// </summary>
+    /// <param name="request">The attempt's request; gets the date header added when it has none.</param>
+    /// <param name="now">The date header value.</param>
     void StampDate(HttpRequest& request, const std::string& now) {
         auto& headers = request.GetHeaders();
         if (m_dateHeaderIndex < headers.size() &&
@@ -173,6 +254,7 @@ class AttemptFactory {
         request.AddHeader(HttpHeader{std::string{XMsDateHeaderName}, now});
     }
 
+    /// <summary>Whether the position of the date header has been looked up.</summary>
     enum class DateHeaderScan : std::uint8_t { Pending, Done };
 
     HttpRequest m_request;
@@ -181,15 +263,40 @@ class AttemptFactory {
     DateHeaderScan m_dateHeaderScan = DateHeaderScan::Pending;
 };
 
+/// <summary>
+/// Turns a retry count into an attempt count, without overflowing.
+/// </summary>
+/// <param name="maxRetries">The retries after the first attempt; a negative count is treated as zero.</param>
+/// <returns>The number of attempts, saturated at the largest int.</returns>
 [[nodiscard]] constexpr int ComputeMaxAttempts(int maxRetries) noexcept {
     return maxRetries >= std::numeric_limits<int>::max() - 1 ? std::numeric_limits<int>::max()
                                                              : std::max(0, maxRetries) + 1;
 }
 
-// One request's attempts, from the first send to the final result. Each step of the retry policy is a small member
-// (authorize, decide, back off) so `Run` reads as the policy itself. Lives in the awaiting coroutine's frame.
+/// <summary>
+/// One request's attempts, from the first send to the final result. Each step of the retry policy is a small member
+/// (authorize, decide, back off) so <c>Run</c> reads as the policy itself. Lives in the awaiting coroutine's frame.
+/// </summary>
+/// <typeparam name="THttp">The HTTP client type.</typeparam>
+/// <typeparam name="TCred">The token credential type.</typeparam>
+/// <typeparam name="TRebuild">The type of the hook that adjusts each attempt's request before it is
+/// authorized.</typeparam>
 template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class RetryingSender {
   public:
+    /// <summary>
+    /// Prepares the sender; nothing is sent until <c>Run</c>.
+    /// </summary>
+    /// <param name="httpClient">The client to send with; must outlive the sender.</param>
+    /// <param name="auth">How each attempt is authorized.</param>
+    /// <param name="credential">The token credential for token authorization; may be null.</param>
+    /// <param name="retry">The client's retry policy.</param>
+    /// <param name="request">The caller's request.</param>
+    /// <param name="requestOptions">The per-request options; they may override the retry count and set a total
+    /// deadline.</param>
+    /// <param name="notFoundRetry">Whether HTTP 404 and 410 are retried as well.</param>
+    /// <param name="rebuild">The hook called before each attempt is authorized.</param>
+    /// <param name="replaySafety">Whether the caller absorbs the outcome of a replay; <c>Unsafe</c> defers to
+    /// <c>ReplaySafetyOf</c> on the request.</param>
     RetryingSender(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
                    HttpRequest request, AzureRequestOptions requestOptions, NotFoundRetry notFoundRetry,
                    TRebuild rebuild, ReplaySafety replaySafety)
@@ -200,6 +307,11 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
           m_replaySafety(replaySafety == ReplaySafety::Safe ? ReplaySafety::Safe : ReplaySafetyOf(request)),
           m_attempts(std::move(request)) {}
 
+    /// <summary>
+    /// Sends the request, retrying according to the policy.
+    /// </summary>
+    /// <returns>The final HTTP response, or the transport or pipeline error; <c>std::errc::operation_canceled</c>
+    /// when the awaiting coroutine is cancelled.</returns>
     boost::asio::awaitable<HttpResult> Run() {
         // Cancelling the awaiting coroutine makes whichever await is pending throw operation_aborted; this is the
         // one place it becomes a result.
@@ -214,6 +326,10 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
     }
 
   private:
+    /// <summary>
+    /// The attempt loop: prepare, send, then refresh the token, finish or back off.
+    /// </summary>
+    /// <returns>The final HTTP response, or the error that ended the attempts.</returns>
     boost::asio::awaitable<HttpResult> Attempts() {
         for (;;) {
             if (m_attemptAccounting == AttemptAccounting::Counted) {
@@ -268,22 +384,43 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
         }
     }
 
+    /// <summary>
+    /// What a 401 means for the next step: nothing (<c>NotApplicable</c>), one more attempt with a fresh token
+    /// (<c>Retry</c>), or no further attempt because the total deadline has passed (<c>DeadlinePassed</c>).
+    /// </summary>
     enum class Refresh { NotApplicable, Retry, DeadlinePassed };
 
+    /// <summary>
+    /// Whether the credential can drop a cached token, which a 401 refresh needs.
+    /// </summary>
+    /// <typeparam name="TCredential">The credential type to test.</typeparam>
     template <typename TCredential>
     static constexpr auto CanInvalidate =
         requires(TCredential& credential, const RequestAuth& auth) { credential.Invalidate(auth.TokenScopes); };
 
+    /// <summary>
+    /// The time left of the total deadline. Only meaningful when a total deadline is set.
+    /// </summary>
+    /// <returns>The remaining time; zero or negative once it has passed.</returns>
     std::chrono::milliseconds Remaining() const {
         return *m_totalDeadline -
                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - m_start);
     }
 
+    /// <summary>
+    /// Whether the total deadline, if any, has passed.
+    /// </summary>
+    /// <returns>Expired once the deadline has passed; Open otherwise, and always when none is set.</returns>
     DeadlineState DeadlineStatus() const {
         return m_totalDeadline && Remaining() <= std::chrono::milliseconds{0} ? DeadlineState::Expired
                                                                               : DeadlineState::Open;
     }
 
+    /// <summary>
+    /// Whether a 401 may still trigger a token refresh: the request must be token-authorized, the credential able to
+    /// invalidate its cache, and no refresh already made.
+    /// </summary>
+    /// <returns>Whether a refresh is allowed.</returns>
     RefreshEligibility TokenRefreshEligibility() const {
         if constexpr (CanInvalidate<TCred>) {
             return m_auth.Type == RequestAuth::Kind::Token && m_credential != nullptr &&
@@ -295,16 +432,22 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
         }
     }
 
-    // Waits for `limit`, then reports it; abandoned (cancelled, so it throws operation_aborted) when the token
-    // arrives first.
+    /// <summary>
+    /// Waits for <paramref name="limit"/>, then reports it; abandoned (cancelled, so it throws operation_aborted) when
+    /// the token arrives first.
+    /// </summary>
+    /// <param name="limit">How long to wait.</param>
     static boost::asio::awaitable<void> Expire(std::chrono::milliseconds limit) {
         boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor, limit);
         co_await timer.async_wait(boost::asio::use_awaitable);
     }
 
-    // A hung identity endpoint must not stall an attempt past its timeout or the total deadline, so the token
-    // request is raced against the smaller of the two. Losing cancels the credential, which cancellation-aware
-    // credentials report as operation_canceled and the token cache does not remember.
+    /// <summary>
+    /// A hung identity endpoint must not stall an attempt past its timeout or the total deadline, so the token
+    /// request is raced against the smaller of the two. Losing cancels the credential, which cancellation-aware
+    /// credentials report as operation_canceled and the token cache does not remember.
+    /// </summary>
+    /// <returns>The credential's result; <c>std::errc::timed_out</c> when the limit won the race.</returns>
     boost::asio::awaitable<TokenResult> AcquireToken() {
         using namespace boost::asio::experimental::awaitable_operators;
         auto limit = m_requestOptions.GetTimeout();
@@ -318,8 +461,11 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
         co_return std::unexpected(std::make_error_code(std::errc::timed_out));
     }
 
-    // Builds the attempt's request and authorizes it. A failure to build or authorize ends the request rather than
-    // escaping.
+    /// <summary>
+    /// Builds the attempt's request and authorizes it. A failure to build or authorize ends the request rather than
+    /// escaping.
+    /// </summary>
+    /// <returns>The request ready to send, or the error that ended the request.</returns>
     boost::asio::awaitable<std::expected<HttpRequest, std::error_code>> PrepareAttempt() {
         HttpRequest request;
         try {
@@ -362,7 +508,11 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
         co_return request;
     }
 
-    // The options for the next send: the caller's, with the timeout clamped to what is left of the total deadline.
+    /// <summary>
+    /// The options for the next send: the caller's, with the timeout clamped to what is left of the total deadline.
+    /// </summary>
+    /// <returns>The options; <c>std::errc::timed_out</c> when the deadline has already passed, since a fresh attempt
+    /// must never start then.</returns>
     std::expected<AzureRequestOptions, std::error_code> AttemptOptions() const {
         AzureRequestOptions options = m_requestOptions;
         if (m_totalDeadline) {
@@ -376,8 +526,14 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
         return options;
     }
 
-    // A 401 on a token-authorized request usually means the cached token was revoked or rotated, so one extra attempt
-    // with a freshly requested token is allowed regardless of the retry budget.
+    /// <summary>
+    /// A 401 on a token-authorized request usually means the cached token was revoked or rotated, so one extra attempt
+    /// with a freshly requested token is allowed regardless of the retry budget.
+    /// </summary>
+    /// <param name="error">The transport error of the attempt, if any.</param>
+    /// <param name="response">The response of the attempt.</param>
+    /// <returns>Retry after invalidating the cached token; DeadlinePassed when no further attempt can be made;
+    /// NotApplicable when the outcome is not a refreshable 401.</returns>
     Refresh RefreshTokenAfter401(const std::error_code& error, const HttpResponse& response) {
         if (error || response.GetStatus() != HttpStatus::Unauthorized ||
             TokenRefreshEligibility() == RefreshEligibility::Ineligible) {
@@ -401,8 +557,13 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
         }
     }
 
-    // How long to wait before the next attempt, or empty when this outcome is final (success, a failure that is not
-    // worth retrying, or the budget is spent).
+    /// <summary>
+    /// How long to wait before the next attempt, or empty when this outcome is final (success, a failure that is not
+    /// worth retrying, or the budget is spent).
+    /// </summary>
+    /// <param name="error">The transport error of the attempt, if any.</param>
+    /// <param name="response">The response of the attempt.</param>
+    /// <returns>The delay; empty when the outcome is final.</returns>
     std::optional<std::chrono::milliseconds> BackoffBeforeRetry(const std::error_code& error,
                                                                 const HttpResponse& response) {
         const auto notFoundRetried =
@@ -461,15 +622,30 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
 };
 } // namespace RetryDetail
 
-// Sends `request` with per-attempt authorization and retry/backoff according to `retry`, and returns the final
-// HTTP response, or the transport/pipeline error. All state is owned by the coroutine; only `httpClient` must
-// outlive it. `rebuild` is called with (HttpRequest&, std::string_view bearerToken[, AttemptKind attemptKind])
-// before each attempt is authorized and sent, so a retry never replays a stale body, signature or token; throwing
-// fails the request. Cancelling the awaiting coroutine cancels the in-flight attempt or the pending backoff and
-// returns std::errc::operation_canceled; an expired total deadline returns std::errc::timed_out.
-// `notFoundRetry` set to Retry additionally retries HTTP 404/410 (managed identity endpoints answer these while
-// starting). `replaySafety` Safe marks a request whose caller absorbs the outcome of a replay (the
-// *IfExists/*IfNotExists operations), so it may be retried even after an ambiguous transport error.
+/// <summary>
+/// Sends <paramref name="request"/> with per-attempt authorization and retry/backoff according to
+/// <paramref name="retry"/>, and returns the final HTTP response, or the transport/pipeline error. All state is owned
+/// by the coroutine; only <paramref name="httpClient"/> must outlive it. <paramref name="rebuild"/> is called with
+/// (HttpRequest&amp;, std::string_view bearerToken[, AttemptKind attemptKind]) before each attempt is authorized and
+/// sent, so a retry never replays a stale body, signature or token; throwing fails the request. Cancelling the
+/// awaiting coroutine cancels the in-flight attempt or the pending backoff and returns
+/// <c>std::errc::operation_canceled</c>; an expired total deadline returns <c>std::errc::timed_out</c>.
+/// </summary>
+/// <typeparam name="THttp">The HTTP client type.</typeparam>
+/// <typeparam name="TCred">The token credential type.</typeparam>
+/// <typeparam name="TRebuild">The type of the hook that adjusts each attempt's request.</typeparam>
+/// <param name="httpClient">The client to send with.</param>
+/// <param name="auth">How each attempt is authorized.</param>
+/// <param name="credential">The token credential for token authorization; may be null.</param>
+/// <param name="retry">The client's retry policy.</param>
+/// <param name="request">The request to send.</param>
+/// <param name="requestOptions">The per-request options.</param>
+/// <param name="notFoundRetry">Set to Retry to additionally retry HTTP 404/410 (managed identity endpoints answer
+/// these while starting).</param>
+/// <param name="rebuild">The hook called before each attempt is authorized.</param>
+/// <param name="replaySafety">Safe marks a request whose caller absorbs the outcome of a replay (the
+/// *IfExists/*IfNotExists operations), so it may be retried even after an ambiguous transport error.</param>
+/// <returns>The final HTTP response, or the transport or pipeline error.</returns>
 template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild>
 boost::asio::awaitable<HttpResult> SendWithRetry(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential,
                                                  RetryOptions retry, HttpRequest request,
@@ -481,9 +657,22 @@ boost::asio::awaitable<HttpResult> SendWithRetry(THttp& httpClient, RequestAuth 
     co_return co_await sender.Run();
 }
 
-// Validates the shape of the caller's headers, then sends the request with retries. The result carries
-// std::errc::invalid_argument for a header with control characters and BlobStorageErrorCode::InvalidMetadata for
-// bad metadata, before anything reaches the transport.
+/// <summary>
+/// Validates the shape of the caller's headers, then sends the request with retries. The result carries
+/// <c>std::errc::invalid_argument</c> for a header with control characters and
+/// <c>BlobStorageErrorCode::InvalidMetadata</c> for bad metadata, before anything reaches the transport.
+/// </summary>
+/// <typeparam name="THttp">The HTTP client type.</typeparam>
+/// <typeparam name="TCred">The token credential type.</typeparam>
+/// <typeparam name="TRebuild">The type of the hook that adjusts each attempt's request.</typeparam>
+/// <param name="httpClient">The client to send with.</param>
+/// <param name="connection">The connection's authorization and retry configuration.</param>
+/// <param name="credential">The token credential; may be null.</param>
+/// <param name="request">The request to send.</param>
+/// <param name="requestOptions">The per-request options.</param>
+/// <param name="rebuild">The hook called before each attempt is authorized.</param>
+/// <param name="replaySafety">Whether the caller absorbs the outcome of a replay.</param>
+/// <returns>The final HTTP response, or the validation, transport or pipeline error.</returns>
 template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild>
 boost::asio::awaitable<HttpResult> SendAuthorizedRequest(THttp& httpClient, const ConnectionState& connection,
                                                          std::shared_ptr<TCred> credential, HttpRequest request,

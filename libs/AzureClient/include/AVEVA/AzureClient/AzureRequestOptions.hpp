@@ -20,6 +20,9 @@ namespace AVEVA::AzureClient {
 /// </summary>
 class AzureRequestOptions : public HttpRequestOptions {
   public:
+    /// <summary>
+    /// Creates options with nothing set, so the client's own deadline and retry policy apply.
+    /// </summary>
     AzureRequestOptions() = default;
 
     /// <summary>
