@@ -109,7 +109,8 @@ std::error_code ClassifyBuildFailure(std::exception_ptr failure) noexcept {
         const auto& code = e.code();
         const auto outOfMemory =
             code == boost::asio::error::no_memory || (code.category() == boost::asio::error::get_ssl_category() &&
-                                                      ERR_GET_REASON(code.value()) == ERR_R_MALLOC_FAILURE);
+                                                      ERR_GET_REASON(static_cast<unsigned long>(code.value())) ==
+                                                          ERR_R_MALLOC_FAILURE);
         return std::make_error_code(outOfMemory ? std::errc::not_enough_memory : std::errc::state_not_recoverable);
     } catch (...) {
         return std::make_error_code(std::errc::state_not_recoverable);
