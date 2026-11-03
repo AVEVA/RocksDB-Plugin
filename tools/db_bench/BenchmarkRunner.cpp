@@ -59,6 +59,8 @@
 #include <AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp>
 #include <AVEVA/RocksDB/Plugin/Core/SecondaryCacheOptions.hpp>
 
+#include "ScanThenMultiGet.hpp"
+
 #if defined(AVEVA_ROCKSDB_WITH_CACHELIB)
 #include <AVEVA/RocksDB/Plugin/Core/CacheLibSecondaryCache.hpp>
 #endif
@@ -339,7 +341,23 @@ int main(int argc, char** argv) {
 
     std::fflush(nullptr);
     std::cout.flush();
-    const auto rc = rocksdb::db_bench_tool(argc, argv);
+    int rc;
+    if (const auto scanLength = EnvOr<size_t>("AVEVA_DB_BENCH_SCAN_BEFORE_MULTIREAD", 0); scanLength > 0) {
+        AVEVA::RocksDB::Plugin::Bench::ScanThenMultiGetHooks hooks(scanLength);
+        rc = rocksdb::db_bench_tool(argc, argv, hooks);
+        std::cout << "SCAN_THEN_MULTIGET queries=" << hooks.counters.queries.load()
+                  << " scanned_records=" << hooks.counters.scannedRecords.load()
+                  << " scanned_bytes=" << hooks.counters.scannedBytes.load()
+                  << " fetched_keys=" << hooks.counters.fetchedKeys.load()
+                  << " found_keys=" << hooks.counters.foundKeys.load() << "\n";
+        if (rc == 0 && hooks.counters.queries == 0) {
+            std::cerr << "aveva_db_bench: scan-before-MultiGet hook was not exercised; use normal Open and "
+                         "--benchmarks=multireadrandom --multiread_batched=0\n";
+            rc = 2;
+        }
+    } else {
+        rc = rocksdb::db_bench_tool(argc, argv);
+    }
 
     // Skip C++ static destructors: boost.log tears down thread-local storage
     // before the plugin's background threads exit, which triggers SIGABRT

@@ -15,3 +15,12 @@ target_link_libraries(aveva_db_bench PRIVATE
 # Match the RocksDB executable naming so users familiar with upstream
 # db_bench can invoke this wrapper the same way.
 set_target_properties(aveva_db_bench PROPERTIES OUTPUT_NAME "db_bench")
+
+if(AVEVA_ROCKSDB_TESTS)
+    find_package(GTest CONFIG REQUIRED)
+    add_executable(aveva_db_bench_tests ScanThenMultiGetTests.cpp)
+    target_compile_features(aveva_db_bench_tests PRIVATE cxx_std_23)
+    target_link_libraries(aveva_db_bench_tests PRIVATE GTest::gtest_main RocksDB::rocksdb)
+    include(GoogleTest)
+    gtest_discover_tests(aveva_db_bench_tests)
+endif()

@@ -39,6 +39,26 @@ this mode to check the build before you point the tool at Azure.
     --num=100000
 ```
 
+## Experimental scan followed by MultiGet
+
+Set `AVEVA_DB_BENCH_SCAN_BEFORE_MULTIREAD=2000` with
+`--benchmarks=multireadrandom --batch_size=2000 --multiread_batched=0 --async_io=0`
+to perform a fresh iterator scan before each vector-overload MultiGet.
+Only normal single-column-family Open is wrapped. The tool fails if the hook
+was enabled but never exercised. The default, with the variable unset, is unchanged.
+
+The scan starts at the batch's first random key and visits up to 2000 records,
+stopping at the end of the database. The iterator is released before fetching
+the original random batch. This models GraphDB's scan-then-fetch sequencing;
+it does not reproduce separate index/node records, ID mapping, authorization,
+filtering, or production request frequencies. One of the fetched keys also
+starts the scan. Use it as a synthetic sensitivity workload, not GraphDB parity.
+
+`SCAN_THEN_MULTIGET` reports actual query, scanned-record and fetched-key counts.
+Stock db_bench reports the fetched keys as operations; their elapsed time includes
+the scans. Divide the query count by benchmark seconds for query throughput.
+Do not compare this combined rate directly to point-only `multireadrandom`.
+
 ## Prerequisites for an Azure-backed run
 
 Gather these items before you start.
