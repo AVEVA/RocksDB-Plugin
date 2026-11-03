@@ -351,8 +351,7 @@ rocksdb::IOStatus BasicReadableFile<TImpl>::MultiRead(rocksdb::FSReadRequest* re
         const auto chargeOf = [](const Group& group) {
             const uint64_t length = group.End - group.Start;
             const uint64_t mergeBuffer = group.EndMember - group.FirstMember > 1 ? length : 0;
-            return static_cast<uint64_t>(Impl::DownloadBufferPool::CapacityFor(static_cast<size_t>(length))) +
-                   mergeBuffer;
+            return Impl::DownloadBufferPool::CapacityFor(length) + mergeBuffer;
         };
 
         auto start = [&](Group& group) {

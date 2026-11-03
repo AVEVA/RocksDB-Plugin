@@ -333,7 +333,7 @@ template <typename TBlob>
     const auto result =
         Unwrap(co_await client.DownloadToAsync(buffer, std::move(options), TransferOptions(client, length.Value())));
     Detail::CheckDownloadLength(result);
-    co_return Core::ByteCount{static_cast<uint64_t>(result.BytesWritten)};
+    co_return Core::ByteCount{result.BytesWritten};
 }
 
 template <typename TBlob>
@@ -424,7 +424,7 @@ void DownloadToFile(TBlob& client, const std::filesystem::path& path, const Core
         auto wave = std::make_shared<std::vector<char>>();
         for (uint64_t done = 0; done < length.Value();) {
             const auto bytes = std::min<uint64_t>(waveBytes, length.Value() - done);
-            wave->resize(static_cast<size_t>(bytes));
+            wave->resize(bytes);
             Detail::BlockStoppable(client, stopToken, "Download stopped",
                                    Detail::DownloadWaveAsync(client, wave, Core::ByteOffset{offset.Value() + done}));
             file.write(wave->data(), static_cast<std::streamsize>(wave->size()));
@@ -465,7 +465,7 @@ template <typename TBlob>
     const auto downloaded = Unwrap(co_await client.DownloadToAsync(std::span<char>(buffer->Data(), buffer->Size()),
                                                                    std::move(options), std::move(requestOptions)));
     Detail::CheckDownloadLength(downloaded);
-    const std::string_view data(buffer->Data(), std::min(static_cast<size_t>(downloaded.BytesWritten), buffer->Size()));
+    const std::string_view data(buffer->Data(), std::min(downloaded.BytesWritten, buffer->Size()));
     co_return DownloadedBytes{std::shared_ptr<const void>(std::move(buffer)), data};
 }
 
@@ -526,8 +526,8 @@ template <typename TBlob>
     do {
         auto page = Unwrap(co_await source.GetPageRangesAsync(options));
         for (const auto& range : page.Ranges) {
-            auto offset = static_cast<uint64_t>(range.Offset);
-            const auto end = (std::min)(size.Value(), offset + static_cast<uint64_t>(range.Length));
+            auto offset = range.Offset;
+            const auto end = (std::min)(size.Value(), offset + range.Length);
             while (offset < end) {
                 const auto length = (std::min)(end - offset, Configuration::Transfer::MaxCopyChunkSize.Value());
                 chunks.push_back({Core::ByteOffset{offset}, Core::ByteCount{length}});
