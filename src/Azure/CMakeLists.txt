@@ -29,10 +29,7 @@ target_sources(aveva-rocksdb-plugin-azure
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Directory.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Logger.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/SequentialFile.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/WriteableFile.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/ReadWriteFile.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/BlobFilesystem.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Plugin.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Defaults.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/SignedByteCount.hpp"
@@ -55,6 +52,7 @@ target_link_libraries(aveva-rocksdb-plugin-azure
 if(MSVC)
     target_compile_options(aveva-rocksdb-plugin-azure PRIVATE /bigobj)
 endif()
+target_precompile_headers(aveva-rocksdb-plugin-azure REUSE_FROM aveva-rocksdb-plugin-azure-impl)
 aveva_install_library(aveva-rocksdb-plugin-azure)
 target_compile_features(aveva-rocksdb-plugin-azure PUBLIC cxx_std_23)
 set_target_properties(aveva-rocksdb-plugin-azure PROPERTIES

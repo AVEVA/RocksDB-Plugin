@@ -33,7 +33,6 @@ target_sources(aveva-rocksdb-plugin-azure-impl
 target_include_directories(aveva-rocksdb-plugin-azure-impl PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
-# Sources include the template bodies as "Impl/<Group>/X.ipp", the same spelling the tests use.
 target_include_directories(aveva-rocksdb-plugin-azure-impl PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/..")
 find_package(boost_asio CONFIG REQUIRED)
 find_package(boost_log CONFIG REQUIRED)
@@ -56,6 +55,8 @@ target_link_libraries(aveva-rocksdb-plugin-azure-impl PRIVATE
 if(MSVC)
     target_compile_options(aveva-rocksdb-plugin-azure-impl PRIVATE /bigobj)
 endif()
+# The one precompiled header for the Azure plugin; the azure target and the tests reuse it via REUSE_FROM.
+target_precompile_headers(aveva-rocksdb-plugin-azure-impl PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/PrecompiledHeader.hpp")
 aveva_install_library(aveva-rocksdb-plugin-azure-impl)
 target_compile_features(aveva-rocksdb-plugin-azure-impl PUBLIC cxx_std_23)
 set_target_properties(aveva-rocksdb-plugin-azure-impl PROPERTIES

@@ -11,11 +11,11 @@ class LockFileImpl;
 struct HandleFactory;
 } // namespace AVEVA::RocksDB::Plugin::Azure::Impl
 namespace AVEVA::RocksDB::Plugin::Azure {
-class BlobFilesystem;
+template <class TImpl> class BasicBlobFilesystem;
 
 class LockFile : public rocksdb::FileLock {
     friend struct Impl::HandleFactory; // the only creator: the constructor takes an implementation type
-    friend class BlobFilesystem;       // the only user of SharedImpl
+    template <class TImpl> friend class BasicBlobFilesystem; // the only user of SharedImpl
     std::shared_ptr<Impl::LockFileImpl> m_lock;
 
     explicit LockFile(std::shared_ptr<Impl::LockFileImpl> lock);

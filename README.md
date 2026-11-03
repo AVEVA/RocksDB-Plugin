@@ -166,11 +166,11 @@ The Azure client is now trimmed and in-tree, which changed the public surface:
 * `CacheOptions::Directory` is a `std::filesystem::path`; `CacheOptions::MaxSize`, `RegisterOptions::MaxPrefetchBytes` and `Defaults::MaxPrefetchBytes` are `SignedByteCount` (refuses values above `INT64_MAX` at construction).
 * `Impl::Configuration::PageBlob::DefaultSize`, `DefaultBufferSize` and `DefaultPrefetchBudgetBytes` were removed; use `Defaults::DataFileInitialSize`, `DataFileBufferSize` and `MaxPrefetchBytes`. `Plugin.hpp` no longer includes `Impl/Configuration.hpp`.
 * `AzureErrorTranslator` keeps `IOStatusFromError`, `LeaseLossOf`, `FromException(logger, std::exception_ptr, context)` and `Invoke`; `TransienceOf` and the other exception overloads were removed. Blocking on a thread that runs the host `io_context` now fails with `BlockingOnIoThreadException` (InvalidArgument) in every build type.
-* The constructors of `BlobFilesystem`, `Directory`, `Logger` and `LockFile` are private: they are created only by the plugin.
+* The constructors of `Directory`, `Logger` and `LockFile` are private: they are created only by the plugin.
 * `http:` endpoints are rejected unless `AllowInsecureHttp = true` is set on the client options (credentials are still refused over non-loopback `http`).
 * Ranged downloads now require a valid `Content-Range` on every `206` response.
 * `AzureClient::AzureRequestOptions::SetMaxRetries` and `HttpClientOptions::SetIdleConnectionTimeout` throw `std::invalid_argument` for negative values.
-* `BlobFilesystem`'s private members moved behind a pimpl, so its size and layout changed (an ABI change; rebuild consumers). Its header no longer includes `RequestFailedException.hpp` or `LockFile.hpp`.
+* The public `BlobFilesystem` header was removed (an ABI and source change; rebuild consumers). The filesystem is an internal class template created by `Plugin::Register`; use it through `rocksdb::FileSystem`.
 * `AzureClient` options and models trimmed to what the plugin uses: `ListBlobsOptions` keeps only `IncludeMetadata` of the `Include*` flags and lost `Delimiter`; `CreatePageBlobOptions::HttpHeaders` and `AccessTier`, `UploadPagesOptions::ContentMd5`, `UploadPagesFromUrlOptions::SourceAuthorization` and `GetPageRangesOptions::Range`/`MaxResults` were removed, as were `BlobHttpHeaders`, `AccessTier`, `BlobTags`, `ListBlobsResult::BlobPrefixes`/`Delimiter` and `BlobItem::Snapshot`/`Deleted`/`Tags`.
 * Token endpoint failures now carry the HTTP status and OAuth error code (`TokenEndpointErrorCategory()`, `GetTokenEndpointFailure()` in `AVEVA/AzureClient/TokenEndpointError.hpp`) instead of mapping to `BlobStorageErrorCode::AuthenticationFailed`.
 * `HttpClientOptions::SetDiagnosticsCallback()` (new, additive) reports stale-connection retries, connections that could not be pooled, swallowed exceptions, DNS cache invalidations and timeouts with the request phase. The plugin logs these through Boost.Log.
@@ -179,7 +179,7 @@ The Azure client is now trimmed and in-tree, which changed the public surface:
 **0.2.0 breaks both source and binary (ABI) compatibility with `main`: update and rebuild every consumer.** The old
 `Plugin::Register` overloads are removed (the executor injection cannot be hidden behind the old symbols), and other
 public API under [include/AVEVA/RocksDB/Plugin](include/AVEVA/RocksDB/Plugin) changed as listed above and in the
-table below (for example the `Core` interfaces and `BlobFilesystem`'s layout). Only code that uses the registered
+table below (for example the `Core` interfaces and the removal of the `BlobFilesystem` header). Only code that uses the registered
 filesystem through `rocksdb::FileSystem` carries over unchanged.
 
 What the current API supports (checked by `tests/consumer`, built in-tree by `SourceCompatTests` and against the
@@ -192,14 +192,14 @@ installed package by the `install-consume` CI job):
 * `Defaults::*` (`Core::ByteCount`, and `SignedByteCount` for `MaxPrefetchBytes`).
 * Normal RocksDB use of the registered filesystem through `rocksdb::FileSystem`
   (`NewWritableFile`, `NewRandomAccessFile`, `NewSequentialFile`, `NewRandomRWFile`).
-* `ReadWriteFile` and `WriteableFile` as `FSRandomRWFile` and `FSWritableFile`.
+* `WriteableFile` as `FSWritableFile`.
 
 Intentional breaks (no compatibility shim; use the replacement):
 
 | Removed or changed | Replacement |
 | --- | --- |
-| Public `ReadableFile` (was both `FSSequentialFile` and `FSRandomAccessFile`) | Removed; random access files are plain `rocksdb::FSRandomAccessFile` from `NewRandomAccessFile`, and sequential reads use `SequentialFile` (obtain either through `rocksdb::FileSystem`) |
-| Public constructors of `ReadWriteFile`, `WriteableFile`, `SequentialFile` taking `Impl::*` objects | Not constructible by consumers; create them through `Plugin::Register` and RocksDB |
+| Public `ReadableFile` (was both `FSSequentialFile` and `FSRandomAccessFile`), `ReadWriteFile` and `SequentialFile` | Removed; use the plain `rocksdb::FSRandomAccessFile`, `FSRandomRWFile` and `FSSequentialFile` returned by `rocksdb::FileSystem` (`NewRandomAccessFile`, `NewRandomRWFile`, `NewSequentialFile`) |
+| Public constructors of `WriteableFile` taking `Impl::*` objects | Not constructible by consumers; create them through `Plugin::Register` and RocksDB |
 | `Impl/*` headers other than `Impl/Configuration.hpp` (`ReadableFileImpl.hpp`, `BlobFilesystemImpl.hpp`, `PageBlob.hpp`, ...) and `Core/BlobClient.hpp` | Not installed and unsupported; use the public API or the `aveva-azure-client` package |
 | `Core::File`, `Core::Filesystem`, `Core::ContainerClient` and `RocksDBHelpers` signatures | Update implementations and mocks to the new signatures (see the list above) |
 | Azure SDK types in public headers | The in-tree `AVEVA::AzureClient` library |

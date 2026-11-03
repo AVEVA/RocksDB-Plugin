@@ -2,19 +2,13 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ClientFactory.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
 #include "AVEVA/RocksDB/Plugin/Support/TempDirectory.hpp"
-#include "BasicReadableFile.ipp"
+#include "BasicReadableFile.hpp"
 #include "FakeHttpClient.hpp"
 #include "Fakes/FakeBlobEnvironment.hpp"
 #include "Fakes/FakeBlobServer.hpp"
-#include "Impl/Files/LockFileImpl.ipp"
-#include "Impl/Files/ReadWriteFileImpl.ipp"
-#include "Impl/Files/ReadableFileImpl.ipp"
-#include "Impl/Files/SequentialFileImpl.ipp"
-#include "Impl/Files/WriteableFileImpl.ipp"
-#include "Impl/Filesystem/BlobFilesystemImpl.ipp"
-#include "Impl/Runtime/ClientFactory.ipp"
 
 #include <gtest/gtest.h>
 

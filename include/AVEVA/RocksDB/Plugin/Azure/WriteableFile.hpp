@@ -11,10 +11,10 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 class WriteableFileImpl;
 }
 namespace AVEVA::RocksDB::Plugin::Azure {
-class BlobFilesystem;
+template <class TImpl> class BasicBlobFilesystem;
 
 class WriteableFile final : public rocksdb::FSWritableFile {
-    friend class BlobFilesystem; // the only creator
+    template <class TImpl> friend class BasicBlobFilesystem; // the only creator
     std::unique_ptr<Impl::WriteableFileImpl> m_file;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
 

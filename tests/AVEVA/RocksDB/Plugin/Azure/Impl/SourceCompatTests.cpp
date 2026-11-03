@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
-#include "AVEVA/RocksDB/Plugin/Azure/SequentialFile.hpp"
 #include "consumer/MainApiConsumer.hpp"
 
 #include <gtest/gtest.h>
@@ -33,13 +32,5 @@ TEST(SourceCompatTests, Registration_CompilesAndReachesTheSingleRegisterEntryPoi
 // Instantiates the file-usage fixture so a signature change in the RocksDB-facing interface fails to compile.
 TEST(SourceCompatTests, MainStyleFileUsage_Compiles) {
     static_assert(std::is_invocable_r_v<rocksdb::IOStatus, decltype(&UseFilesLikeMain), rocksdb::FileSystem&>);
-    SUCCEED();
-}
-
-// Intentional breaks documented in README.md ("Source and binary compatibility"). If one of these starts to compile
-// again, update the note: it is a deliberate boundary, not an accident.
-TEST(SourceCompatTests, IntentionalBreaks_AreEnforced) {
-    using AVEVA::RocksDB::Plugin::Azure::SequentialFile;
-    static_assert(std::is_base_of_v<rocksdb::FSSequentialFile, SequentialFile>);
     SUCCEED();
 }

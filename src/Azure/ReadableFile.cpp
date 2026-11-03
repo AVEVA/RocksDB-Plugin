@@ -2,8 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
-#include "BasicReadableFile.ipp"
-#include "Impl/Files/ReadableFileImpl.ipp" // ReadAsync/Prefetch are templates on the completion, so they instantiate here
+#include "BasicReadableFile.hpp"
 
 namespace AVEVA::RocksDB::Plugin::Azure {
 template class BasicReadableFile<Impl::ReadableFileImpl>;

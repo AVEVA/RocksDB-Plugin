@@ -3,15 +3,12 @@
 
 // Deliberately includes only the public headers, and nothing else, before checking what they dragged in.
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/BlobFilesystem.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Defaults.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Directory.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/LockFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Logger.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Plugin.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/ReadWriteFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/SequentialFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/WriteableFile.hpp"
 
 #include <gtest/gtest.h>

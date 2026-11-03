@@ -9,6 +9,7 @@ target_include_directories(aveva-rocksdb-plugin-azure-impl-test-support PUBLIC
     "${PROJECT_SOURCE_DIR}/src/Azure"
     "${PROJECT_SOURCE_DIR}/src/Azure/Impl")
 target_include_directories(aveva-rocksdb-plugin-azure-impl-test-support PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_precompile_headers(aveva-rocksdb-plugin-azure-impl-test-support REUSE_FROM aveva-rocksdb-plugin-azure-impl)
 add_executable(aveva-rocksdb-plugin-azure-impl-tests
     ImplTests.cpp
     AsyncReadTests.cpp
@@ -28,7 +29,6 @@ add_executable(aveva-rocksdb-plugin-azure-impl-tests
     LockFileImplTests.cpp
     BlobOperationsTests.cpp
     AzureContainerClientTests.cpp
-    BlobFilesystemTests.cpp
     BlobFilesystemFakeTests.cpp
     PluginTests.cpp
     BlobHelpersTests.cpp
@@ -41,11 +41,12 @@ target_link_libraries(aveva-rocksdb-plugin-azure-impl-tests PRIVATE GTest::gtest
 if(MSVC)
     target_compile_options(aveva-rocksdb-plugin-azure-impl-tests PRIVATE /bigobj)
 endif()
-# The template bodies (*.ipp) are private to the library, so the tests that instantiate them over fakes reach them
+# The Impl headers are private to the library, so the tests that instantiate templates over fakes reach them
 # through the source tree.
 target_include_directories(aveva-rocksdb-plugin-azure-impl-tests PRIVATE
     "${PROJECT_SOURCE_DIR}/src/Azure"
     "${PROJECT_SOURCE_DIR}/src/Azure/Impl")
+# No PCH here: PublicHeadersTests.cpp verifies the public headers don't pull in Boost.Asio, which the PCH would force-include.
 include(GoogleTest)
 # Every test keeps the `unit` label and also gets one subsystem label (file-io, filesystem, lock,
 # runtime) so a subsystem can be run alone with `ctest -L <label>`. Suites map to subsystems by
@@ -58,7 +59,7 @@ set(aveva_impl_file_io_suites
     ReadDeadlineTests ReadWriteFileGapWindowTests BlobMetadataCacheAllocationTests)
 set(aveva_impl_filesystem_suites
     AzureContainerClientTests BlobFilesystemFakeRuntimeTests BlobFilesystemFakeTests CachedFailureTests
-    PageBoundaryTests RenameFailureTests BlobFilesystemTests BlobHelpersCredentialLifetimeTests
+    PageBoundaryTests RenameFailureTests BlobHelpersCredentialLifetimeTests
     BlobHelpersTests CredentialChainTests FileSizeMetadataTests PageRoundingTests BlobOperationsFakeBlobTests
     BlobOperationsTests DownloadToFileTests DownloadBufferPoolTests PluginTests
     RequireFullDownloadTests RenameTempNameTests BlobOperationsPushAcceptedTests)
@@ -102,6 +103,7 @@ endif()
 target_include_directories(aveva-rocksdb-plugin-azure-impl-benchmark PRIVATE
     "${PROJECT_SOURCE_DIR}/src/Azure"
     "${PROJECT_SOURCE_DIR}/src/Azure/Impl")
+target_precompile_headers(aveva-rocksdb-plugin-azure-impl-benchmark REUSE_FROM aveva-rocksdb-plugin-azure-impl)
 gtest_discover_tests(aveva-rocksdb-plugin-azure-impl-benchmark DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 300 LABELS "benchmark;plugin")
 
 # Live-Azure tests skip themselves unless AVEVA_RUN_AZURE_INTEGRATION_TESTS=1, so they live in their own executable.
@@ -120,4 +122,5 @@ endif()
 target_include_directories(aveva-rocksdb-plugin-azure-impl-integration-tests PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${PROJECT_SOURCE_DIR}/src/Azure")
+target_precompile_headers(aveva-rocksdb-plugin-azure-impl-integration-tests REUSE_FROM aveva-rocksdb-plugin-azure-impl)
 gtest_discover_tests(aveva-rocksdb-plugin-azure-impl-integration-tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 600 LABELS integration RESOURCE_LOCK azure_integration_account)

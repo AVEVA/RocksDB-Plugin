@@ -2,9 +2,8 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Plugin.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/BlobFilesystem.hpp"
+#include "BasicBlobFilesystem.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/HandleFactory.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
 #include "PluginRegistry.hpp"
 #include <rocksdb/file_system.h>
@@ -50,12 +49,11 @@ rocksdb::Status RegisterAccounts(rocksdb::ConfigOptions& configOptions, rocksdb:
         const auto cachePath =
             options.Cache ? std::optional<std::filesystem::path>(options.Cache->Directory) : std::nullopt;
         const auto maxCacheSize = options.Cache ? options.Cache->MaxSize.Bytes() : ByteCount{};
-        auto impl = std::make_unique<Impl::BlobFilesystemImpl>(*context, accounts.Primary, accounts.Backup,
-                                                               options.DataFileInitialSize, options.DataFileBufferSize,
-                                                               options.Log, cachePath, maxCacheSize);
-        impl->SetMaxPrefetchBytes(options.MaxPrefetchBytes.Bytes());
-        return std::unique_ptr<rocksdb::FileSystem>(
-            Impl::HandleFactory::Create<BlobFilesystem>(rocksdb::FileSystem::Default(), std::move(impl), options.Log));
+        auto filesystem = std::make_unique<BasicBlobFilesystem<Impl::BlobFilesystemImpl>>(
+            rocksdb::FileSystem::Default(), options.Log, *context, accounts.Primary, accounts.Backup,
+            options.DataFileInitialSize, options.DataFileBufferSize, options.Log, cachePath, maxCacheSize);
+        filesystem->Implementation().SetMaxPrefetchBytes(options.MaxPrefetchBytes.Bytes());
+        return std::unique_ptr<rocksdb::FileSystem>(std::move(filesystem));
     };
 
     for (const auto& name : {pluginName, legacyName}) {

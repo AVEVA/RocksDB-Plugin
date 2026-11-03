@@ -1,4 +1,3 @@
-#include <AVEVA/RocksDB/Plugin/Azure/BlobFilesystem.hpp>
 #include <AVEVA/RocksDB/Plugin/Azure/Plugin.hpp>
 
 // The runtime guard keeps the call from executing but still forces the linker to resolve the symbol and

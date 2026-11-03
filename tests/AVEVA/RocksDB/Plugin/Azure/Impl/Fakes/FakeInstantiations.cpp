@@ -1,19 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
-// The member bodies of the file implementations are private to the library (src/Azure/Impl/*.ipp). The production
-// instantiations live in the library; this is where the tests instantiate them over the fake blob client.
+// The member bodies of the file implementations are in the Impl headers. The production instantiations live in the
+// library; this is where the tests instantiate them over the fake blob client.
 #include "FakeBlobEnvironment.hpp"
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/SequentialFileImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
 
-#include "Impl/Files/LockFileImpl.ipp"
-#include "Impl/Files/ReadWriteFileImpl.ipp"
-#include "Impl/Files/ReadableFileImpl.ipp"
-#include "Impl/Files/SequentialFileImpl.ipp"
-#include "Impl/Files/WriteableFileImpl.ipp"
-
-#include "BasicReadableFile.ipp"
+#include "BasicReadableFile.hpp"
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl::Tests {
 template class BasicReadableFileImpl<FakeBlobServer::BlobClientType>;

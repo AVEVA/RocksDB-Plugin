@@ -1,69 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
-#include "AVEVA/RocksDB/Plugin/Azure/ReadWriteFile.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/RangeCheck.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
-#include <boost/log/trivial.hpp>
-#include <cassert>
-#include <limits>
+#include "BasicReadWriteFile.hpp"
+
 namespace AVEVA::RocksDB::Plugin::Azure {
-using namespace boost::log::trivial;
-ReadWriteFile::ReadWriteFile(
-    Impl::ReadWriteFileImpl&& file,
-    std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
-    : m_file(std::make_unique<Impl::ReadWriteFileImpl>(std::move(file))), m_logger(std::move(logger)) {}
-
-ReadWriteFile::~ReadWriteFile() = default;
-
-rocksdb::IOStatus ReadWriteFile::Write(uint64_t offset, const rocksdb::Slice& data, const rocksdb::IOOptions&,
-                                       rocksdb::IODebugContext*) {
-    return AzureErrorTranslator::Invoke(*m_logger, "Write", [&] {
-        if (Impl::RangeCheck::Check(offset, data.size()) == Impl::RangeCheck::Bounds::OutOfRange) {
-            return rocksdb::IOStatus::InvalidArgument("Write offset or size is out of range");
-        }
-
-        m_file->Write(Core::ByteOffset{offset}, std::span<const char>(data.data(), data.size()));
-        return rocksdb::IOStatus::OK();
-    });
-}
-
-rocksdb::IOStatus ReadWriteFile::Read(uint64_t offset, size_t n, const rocksdb::IOOptions&, rocksdb::Slice* result,
-                                      char* scratch, rocksdb::IODebugContext*) const {
-    return AzureErrorTranslator::Invoke(*m_logger, "Read", [&] {
-        if (Impl::RangeCheck::Check(offset, n) == Impl::RangeCheck::Bounds::OutOfRange) {
-            return rocksdb::IOStatus::InvalidArgument("Read offset or size is out of range");
-        }
-
-        const auto bytesRead = m_file->Read(Core::ByteOffset{offset}, std::span<char>(scratch, n));
-        assert(bytesRead.Value() <= n && "Bytes read should not exceed requested amount");
-
-        result->data_ = scratch;
-        result->size_ = static_cast<size_t>(bytesRead.Value());
-        return rocksdb::IOStatus::OK();
-    });
-}
-
-rocksdb::IOStatus ReadWriteFile::Flush(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
-    return AzureErrorTranslator::Invoke(*m_logger, "Flush", [&] {
-        m_file->Flush();
-        return rocksdb::IOStatus::OK();
-    });
-}
-
-rocksdb::IOStatus ReadWriteFile::Sync(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
-    return AzureErrorTranslator::Invoke(*m_logger, "Sync", [&] {
-        m_file->Sync();
-        return rocksdb::IOStatus::OK();
-    });
-}
-
-rocksdb::IOStatus ReadWriteFile::Close(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
-    return AzureErrorTranslator::Invoke(*m_logger, "Close", [&] {
-        m_file->Close();
-        return rocksdb::IOStatus::OK();
-    });
-}
+template class BasicReadWriteFile<Impl::ReadWriteFileImpl>;
 } // namespace AVEVA::RocksDB::Plugin::Azure

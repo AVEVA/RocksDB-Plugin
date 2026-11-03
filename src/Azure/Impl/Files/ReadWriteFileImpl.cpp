@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
-#include "Impl/Files/ReadWriteFileImpl.ipp"
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 template class BasicReadWriteFileImpl<PageBlobClient>;

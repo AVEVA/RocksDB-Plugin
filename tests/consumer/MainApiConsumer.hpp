@@ -6,7 +6,6 @@
 // (tests/consumer/CMakeLists.txt). See "Source and binary compatibility" in README.md.
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/Plugin.hpp"
-#include "AVEVA/RocksDB/Plugin/Azure/ReadWriteFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/WriteableFile.hpp"
 
 #include <boost/asio/io_context.hpp>
@@ -118,6 +117,5 @@ inline rocksdb::IOStatus UseFilesLikeMain(rocksdb::FileSystem& fs) {
 }
 
 // The Azure file types remain usable as RocksDB file interfaces, which is all main's public headers promised.
-static_assert(std::is_base_of_v<rocksdb::FSRandomRWFile, Azure::ReadWriteFile>);
 static_assert(std::is_base_of_v<rocksdb::FSWritableFile, Azure::WriteableFile>);
 } // namespace AVEVA::RocksDB::Plugin::ConsumerFixtures
