@@ -540,7 +540,7 @@ rocksdb::Status FileBasedCompressedSecondaryCache::SetCapacity(const size_t capa
 }
 
 rocksdb::Status FileBasedCompressedSecondaryCache::GetCapacity(size_t& capacity) noexcept {
-    capacity = static_cast<size_t>(m_impl->GetCapacity().Value());
+    capacity = m_impl->GetCapacity().Value();
     return rocksdb::Status::OK();
 }
 
