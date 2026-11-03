@@ -161,7 +161,7 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
     }
 
     // The leases that failed a round and the attempt that comes next.
-    struct Retry {
+    struct RetryState {
         std::vector<std::shared_ptr<TLock>> Locks;
         size_t Attempt = 0;
     };
@@ -169,7 +169,7 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
     // What to do after a round: sleep `Delay`, then either retry the failed leases or take a fresh snapshot.
     struct Next {
         std::chrono::milliseconds Delay;
-        std::optional<Retry> Retry;
+        std::optional<RetryState> Retry;
     };
 
     BasicLeaseRenewalLoop(boost::asio::io_context::executor_type executor, std::shared_ptr<Logger> logger,
@@ -183,7 +183,7 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
     // the coroutine frame, so the loop outlives it even after the owner drops its reference.
     static boost::asio::awaitable<void> Run(std::shared_ptr<BasicLeaseRenewalLoop> self) {
         auto delay = self->m_interval;
-        std::optional<Retry> retry;
+        std::optional<RetryState> retry;
         try {
             while (co_await self->Sleep(delay) == LoopState::Running) {
                 auto next = co_await self->RunRound(std::exchange(retry, std::nullopt));
@@ -223,7 +223,7 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
 
     // Renews the leases of one round (a retry's, or a fresh snapshot) and decides what follows. Returns empty when the
     // loop has stopped. Counting the round before the mutex is released keeps Stop() waiting for it.
-    boost::asio::awaitable<std::optional<Next>> RunRound(std::optional<Retry> retry) {
+    boost::asio::awaitable<std::optional<Next>> RunRound(std::optional<RetryState> retry) {
         std::vector<std::shared_ptr<TLock>> locks;
         size_t attempt = 0;
         {
@@ -381,7 +381,7 @@ class BasicLeaseRenewalLoop : public std::enable_shared_from_this<BasicLeaseRene
         const size_t nextAttempt = attempt + 1;
         if (!stillPending.empty() && nextAttempt < m_maxAttempts) {
             const auto delay = NextRetryDelay(DeadlineBound(stillPending), attempt, serverHint);
-            return Next{delay, Retry{std::move(stillPending), nextAttempt}};
+            return Next{delay, RetryState{std::move(stillPending), nextAttempt}};
         }
 
         // A lease that could not be renewed in time may already be held by someone else; stop before writing on its
