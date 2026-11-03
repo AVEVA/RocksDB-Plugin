@@ -50,6 +50,13 @@ class FileBasedCompressedSecondaryCache final : public rocksdb::SecondaryCache {
         std::filesystem::path cacheDir, std::shared_ptr<Filesystem> fs, size_t capacity,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger);
 
+    /// <summary>When alwaysForceInsert is true, allow capacity eviction even when RocksDB
+    /// suggests a non-forced insert. The four-argument constructor preserves RocksDB's suggestion.</summary>
+    FileBasedCompressedSecondaryCache(
+        std::filesystem::path cacheDir, std::shared_ptr<Filesystem> fs, size_t capacity,
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+        bool alwaysForceInsert);
+
     ~FileBasedCompressedSecondaryCache() override;
     FileBasedCompressedSecondaryCache(const FileBasedCompressedSecondaryCache&) = delete;
     FileBasedCompressedSecondaryCache& operator=(const FileBasedCompressedSecondaryCache&) = delete;

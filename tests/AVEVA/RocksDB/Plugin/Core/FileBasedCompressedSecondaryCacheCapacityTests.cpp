@@ -163,6 +163,35 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ForceInsertTrue_WhenCacheFull_Evi
 }
 
 // --------------------------------------------------------------------------
+TEST_F(FileBasedCompressedSecondaryCacheTests, AlwaysForceInsert_NonForcedInsert_EvictsLeastRecentlyUsed) {
+    const size_t capacity = 2 * (FileBasedCompressedSecondaryCache::kFileHeaderSize + 10);
+    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, MakeNullLogger(),
+                                                                  /*alwaysForceInsert=*/true);
+    TestPayload payload{"0123456789"};
+    ASSERT_TRUE(m_cache->Insert(MakeKey("first"), &payload, &m_helper, false).ok());
+    ASSERT_TRUE(m_cache->Insert(MakeKey("second"), &payload, &m_helper, false).ok());
+    bool kept = false;
+    auto first = m_cache->Lookup(MakeKey("first"), &m_helper, nullptr, true, false, nullptr, kept);
+    ASSERT_NE(first, nullptr);
+    delete static_cast<TestPayload*>(first->Value());
+
+    ASSERT_TRUE(m_cache->Insert(MakeKey("third"), &payload, &m_helper, false).ok());
+    EXPECT_EQ(m_cache->Lookup(MakeKey("second"), &m_helper, nullptr, true, false, nullptr, kept), nullptr);
+    for (const auto* key : {"first", "third"}) {
+        auto handle = m_cache->Lookup(MakeKey(key), &m_helper, nullptr, true, false, nullptr, kept);
+        ASSERT_NE(handle, nullptr);
+        EXPECT_EQ(static_cast<TestPayload*>(handle->Value())->data, payload.data);
+        delete static_cast<TestPayload*>(handle->Value());
+    }
+
+    TestPayload oversized{std::string(capacity + 1, 'x')};
+    ASSERT_TRUE(m_cache->Insert(MakeKey("oversized"), &oversized, &m_helper, false).ok());
+    EXPECT_EQ(m_cache->Lookup(MakeKey("oversized"), &m_helper, nullptr, true, false, nullptr, kept), nullptr);
+    size_t usage = 0;
+    ASSERT_TRUE(m_cache->GetUsage(usage).ok());
+    EXPECT_EQ(usage, capacity);
+}
+
 // force_insert=false on an existing key succeeds even when the cache is full
 // (net capacity change = 0 because the old entry is replaced, not added)
 // --------------------------------------------------------------------------

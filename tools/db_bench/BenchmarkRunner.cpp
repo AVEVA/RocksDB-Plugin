@@ -196,7 +196,8 @@ void RegisterFileBasedSecondaryCache() {
             // SecondaryCache::CreateFromString) moves the unique_ptr into the
             // shared_ptr it hands back to db_bench.
             *guard = std::make_unique<FileBasedCompressedSecondaryCache>(
-                options->cacheDir, std::make_shared<LocalFilesystem>(), options->capacity, options->logger);
+                options->cacheDir, std::make_shared<LocalFilesystem>(), options->capacity, options->logger,
+                EnvFlagOr("AVEVA_DB_BENCH_SECONDARY_CACHE_ALWAYS_FORCE_INSERT", false));
             return guard->get();
         });
 }

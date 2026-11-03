@@ -231,6 +231,12 @@ preallocated cache file size does not. The file-based backend logs
 capacity eviction and every subsequent 4096-eviction boundary; these count index
 removals, excluding promotions and explicit erasure.
 
+For a file-based replacement-policy experiment, set
+`AVEVA_DB_BENCH_SECONDARY_CACHE_ALWAYS_FORCE_INSERT=1` (default `0`).
+This allows `Insert` to evict LRU entries even when RocksDB suggests a
+non-forced insertion. It does not change hit promotion, capacity, or restart
+behavior. With the default, non-forced inserts that need more space are skipped.
+
 The wrapper's stderr banner echoes the exact URIs and env vars available in
 your build, so you don't need to remember this list.
 
