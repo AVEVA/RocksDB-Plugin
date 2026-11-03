@@ -221,6 +221,15 @@ line per Navy counter (e.g. `navy_bc_lookups`, `navy_bc_succ_lookups`, `navy_bc_
 `navy_bc_used_size_bytes`, and `navy_device_bytes_written` for SSD wear). The cache is
 reset on every open, so the totals cover a single db_bench invocation. Counter
 names vary by Navy version; list them with `grep CACHELIB_COUNTER <log>`.
+Selected occupancy, eviction, reclaim, and I/O counters are also sampled every
+4096 scheduled inserts. RocksDB retains the secondary cache in a static shared
+pointer, so db_bench's early process exit can skip the shutdown dump. Progress
+samples are cumulative lower bounds, not exact final totals. Nonzero
+`navy_bc_evictions`/`navy_bc_reclaim` establishes eviction activity; the
+preallocated cache file size does not. The file-based backend logs
+`SECONDARY_CACHE_COUNTER capacity_evictions=...` on its first insertion-driven
+capacity eviction and every subsequent 4096-eviction boundary; these count index
+removals, excluding promotions and explicit erasure.
 
 The wrapper's stderr banner echoes the exact URIs and env vars available in
 your build, so you don't need to remember this list.

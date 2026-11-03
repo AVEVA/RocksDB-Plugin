@@ -395,12 +395,20 @@ class CacheLibSecondaryCache::Impl {
     // Greppable one-line-per-counter format so benchmark pipelines can extract the totals
     // (e.g. navy_device_bytes_written for SSD wear) from the db_bench log. Never throws: it runs
     // from the destructor.
-    void LogCounters() noexcept {
+    void LogCounters(bool progressOnly = false) noexcept {
         try {
-            VisitCounters([this](std::string_view name, double value) {
+            VisitCounters([this, progressOnly](std::string_view name, double value) {
+                if (progressOnly && name != "navy_bc_evictions" && name != "navy_bc_reclaim" &&
+                    name != "navy_bc_used_size_bytes" && name != "navy_bc_succ_inserts" &&
+                    name != "navy_bc_succ_lookups" && name != "navy_device_bytes_read" &&
+                    name != "navy_device_bytes_written") {
+                    return;
+                }
                 BOOST_LOG_SEV(*m_logger, info) << "CACHELIB_COUNTER " << name << "=" << std::fixed << value;
             });
         } catch (...) {
+            BOOST_LOG_SEV(*m_logger, warning)
+                << "CacheLibSecondaryCache: failed to collect counters: " << CurrentExceptionToStatus().ToString();
         }
     }
 
@@ -451,10 +459,16 @@ class CacheLibSecondaryCache::Impl {
                             [buffer = std::move(entry.buffer)](navy::Status, facebook::cachelib::HashedKey) mutable {
                                 buffer.reset();
                             });
+        // db_bench retains the cache in a static shared_ptr and skips static
+        // destructors. Sample during use so reclaim telemetry is not lost.
+        if (m_logCountersOnShutdown && m_scheduledInserts.fetch_add(1, std::memory_order_relaxed) % 4096 == 4095) {
+            LogCounters(/*progressOnly=*/true);
+        }
     }
 
     std::shared_ptr<SecondaryCacheOptions::Logger> m_logger;
     bool m_logCountersOnShutdown = false;
+    std::atomic<uint64_t> m_scheduledInserts{0};
     std::unique_ptr<navy::AbstractCache> m_navy;
     size_t m_maxEntrySize = 0;
     std::string m_printable;

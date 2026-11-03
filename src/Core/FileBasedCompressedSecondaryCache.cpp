@@ -16,6 +16,7 @@
 
 #include <boost/container/small_vector.hpp>
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <iterator>
@@ -81,6 +82,8 @@ class FileBasedCompressedSecondaryCache::Impl {
     std::shared_ptr<Filesystem> m_fs;
     LruFileIndex m_lruIndex;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
+    std::atomic<uint64_t> m_capacityEvictions{0};
+    bool m_alwaysForceInsert;
 
     /// <summary>
     /// Result of attempting to read a cache entry file.
@@ -96,9 +99,10 @@ class FileBasedCompressedSecondaryCache::Impl {
 
   public:
     explicit Impl(std::filesystem::path cacheDir, std::shared_ptr<Filesystem> fs, size_t capacity,
-                  std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
+                  std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+                  bool alwaysForceInsert)
         : m_cacheDir(std::move(cacheDir)), m_fs(std::move(fs)), m_lruIndex(m_cacheDir.string(), capacity),
-          m_logger(std::move(logger)) {
+          m_logger(std::move(logger)), m_alwaysForceInsert(alwaysForceInsert) {
         if (!m_logger) {
             throw std::invalid_argument("FileBasedCompressedSecondaryCache: logger cannot be null");
         }
@@ -107,7 +111,8 @@ class FileBasedCompressedSecondaryCache::Impl {
         m_fs->CreateDir(m_cacheDir);
 
         BOOST_LOG_SEV(*m_logger, info) << "FileBasedCompressedSecondaryCache: initialized dir='" << m_cacheDir.string()
-                                       << "', capacity=" << capacity << " bytes";
+                                       << "', capacity=" << capacity
+                                       << " bytes, always_force_insert=" << m_alwaysForceInsert;
     }
 
     const char* Name() const noexcept { return "FileBasedCompressedSecondaryCache"; }
@@ -134,7 +139,8 @@ class FileBasedCompressedSecondaryCache::Impl {
                 return s;
             }
 
-            return WriteEntry(key, rocksdb::CompressionType::kNoCompression, buf.data(), dataSize, forceInsert);
+            return WriteEntry(key, rocksdb::CompressionType::kNoCompression, buf.data(), dataSize,
+                              forceInsert || m_alwaysForceInsert);
         } catch (...) {
             const auto s = StatusUtil::CurrentExceptionToStatus();
             BOOST_LOG_SEV(*m_logger, error) << Name() << "::" << __func__ << ": " << s.ToString();
@@ -335,6 +341,19 @@ class FileBasedCompressedSecondaryCache::Impl {
     }
 
   private:
+    /// <summary>Counts capacity removals separately from promotion and explicit erasure.</summary>
+    void RecordCapacityEvictions(size_t count) {
+        if (count == 0) {
+            return;
+        }
+        const auto previous = m_capacityEvictions.fetch_add(count, std::memory_order_relaxed);
+        const auto total = previous + count;
+        if (previous == 0 || previous / 4096 != total / 4096) {
+            BOOST_LOG_SEV(*m_logger, info)
+                << "SECONDARY_CACHE_COUNTER capacity_evictions=" << total << " usage_bytes=" << m_lruIndex.GetUsage();
+        }
+    }
+
     /// <summary>
     /// Hex-encodes <paramref name="key"/> and returns the result.
     /// Returns an empty string when the key is too long to encode inline.
@@ -384,6 +403,7 @@ class FileBasedCompressedSecondaryCache::Impl {
             if (!reserved)
                 return rocksdb::Status::OK(); // admission control: over capacity, skip write
             FileUtil::CommitEvictions(*m_fs, *reserved);
+            RecordCapacityEvictions(reserved->size());
 
             // Phase 2: write the file — no lock held.
             if (auto s = WriteToDisk(filename, type, data, dataSize, storedSize); !s.ok())
@@ -393,6 +413,7 @@ class FileBasedCompressedSecondaryCache::Impl {
             //          Commit I/O (rename + delete) only after releasing the lock.
             const auto evictList = m_lruIndex.RegisterEntry(filename, storedSize);
             FileUtil::CommitEvictions(*m_fs, evictList);
+            RecordCapacityEvictions(evictList.size());
 
             return rocksdb::Status::OK();
         } catch (...) {
@@ -461,7 +482,14 @@ class FileBasedCompressedSecondaryCache::Impl {
 FileBasedCompressedSecondaryCache::FileBasedCompressedSecondaryCache(
     std::filesystem::path cacheDir, std::shared_ptr<Filesystem> fs, const size_t capacity,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
-    : m_impl(std::make_unique<Impl>(std::move(cacheDir), std::move(fs), capacity, std::move(logger))) {}
+    : FileBasedCompressedSecondaryCache(std::move(cacheDir), std::move(fs), capacity, std::move(logger), false) {}
+
+FileBasedCompressedSecondaryCache::FileBasedCompressedSecondaryCache(
+    std::filesystem::path cacheDir, std::shared_ptr<Filesystem> fs, const size_t capacity,
+    std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+    bool alwaysForceInsert)
+    : m_impl(
+          std::make_unique<Impl>(std::move(cacheDir), std::move(fs), capacity, std::move(logger), alwaysForceInsert)) {}
 
 AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache::~FileBasedCompressedSecondaryCache() {}
 
