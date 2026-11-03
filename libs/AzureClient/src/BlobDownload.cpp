@@ -55,7 +55,6 @@ namespace AVEVA::AzureClient::Private::DownloadDetail {
 [[nodiscard]] std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>
 FinalizeFileDownload(std::ofstream& file, const std::filesystem::path& tempPath, const std::filesystem::path& target,
                      SummaryResult result) {
-    using FileResult = std::expected<Response<Models::DownloadBlobToResult>, BlobStorageError>;
     file.close();
     std::error_code ignored;
     if (!result.has_value()) {

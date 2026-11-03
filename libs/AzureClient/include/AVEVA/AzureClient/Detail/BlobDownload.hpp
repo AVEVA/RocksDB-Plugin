@@ -95,7 +95,7 @@ boost::asio::awaitable<void> RunOnWriter(THttp& httpClient, const std::optional<
     } guard{cancellation.slot()};
     const auto mirror = [hop](boost::asio::cancellation_type_t) { hop->Canceled = Cancellation::Canceled; };
     if (guard.Slot.is_connected()) {
-        guard.Slot.emplace<decltype(mirror)>(mirror);
+        guard.Slot.template emplace<decltype(mirror)>(mirror);
     }
 
     const auto body = [&task, hop]() -> boost::asio::awaitable<void> {
