@@ -186,7 +186,7 @@ TEST(InsecureHttpTests, HttpsEndpointNeedsNoOptIn) {
 
 TEST(SasTokenValidationTests, ControlCharactersFragmentsAndEmbeddedQuestionMarksAreRejected) {
     FakeHttpClient httpClient;
-    for (const std::string token : {std::string{"sv=1&sig=a\r\nx-ms-evil: 1"}, std::string{"sv=1#frag"},
+    for (const std::string& token : {std::string{"sv=1&sig=a\r\nx-ms-evil: 1"}, std::string{"sv=1#frag"},
                                     std::string{"sv=1?sig=x"}, std::string{"sv=1 &sig=x"}, std::string{"sv=1\0x", 6}}) {
         auto options = MakeBlobClientOptions();
         options.SasToken = token;
@@ -196,7 +196,7 @@ TEST(SasTokenValidationTests, ControlCharactersFragmentsAndEmbeddedQuestionMarks
 
 TEST(SasTokenValidationTests, MalformedPairsAreRejected) {
     FakeHttpClient httpClient;
-    for (const std::string token : {std::string{"sv"}, std::string{"sv=1&&sig=x"}, std::string{"=1&sig=x"},
+    for (const std::string& token : {std::string{"sv"}, std::string{"sv=1&&sig=x"}, std::string{"=1&sig=x"},
                                     std::string{"sv=1&sig"}, std::string{"sv=1&"}}) {
         auto options = MakeBlobClientOptions();
         options.SasToken = token;
