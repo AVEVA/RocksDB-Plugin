@@ -13,13 +13,13 @@
 
 #include "BasicReadableFile.hpp"
 
-namespace AVEVA::RocksDB::Plugin::Azure::Impl::Tests {
-template class BasicReadableFileImpl<FakeBlobServer::BlobClientType>;
-template class BasicWriteableFileImpl<FakeBlobServer::BlobClientType>;
-template class BasicReadWriteFileImpl<FakeBlobServer::BlobClientType>;
-template class BasicSequentialFileImpl<FakeBlobServer::BlobClientType>;
-template class BasicLockFileImpl<FakeBlobServer::BlobClientType>;
-} // namespace AVEVA::RocksDB::Plugin::Azure::Impl::Tests
+namespace AVEVA::RocksDB::Plugin::Azure::Impl {
+template class BasicReadableFileImpl<Tests::FakeBlobServer::BlobClientType>;
+template class BasicWriteableFileImpl<Tests::FakeBlobServer::BlobClientType>;
+template class BasicReadWriteFileImpl<Tests::FakeBlobServer::BlobClientType>;
+template class BasicSequentialFileImpl<Tests::FakeBlobServer::BlobClientType>;
+template class BasicLockFileImpl<Tests::FakeBlobServer::BlobClientType>;
+} // namespace AVEVA::RocksDB::Plugin::Azure::Impl
 
 namespace AVEVA::RocksDB::Plugin::Azure {
 template class BasicReadableFile<Impl::Tests::FakeReadableFileImpl>;

@@ -10,6 +10,8 @@ target_include_directories(aveva-rocksdb-plugin-azure-impl-test-support PUBLIC
     "${PROJECT_SOURCE_DIR}/src/Azure/Impl")
 target_include_directories(aveva-rocksdb-plugin-azure-impl-test-support PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_precompile_headers(aveva-rocksdb-plugin-azure-impl-test-support REUSE_FROM aveva-rocksdb-plugin-azure-impl)
+# The reused PCH is built position independent, so the consumers must match or GCC rejects it (-Winvalid-pch).
+set_target_properties(aveva-rocksdb-plugin-azure-impl-test-support PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_executable(aveva-rocksdb-plugin-azure-impl-tests
     ImplTests.cpp
     AsyncReadTests.cpp
@@ -104,6 +106,10 @@ target_include_directories(aveva-rocksdb-plugin-azure-impl-benchmark PRIVATE
     "${PROJECT_SOURCE_DIR}/src/Azure"
     "${PROJECT_SOURCE_DIR}/src/Azure/Impl")
 target_precompile_headers(aveva-rocksdb-plugin-azure-impl-benchmark REUSE_FROM aveva-rocksdb-plugin-azure-impl)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    # An executable is compiled -fPIE while the shared PCH is -fPIC; GCC then ignores the PCH, which must not be fatal.
+    target_compile_options(aveva-rocksdb-plugin-azure-impl-benchmark PRIVATE -Wno-error=invalid-pch)
+endif()
 gtest_discover_tests(aveva-rocksdb-plugin-azure-impl-benchmark DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 300 LABELS "benchmark;plugin")
 
 # Live-Azure tests skip themselves unless AVEVA_RUN_AZURE_INTEGRATION_TESTS=1, so they live in their own executable.
@@ -123,4 +129,7 @@ target_include_directories(aveva-rocksdb-plugin-azure-impl-integration-tests PRI
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${PROJECT_SOURCE_DIR}/src/Azure")
 target_precompile_headers(aveva-rocksdb-plugin-azure-impl-integration-tests REUSE_FROM aveva-rocksdb-plugin-azure-impl)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(aveva-rocksdb-plugin-azure-impl-integration-tests PRIVATE -Wno-error=invalid-pch)
+endif()
 gtest_discover_tests(aveva-rocksdb-plugin-azure-impl-integration-tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 600 LABELS integration RESOURCE_LOCK azure_integration_account)
