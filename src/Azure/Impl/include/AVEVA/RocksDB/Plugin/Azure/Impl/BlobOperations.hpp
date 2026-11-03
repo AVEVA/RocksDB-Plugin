@@ -371,7 +371,7 @@ Task<void> DownloadChunkAsync(TBlob& client, std::shared_ptr<std::vector<char>> 
 template <typename TBlob>
 Task<void> DownloadWaveAsync(TBlob& client, std::shared_ptr<std::vector<char>> wave,
                              const Core::ByteOffset blobOffset) {
-    const auto chunkSize = static_cast<size_t>(Configuration::Transfer::DownloadChunkSize.Value());
+    const auto chunkSize = Configuration::Transfer::DownloadChunkSize.Value();
     TaskGroup downloads(co_await boost::asio::this_coro::executor,
                         ConcurrencyLimit{Configuration::Transfer::DownloadConcurrency});
     co_await downloads.Scope([&](TaskGroup& running) -> Task<void> {
@@ -461,7 +461,7 @@ template <typename TBlob>
     options.Conditions.IfMatch = std::move(ifMatch);
     auto requestOptions = TransferOptions(client, readLength.Value());
     // The lease lives in this frame, which outlives the transfer, so it can never write into freed memory.
-    auto buffer = DownloadBufferPool::Shared().Acquire(static_cast<size_t>(readLength.Value()));
+    auto buffer = DownloadBufferPool::Shared().Acquire(readLength.Value());
     const auto downloaded = Unwrap(co_await client.DownloadToAsync(std::span<char>(buffer->Data(), buffer->Size()),
                                                                    std::move(options), std::move(requestOptions)));
     Detail::CheckDownloadLength(downloaded);
@@ -556,7 +556,7 @@ Task<void> CopyPagesAsync(std::shared_ptr<const ClientRuntimeBase> runtime, cons
 
     constexpr auto PageSize = Configuration::PageBlob::PageSize.Value();
     const auto paddedLength = [](const Core::ByteCount length) {
-        return static_cast<size_t>((length.Value() + PageSize - 1) / PageSize * PageSize);
+        return (length.Value() + PageSize - 1) / PageSize * PageSize;
     };
 
     using Buffer = std::shared_ptr<std::vector<char>>;
@@ -580,7 +580,7 @@ Task<void> CopyPagesAsync(std::shared_ptr<const ClientRuntimeBase> runtime, cons
     co_await uploads.Scope([&](TaskGroup& running) -> Task<void> {
         for (const auto& chunk : chunks) {
             Buffer buffer = acquire(paddedLength(chunk.Length));
-            const auto dataLength = static_cast<size_t>(chunk.Length.Value());
+            const auto dataLength = chunk.Length.Value();
             const auto downloaded = co_await DownloadAsync(source, std::span<char>(*buffer).first(dataLength),
                                                            chunk.Offset, chunk.Length, etag);
             if (downloaded != chunk.Length) {

@@ -847,7 +847,7 @@ std::optional<size_t> BasicReadableFileImpl<TBlob>::TryReadFromCache(const int64
     if (m_h.FileCache && offset >= 0 && bytesToRead > 0) {
         if (const auto cached = m_h.FileCache->ReadFile(m_h.Name, Core::ByteOffset{static_cast<uint64_t>(offset)},
                                                         std::span<char>{buffer, static_cast<size_t>(bytesToRead)})) {
-            return static_cast<size_t>(cached->Value());
+            return cached->Value();
         }
     }
     if (const auto hit = TryReadFromPrefetch(offset, bytesToRead, buffer, ReadableFileDetail::PartialRead::Reject,

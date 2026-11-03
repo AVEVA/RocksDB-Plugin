@@ -52,7 +52,7 @@ template <class TImpl> class BasicReadWriteFile final : public rocksdb::FSRandom
             assert(bytesRead.Value() <= n && "Bytes read should not exceed requested amount");
 
             result->data_ = scratch;
-            result->size_ = static_cast<size_t>(bytesRead.Value());
+            result->size_ = bytesRead.Value();
             return rocksdb::IOStatus::OK();
         });
     }

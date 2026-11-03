@@ -129,7 +129,7 @@ BasicReadWriteFileImpl<TBlob>::BasicReadWriteFileImpl(
     std::shared_ptr<Core::FileCache> fileCache,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
     : m_w(name, std::move(runtime), std::move(blob), std::move(fileCache), std::move(logger), 0), m_size(0),
-      m_syncSize(0), m_buffer(static_cast<size_t>(Defaults::DataFileBufferSize.Value())) {
+      m_syncSize(0), m_buffer(Defaults::DataFileBufferSize.Value()) {
     // One GetProperties call yields both the size and the capacity.
     const auto info = BlobOperations::GetInfo(*m_w.H.Blob);
     m_size = info.Size;
