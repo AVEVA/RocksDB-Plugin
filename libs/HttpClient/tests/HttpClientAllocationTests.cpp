@@ -162,7 +162,8 @@ PublicClientMeasurement MeasurePublicClient(std::size_t bodyBytes, std::size_t r
     auto& latencies = driver.Latencies();
     std::ranges::sort(latencies);
     const auto percentile = [&](double fraction) {
-        const auto index = std::min(latencies.size() - 1, static_cast<std::size_t>(fraction * latencies.size()));
+        const auto index =
+            std::min(latencies.size() - 1, static_cast<std::size_t>(fraction * static_cast<double>(latencies.size())));
         return std::chrono::duration<double, std::micro>(latencies[index]).count();
     };
     result.p50Micros = percentile(0.50);

@@ -436,7 +436,7 @@ TEST(DnsCacheTests, ChurnBeyondTheCapEvictsOneEntryAtATimeAndStaysBounded) {
 
     std::size_t live = 0;
     for (std::size_t i = 0; i < Origins; ++i) {
-        live += Find(cache, "host" + std::to_string(i), "80") ? 1 : 0;
+        live += Find(cache, "host" + std::to_string(i), "80") ? 1U : 0U;
     }
     // Never above the cap, and never emptied by hitting it.
     EXPECT_EQ(live, TestDnsCache::MaxEntries);
