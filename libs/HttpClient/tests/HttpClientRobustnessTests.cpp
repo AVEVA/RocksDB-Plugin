@@ -620,7 +620,6 @@ TEST(HttpClientRobustness, CancellingAQueuedRequestFailsItWithoutStartingIt) {
     std::error_code firstResult;
     std::error_code queuedResult;
     std::chrono::steady_clock::duration queuedElapsed{};
-    const auto submitted = std::chrono::steady_clock::now();
     int completions = 0;
     const auto finishWhenBothDone = [&] {
         if (++completions == 2) {
@@ -999,8 +998,9 @@ TEST(HttpClientRobustness, DestroyingTheClientFailsQueuedRequestsAndCompletesAct
         options.SetTimeout(AVEVA::Timeout{std::chrono::seconds(10)});
         HttpClientTests::SendWith(*client, MakeRequest(server.Url("/" + std::to_string(i))), options,
                                   [&, i](std::error_code error, AVEVA::HttpResponse) {
-                                      ++completions[i];
-                                      results[i] = error;
+                                      const auto slot = static_cast<std::size_t>(i);
+                                      ++completions[slot];
+                                      results[slot] = error;
                                       if (i > 0 && ++queuedDone == 2) {
                                           // Release the held request only after the queued ones were failed.
                                           server.Stop();
