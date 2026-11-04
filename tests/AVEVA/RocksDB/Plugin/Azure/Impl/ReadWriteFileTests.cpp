@@ -368,8 +368,8 @@ TEST_F(ReadWriteFileImplTests, Flush_ManySmallWritesAcrossPages_CoalesceGapReads
         file->Write(ByteOffset{static_cast<uint64_t>(p * page + 104)},
                     std::span<const char>(second.data(), static_cast<size_t>(static_cast<int64_t>(
                                                              second.size())))); // overlaps: later wins
-        std::ranges::fill_n(expected.begin() + p * page + 100, first.size(), 'A');
-        std::ranges::fill_n(expected.begin() + p * page + 104, second.size(), 'B');
+        std::ranges::fill_n(expected.begin() + p * page + 100, static_cast<std::ptrdiff_t>(first.size()), 'A');
+        std::ranges::fill_n(expected.begin() + p * page + 104, static_cast<std::ptrdiff_t>(second.size()), 'B');
     }
     file->Sync();
 
@@ -411,7 +411,7 @@ class ReadWriteFileGapWindowTests : public ReadWriteFileImplTests {
                 m_file->Write(
                     ByteOffset{static_cast<uint64_t>(offset)},
                     std::span<const char>(payload.data(), static_cast<size_t>(static_cast<int64_t>(payload.size()))));
-                std::ranges::fill_n(m_expected.begin() + offset, payload.size(), 'Z');
+                std::ranges::fill_n(m_expected.begin() + offset, static_cast<std::ptrdiff_t>(payload.size()), 'Z');
             }
         }
     }
