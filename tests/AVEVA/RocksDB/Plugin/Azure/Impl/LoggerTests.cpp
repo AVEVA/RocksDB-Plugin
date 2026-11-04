@@ -97,7 +97,7 @@ TEST(LoggerTests, ConcurrentLogv_EveryLineIsIntact) {
         ASSERT_EQ(std::string("abcdefghijklmnopqrstuvwxyz"), payload) << line;
         ASSERT_EQ('\n', line.back()) << line;
         ASSERT_TRUE(t >= 0 && t < kThreads && i >= 0 && i < kLinesPerThread) << line;
-        seen[t][i] = true;
+        seen[static_cast<std::size_t>(t)][static_cast<std::size_t>(i)] = true;
     }
     for (const auto& perThread : seen) {
         for (const bool b : perThread) {
