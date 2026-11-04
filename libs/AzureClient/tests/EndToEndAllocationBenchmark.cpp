@@ -167,8 +167,8 @@ class BlobServer {
                     return;
                 }
                 session->response = BuildResponse(head);
-                auto& target = *session;
-                asio::async_write(target.socket, asio::buffer(target.response),
+                auto& writeTarget = *session;
+                asio::async_write(writeTarget.socket, asio::buffer(writeTarget.response),
                                   [this, session = std::move(session)](const boost::system::error_code& writeError,
                                                                        std::size_t) mutable {
                                       if (writeError) {
@@ -190,9 +190,9 @@ class BlobServer {
             const char* cursor = head.c_str() + at + RangePrefix.size();
             char* end = nullptr;
             first = std::strtoull(cursor, &end, DecimalBase);
-            last = std::min(last, std::strtoull(end + 1, nullptr, DecimalBase));
+            last = std::min<std::uint64_t>(last, std::strtoull(end + 1, nullptr, DecimalBase));
         }
-        const std::string body(static_cast<std::size_t>(last - first + 1), 'z');
+        const std::string body(last - first + 1, 'z');
         return "HTTP/1.1 206 Partial Content\r\nETag: " + std::string{Etag} +
                "\r\nLast-Modified: Sun, 06 Nov 1994 08:49:37 GMT\r\nx-ms-request-id: req\r\n"
                "Content-Range: bytes " +
@@ -295,8 +295,8 @@ class ReadDriver {
         m.failures = m_failures;
         std::ranges::sort(m_latencies);
         const auto micros = [&](double fraction) {
-            const auto index =
-                std::min(m_latencies.size() - 1, static_cast<std::size_t>(fraction * m_latencies.size()));
+            const auto index = std::min(m_latencies.size() - 1,
+                                        static_cast<std::size_t>(fraction * static_cast<double>(m_latencies.size())));
             return std::chrono::duration<double, std::micro>(m_latencies[index]).count();
         };
         m.p50Micros = micros(Median);

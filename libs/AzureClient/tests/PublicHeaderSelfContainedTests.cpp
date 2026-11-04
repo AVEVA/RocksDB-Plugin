@@ -158,7 +158,8 @@ enum class Observed : std::uint8_t { Pending, Value, Error };
 // still running after a watchdog timeout never writes to a dead frame.
 template <class TResult>
 boost::asio::awaitable<void> AwaitHasValue(std::shared_ptr<std::atomic<Observed>> observed, TResult result) {
-    observed->store((co_await std::move(result)).has_value() ? Observed::Value : Observed::Error);
+    const auto outcome = co_await std::move(result);
+    observed->store(outcome.has_value() ? Observed::Value : Observed::Error);
 }
 
 // Runs one operation of client by co_awaiting it in a coroutine on the client's executor.

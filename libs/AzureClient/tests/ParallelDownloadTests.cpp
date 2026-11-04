@@ -819,7 +819,7 @@ TEST(B05_DownloadIgnoredRangeTests, FullBodyAnswered200IsRejectedWhenOverMaxSize
 
 TEST(A3_DownloadIntoSpanTests, FullAndPartialRangesAreWrittenByteForByte) {
     const std::string content = MakeContent(18);
-    for (const auto [offset, length] : {std::pair{0U, 18U}, std::pair{4U, 7U}}) {
+    for (const auto& [offset, length] : {std::pair{0U, 18U}, std::pair{4U, 7U}}) {
         FakeHttpClient httpClient;
         httpClient.EnqueueResponse(RangeResponse(offset, content.substr(offset, length), content.size()));
         PageBlobClient client{httpClient, BuildOptions()};
