@@ -51,12 +51,6 @@ using AVEVA::AzureClient::Tests::RunAwaitable;
 namespace Private = AVEVA::AzureClient::Private;
 using namespace std::chrono_literals;
 
-[[nodiscard]] bool HasHeader(const HttpRequest& request, std::string_view name) {
-    return std::ranges::any_of(request.GetHeaders(), [name](const auto& header) {
-        return Private::IEquals(header.GetName(), name) == AVEVA::AzureClient::StringMatch::Match;
-    });
-}
-
 [[nodiscard]] std::string Header(const HttpRequest& request, std::string_view name) {
     return FakeHttpClient::FindHeaderValue(request, name);
 }
