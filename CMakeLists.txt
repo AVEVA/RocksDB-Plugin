@@ -43,6 +43,12 @@ if(AVEVA_ROCKSDB_SANITIZER)
     endif()
 endif()
 
+# Under LTO GCC runs its optimizer at link time with -Werror, and the whole-program view makes it report false
+# null-dereference and stringop-overflow positives inside Boost and libstdc++ inlines. Keep them as warnings there.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    add_link_options(-Wno-error=null-dereference -Wno-error=stringop-overflow)
+endif()
+
 # The global flags above already instrument the in-tree AzureClient targets; forcing its own switches off (also clearing
 # values cached by earlier configures) keeps each -fsanitize= on the command line once.
 set(AVEVA_AZURE_CLIENT_ENABLE_ASAN OFF CACHE BOOL "" FORCE)
