@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <concepts>
 #include <future>
 #include <memory>
 #include <string>
@@ -379,8 +380,8 @@ TEST_F(AsyncReadTests, PrefetchCompletion_ManyInterleavedWaiters_EachRunsOnceAnd
     std::vector<int> ranA(kWaitersPerSlot, 0);
     std::vector<int> ranB(kWaitersPerSlot, 0);
     for (int i = 0; i < kWaitersPerSlot; ++i) {
-        std::move_only_function<void()> a = [&ranA, i] { ++ranA[i]; };
-        std::move_only_function<void()> b = [&ranB, i] { ++ranB[i]; };
+        std::move_only_function<void()> a = [&ranA, slot = static_cast<std::size_t>(i)] { ++ranA[slot]; };
+        std::move_only_function<void()> b = [&ranB, slot = static_cast<std::size_t>(i)] { ++ranB[slot]; };
         ASSERT_EQ(PrefetchChain::Chained, file->ChainOntoPendingPrefetch(100, 64, a));
         ASSERT_EQ(PrefetchChain::Chained, file->ChainOntoPendingPrefetch(1100, 64, b));
     }
@@ -812,10 +813,10 @@ void FillPattern(FakeBlobEnvironment& env, const int64_t size) {
     });
 }
 
-std::string Expected(const uint64_t offset, const size_t length) {
+template <std::integral TOffset> std::string Expected(const TOffset offset, const size_t length) {
     std::string out(length, '\0');
     for (size_t i = 0; i < length; ++i) {
-        out[i] = static_cast<char>('a' + ((offset + i) % 26));
+        out[i] = static_cast<char>('a' + ((static_cast<uint64_t>(offset) + i) % 26));
     }
     return out;
 }

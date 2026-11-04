@@ -815,7 +815,7 @@ TEST(BlobMetadataCacheAllocationTests, InvalidationSurvivesAllocationFailureAndR
         std::declval<const AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntimeBase&>().MetadataCache().Invalidate(
             std::string_view{})));
     const std::string longUrl(200, 'u');
-    for (const std::string url : {std::string("a-new-url-tombstone-that-is-not-short-sso"), longUrl}) {
+    for (const std::string& url : {std::string("a-new-url-tombstone-that-is-not-short-sso"), longUrl}) {
         AVEVA::RocksDB::Plugin::Azure::Impl::ClientRuntimeBase runtime;
         runtime.MetadataCache().StoreSize(url, 1, runtime.MetadataCache().SizeEpoch());
         const auto staleEpoch = runtime.MetadataCache().SizeEpoch();
