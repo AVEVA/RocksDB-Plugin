@@ -199,7 +199,8 @@ Totals RunWindow(const int threads, const int perThread, const int64_t payloadPe
     }
     std::ranges::sort(all);
     const auto at = [&](const double fraction) {
-        return all[std::min(all.size() - 1, static_cast<std::size_t>(fraction * all.size()))];
+        return all[std::min(all.size() - 1,
+                            static_cast<std::size_t>(fraction * static_cast<double>(all.size())))];
     };
     totals.operations = all.size();
     totals.p50Micros = at(0.50);
@@ -341,7 +342,8 @@ TEST_F(PluginPathBenchmark, MultiReadMergedRanges) {
                     return false;
                 }
                 return std::ranges::all_of(
-                    batch, [](const rocksdb::FSReadRequest& r) { return r.status.ok() && r.result.size() == length; });
+                    batch,
+                    [length](const rocksdb::FSReadRequest& r) { return r.status.ok() && r.result.size() == length; });
             });
         EXPECT_EQ(downloads, threads * 32) << "one merged download per batch";
     }

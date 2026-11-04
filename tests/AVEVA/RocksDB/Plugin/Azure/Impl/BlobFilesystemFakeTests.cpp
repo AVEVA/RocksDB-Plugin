@@ -755,7 +755,7 @@ TEST_P(PageBoundaryTests, ReopenAfterFlushOnlyThenCloseKeepsTheBytes) {
 }
 
 INSTANTIATE_TEST_SUITE_P(Sizes, PageBoundaryTests, ::testing::Values<size_t>(0, 1, 511, 512, 513, 1023, 1024, 1025),
-                         [](const auto& info) { return "Size" + std::to_string(info.param); });
+                         [](const auto& paramInfo) { return "Size" + std::to_string(paramInfo.param); });
 
 TEST_F(BlobFilesystemFakeTests, ReopenWriteableFile_OfAMissingFile_CreatesItAndAcceptsAppends) {
     ASSERT_FALSE(Exists("missing.log"));
