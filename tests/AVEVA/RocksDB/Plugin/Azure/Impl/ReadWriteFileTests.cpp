@@ -2,124 +2,52 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/PageBlobWriter.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
-#include "AVEVA/RocksDB/Plugin/Core/Mocks/BlobClientMock.hpp"
+#include "AVEVA/RocksDB/Plugin/Support/TestLogger.hpp"
+
+#include "Fakes/FakeBlobEnvironment.hpp"
+#include "Fakes/SignedConfiguration.hpp"
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-using namespace AVEVA::RocksDB::Plugin::Azure::Impl;
+#include <atomic>
+#include <chrono>
+#include <future>
+#include <optional>
+#include <thread>
+
+namespace Configuration = AVEVA::RocksDB::Plugin::Azure::Impl::Tests::SignedConfiguration;
+using AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobWriter;
 using namespace AVEVA::RocksDB::Plugin::Core;
-using namespace AVEVA::RocksDB::Plugin::Core::Mocks;
-using ::testing::_;
-using ::testing::DoAll;
-using ::testing::Invoke;
-using ::testing::NiceMock;
-using ::testing::Return;
-using ::testing::SetArgPointee;
-using ::testing::StrictMock;
-
-/// <summary>
-/// Helper class for blob simulation
-/// </summary>
-class BlobSimulator {
-    uint64_t m_fileSize;
-    uint64_t m_capacity;
-    std::vector<uint8_t> m_data;
-
-  public:
-    explicit BlobSimulator(uint64_t initialCapacity = Configuration::PageBlob::DefaultSize)
-        : m_fileSize(0), m_capacity(initialCapacity) {
-        m_data.resize(static_cast<size_t>(initialCapacity), 0);
-    }
-
-    uint64_t GetSize() const { return m_fileSize; }
-
-    void SetSize(int64_t size) { m_fileSize = static_cast<uint64_t>(size); }
-
-    uint64_t GetCapacity() const { return m_capacity; }
-
-    void SetCapacity(int64_t capacity) {
-        m_capacity = static_cast<uint64_t>(capacity);
-        if (static_cast<size_t>(capacity) > m_data.size()) {
-            m_data.resize(static_cast<size_t>(capacity), 0);
-        }
-    }
-
-    void UploadPages(const std::span<char> buffer, int64_t offset) {
-        if (static_cast<size_t>(offset) + buffer.size() > m_data.size()) {
-            m_data.resize(static_cast<size_t>(offset) + buffer.size(), 0);
-        }
-
-        std::copy(buffer.begin(), buffer.end(), reinterpret_cast<char*>(m_data.data()) + offset);
-    }
-
-    int64_t DownloadTo(std::span<char> buffer, int64_t offset, int64_t length) {
-        if (static_cast<size_t>(offset) < m_data.size()) {
-            size_t available = std::min(static_cast<size_t>(length), m_data.size() - static_cast<size_t>(offset));
-            std::copy_n(reinterpret_cast<char*>(m_data.data()) + offset, available, buffer.data());
-            // Zero out any remaining bytes
-            if (available < buffer.size()) {
-                std::fill_n(buffer.data() + available, buffer.size() - available, static_cast<char>(0));
-            }
-
-            return static_cast<int64_t>(available);
-        } else {
-            std::fill_n(buffer.data(), buffer.size(), static_cast<char>(0));
-            return 0;
-        }
-    }
-
-    const std::vector<uint8_t>& GetData() const { return m_data; }
-};
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobEnvironment;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeBlobServer;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadableFile;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadableFileImpl;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeReadWriteFileImpl;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeSequentialFileImpl;
+using AVEVA::RocksDB::Plugin::Azure::Impl::Tests::FakeWriteableFileImpl;
 
 class ReadWriteFileImplTests : public ::testing::Test {
   protected:
-    std::shared_ptr<BlobClientMock> m_mockBlobClient;
-    std::shared_ptr<BlobSimulator> m_blobSim;
+    FakeBlobEnvironment m_env;
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
     std::string m_testFileName = "test.blob";
 
-    void TearDown() override { ASSERT_TRUE(::testing::Mock::VerifyAndClearExpectations(m_mockBlobClient.get())); }
-
     void SetUp() override {
-        m_mockBlobClient = std::make_shared<BlobClientMock>();
-        m_blobSim = std::make_shared<BlobSimulator>();
-        m_logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
-
-        // Setup default mock behavior using the simulator
-        ON_CALL(*m_mockBlobClient, GetSize()).WillByDefault(Invoke([this]() { return m_blobSim->GetSize(); }));
-
-        ON_CALL(*m_mockBlobClient, SetSize(_)).WillByDefault(Invoke([this](int64_t size) {
-            m_blobSim->SetSize(size);
-        }));
-
-        ON_CALL(*m_mockBlobClient, GetCapacity()).WillByDefault(Invoke([this]() { return m_blobSim->GetCapacity(); }));
-
-        ON_CALL(*m_mockBlobClient, SetCapacity(_)).WillByDefault(Invoke([this](int64_t capacity) {
-            m_blobSim->SetCapacity(capacity);
-        }));
-
-        ON_CALL(*m_mockBlobClient, UploadPages(_, _))
-            .WillByDefault(Invoke(
-                [this](const std::span<char> buffer, int64_t offset) { m_blobSim->UploadPages(buffer, offset); }));
-
-        ON_CALL(*m_mockBlobClient,
-                DownloadTo(testing::A<std::span<char>>(), testing::A<int64_t>(), testing::A<int64_t>()))
-            .WillByDefault(Invoke([this](std::span<char> buffer, int64_t offset, int64_t length) {
-                return m_blobSim->DownloadTo(buffer, offset, length);
-            }));
+        m_logger = AVEVA::RocksDB::Plugin::Tests::MakeTestLogger();
+        m_env.Blob->SetCapacity(Configuration::PageBlob::DefaultSize);
     }
 
-    std::unique_ptr<ReadWriteFileImpl> CreateFile() {
-        return std::make_unique<ReadWriteFileImpl>(m_testFileName, m_mockBlobClient, nullptr, m_logger);
+    std::unique_ptr<FakeReadWriteFileImpl> CreateFile() {
+        return std::make_unique<FakeReadWriteFileImpl>(m_testFileName, m_env.Runtime, m_env.Client, nullptr, m_logger);
     }
 };
-
 TEST_F(ReadWriteFileImplTests, Constructor_InitializesCorrectly) {
     // Arrange
-    m_blobSim->SetSize(1024);
+    m_env.Blob->SetSize(1024);
 
     // Act
     const auto file = CreateFile();
@@ -129,6 +57,56 @@ TEST_F(ReadWriteFileImplTests, Constructor_InitializesCorrectly) {
     SUCCEED();
 }
 
+TEST_F(ReadWriteFileImplTests, WriteAndRead_RangeOverflowingInt64_ThrowInvalidArgument) {
+    const auto file = CreateFile();
+    char byte = 'x';
+
+    EXPECT_THROW(file->Write(ByteOffset{static_cast<uint64_t>(std::numeric_limits<int64_t>::max())},
+                             std::span<const char>(&byte, static_cast<size_t>(1))),
+                 std::invalid_argument);
+    EXPECT_THROW(
+        file->Write(ByteOffset{static_cast<uint64_t>(-1)}, std::span<const char>(&byte, static_cast<size_t>(1))),
+        std::invalid_argument);
+    EXPECT_THROW([[maybe_unused]] auto n = static_cast<int64_t>(
+                     file->Read(ByteOffset{static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - 1)},
+                                std::span<char>(&byte, static_cast<size_t>(2)))
+                         .Value()),
+                 std::invalid_argument);
+}
+
+TEST_F(ReadWriteFileImplTests, Flush_EndNearInt64Max_ThrowsInvalidArgumentWithoutResizing) {
+    const auto file = CreateFile();
+    char byte = 'x';
+    const auto capacityWritesBefore = m_env.Blob->CapacityWrites.size();
+
+    file->Write(ByteOffset{static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - 1)},
+                std::span<const char>(&byte, static_cast<size_t>(1)));
+
+    EXPECT_THROW(file->Sync(), std::invalid_argument);
+    EXPECT_EQ(capacityWritesBefore, m_env.Blob->CapacityWrites.size());
+}
+TEST_F(ReadWriteFileImplTests, Flush_UploadFails_RetryKeepsSizeAndPersistsContent) {
+    auto file = CreateFile();
+    const std::vector<char> data(100, 'Z');
+    file->Write(ByteOffset{static_cast<uint64_t>(0)}, std::span<const char>(data.data(), static_cast<size_t>(100)));
+    auto failures = std::make_shared<std::atomic<int>>(1);
+    m_env.Blob->Fault = [failures](const auto operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::UploadPages && failures->fetch_sub(1) > 0) {
+            return FakeBlobServer::Error(AVEVA::HttpStatus::InternalServerError, "boom");
+        }
+        return std::nullopt;
+    };
+
+    EXPECT_ANY_THROW(file->Sync());
+    std::vector<char> readBuffer(100, '\0');
+    EXPECT_NO_THROW(file->Sync());
+
+    EXPECT_EQ(100, static_cast<int64_t>(file->Read(ByteOffset{static_cast<uint64_t>(0)},
+                                                   std::span<char>(readBuffer.data(), static_cast<size_t>(100)))
+                                            .Value()));
+    EXPECT_EQ(data, readBuffer);
+    EXPECT_EQ(100, m_env.Blob->Size());
+}
 TEST_F(ReadWriteFileImplTests, Constructor_InitializesFromEmptyBlob) {
     // Arrange - simulator starts with fileSize = 0
 
@@ -137,7 +115,8 @@ TEST_F(ReadWriteFileImplTests, Constructor_InitializesFromEmptyBlob) {
 
     // Assert
     char buffer[10] = {0};
-    auto bytesRead = file->Read(0, 10, buffer);
+    auto bytesRead = static_cast<int64_t>(
+        file->Read(ByteOffset{static_cast<uint64_t>(0)}, std::span<char>(buffer, static_cast<size_t>(10))).Value());
     EXPECT_EQ(0, bytesRead); // Nothing to read from empty file
 }
 
@@ -148,12 +127,15 @@ TEST_F(ReadWriteFileImplTests, Write_PageAlignedData_BuffersCorrectly) {
     std::vector<char> data(dataSize, 'A');
 
     // Act
-    file->Write(0, data.data(), dataSize);
+    file->Write(ByteOffset{static_cast<uint64_t>(0)},
+                std::span<const char>(data.data(), static_cast<size_t>(dataSize)));
     file->Sync();
 
     // Assert
     std::vector<char> readBuffer(dataSize);
-    auto bytesRead = file->Read(0, dataSize, readBuffer.data());
+    auto bytesRead = static_cast<int64_t>(file->Read(ByteOffset{static_cast<uint64_t>(0)},
+                                                     std::span<char>(readBuffer.data(), static_cast<size_t>(dataSize)))
+                                              .Value());
     EXPECT_EQ(dataSize, bytesRead);
     EXPECT_EQ(data, readBuffer);
 }
@@ -166,12 +148,16 @@ TEST_F(ReadWriteFileImplTests, Write_NonPageAlignedOffset_HandlesPrePadding) {
     std::vector<char> data(dataSize, 'B');
 
     // Act
-    file->Write(offset, data.data(), dataSize);
+    file->Write(ByteOffset{static_cast<uint64_t>(offset)},
+                std::span<const char>(data.data(), static_cast<size_t>(dataSize)));
     file->Sync();
 
     // Assert
     std::vector<char> readBuffer(dataSize);
-    const auto bytesRead = file->Read(offset, dataSize, readBuffer.data());
+    const auto bytesRead =
+        static_cast<int64_t>(file->Read(ByteOffset{static_cast<uint64_t>(offset)},
+                                        std::span<char>(readBuffer.data(), static_cast<size_t>(dataSize)))
+                                 .Value());
     EXPECT_EQ(dataSize, bytesRead);
     EXPECT_EQ(data, readBuffer);
 }
@@ -184,33 +170,39 @@ TEST_F(ReadWriteFileImplTests, Write_NonPageAlignedEnd_HandlesPostPadding) {
     std::vector<char> data(dataSize, 'C');
 
     // Act
-    file->Write(offset, data.data(), dataSize);
+    file->Write(ByteOffset{static_cast<uint64_t>(offset)},
+                std::span<const char>(data.data(), static_cast<size_t>(dataSize)));
     file->Sync();
 
     // Assert - verify data can be read back
     std::vector<char> readBuffer(dataSize);
-    auto bytesRead = file->Read(offset, dataSize, readBuffer.data());
+    auto bytesRead = static_cast<int64_t>(file->Read(ByteOffset{static_cast<uint64_t>(offset)},
+                                                     std::span<char>(readBuffer.data(), static_cast<size_t>(dataSize)))
+                                              .Value());
     EXPECT_EQ(dataSize, bytesRead);
     EXPECT_EQ(data, readBuffer);
 }
 
 TEST_F(ReadWriteFileImplTests, Write_BufferFull_TriggersAutoFlush) {
     // Arrange
-    EXPECT_CALL(*m_mockBlobClient, UploadPages(_, _)).Times(2);
-
     auto file = CreateFile();
     const int64_t dataSize = Configuration::PageBlob::DefaultBufferSize + Configuration::PageBlob::PageSize;
     std::vector<char> data(dataSize, 'D');
 
     // Act - write more than buffer can hold
-    file->Write(0, data.data(), dataSize);
+    file->Write(ByteOffset{static_cast<uint64_t>(0)},
+                std::span<const char>(data.data(), static_cast<size_t>(dataSize)));
 
     // Assert - auto-flush should have occurred
     // Sync to finalize
     file->Sync();
 
+    EXPECT_EQ(2U, m_env.Blob->Uploads.size());
+
     std::vector<char> readBuffer(dataSize);
-    auto bytesRead = file->Read(0, dataSize, readBuffer.data());
+    auto bytesRead = static_cast<int64_t>(file->Read(ByteOffset{static_cast<uint64_t>(0)},
+                                                     std::span<char>(readBuffer.data(), static_cast<size_t>(dataSize)))
+                                              .Value());
     EXPECT_EQ(dataSize, bytesRead);
     EXPECT_EQ(data, readBuffer);
 }
@@ -221,45 +213,625 @@ TEST_F(ReadWriteFileImplTests, Flush_PartialFirstPage_MergesExistingData) {
 
     // Pre-populate blob with some data at page start
     const int64_t offset = 100; // Within first page
-    std::vector<char> existingData(offset, 'X');
-    m_blobSim->UploadPages(existingData, 0);
-    m_blobSim->SetSize(offset);
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), offset, 'X'); });
+    m_env.Blob->SetSize(offset);
 
     // Write data at offset
     const int64_t dataSize = 100;
     std::vector<char> newData(dataSize, 'Y');
 
     // Act
-    file->Write(offset, newData.data(), dataSize);
+    file->Write(ByteOffset{static_cast<uint64_t>(offset)},
+                std::span<const char>(newData.data(), static_cast<size_t>(dataSize)));
     file->Sync();
 
     // Assert - existing data should still be there
     std::vector<char> readBuffer(offset);
-    auto bytesRead = file->Read(0, offset, readBuffer.data());
+    auto bytesRead = static_cast<int64_t>(file->Read(ByteOffset{static_cast<uint64_t>(0)},
+                                                     std::span<char>(readBuffer.data(), static_cast<size_t>(offset)))
+                                              .Value());
     EXPECT_EQ(offset, bytesRead);
 
     // And new data should be there too
     std::vector<char> newDataBuffer(dataSize);
-    bytesRead = file->Read(offset, dataSize, newDataBuffer.data());
+    bytesRead = static_cast<int64_t>(file->Read(ByteOffset{static_cast<uint64_t>(offset)},
+                                                std::span<char>(newDataBuffer.data(), static_cast<size_t>(dataSize)))
+                                         .Value());
     EXPECT_EQ(dataSize, bytesRead);
     EXPECT_EQ(newData, newDataBuffer);
+}
+
+TEST_F(ReadWriteFileImplTests, Flush_ShortDownloadOfAnExistingGap_ThrowsAndUploadsNothing) {
+    constexpr int64_t offset = 100;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), offset, 'X'); });
+    m_env.Blob->SetSize(offset);
+    auto file = CreateFile();
+    // The blob ends before the size recorded when the file was opened, so the gap download is legitimately short.
+    m_env.Blob->WithPrimaryBlob([](auto& b) { b.Data.resize(10); });
+    const std::vector<char> newData(100, 'Y');
+
+    file->Write(ByteOffset{static_cast<uint64_t>(offset)},
+                std::span<const char>(newData.data(), static_cast<size_t>(100)));
+
+    EXPECT_THROW(file->Sync(), AVEVA::RocksDB::Plugin::Azure::RequestFailedException);
+    EXPECT_TRUE(m_env.Blob->Uploads.empty());
+}
+
+TEST_F(ReadWriteFileImplTests, Flush_WritesOnDifferentPages_EachMergesItsOwnExistingData) {
+    // Arrange - existing data on three separate pages
+    constexpr int64_t page = Configuration::PageBlob::PageSize;
+    const int64_t total = 3 * page;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), total, 'X'); });
+    m_env.Blob->SetSize(total);
+    auto file = CreateFile();
+
+    // Act - a small write in the middle of each page, so every chunk needs pre and post padding
+    const std::string payload(10, 'Y');
+    for (int64_t pageIndex = 0; pageIndex < 3; ++pageIndex) {
+        file->Write(ByteOffset{static_cast<uint64_t>(pageIndex * page + 100)},
+                    std::span<const char>(payload.data(), static_cast<size_t>(static_cast<int64_t>(payload.size()))));
+    }
+    file->Sync();
+
+    // Assert
+    std::vector<char> actual(static_cast<size_t>(total));
+    ASSERT_EQ(total, static_cast<int64_t>(file->Read(ByteOffset{static_cast<uint64_t>(0)},
+                                                     std::span<char>(actual.data(), static_cast<size_t>(total)))
+                                              .Value()));
+    std::vector<char> expected(static_cast<size_t>(total), 'X');
+    for (int64_t pageIndex = 0; pageIndex < 3; ++pageIndex) {
+        std::fill_n(expected.begin() + pageIndex * page + 100, payload.size(), 'Y');
+    }
+    EXPECT_EQ(expected, actual);
+}
+
+TEST_F(ReadWriteFileImplTests, Flush_WritesSharingAPage_KeepEarlierWrites) {
+    // Arrange
+    constexpr int64_t page = Configuration::PageBlob::PageSize;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), page, 'X'); });
+    m_env.Blob->SetSize(page);
+    auto file = CreateFile();
+
+    // Act - two writes inside the same page: the second chunk's padding must include the first chunk's bytes
+    const std::string first(10, 'A');
+    const std::string second(10, 'B');
+    file->Write(ByteOffset{static_cast<uint64_t>(100)},
+                std::span<const char>(first.data(), static_cast<size_t>(static_cast<int64_t>(first.size()))));
+    file->Write(ByteOffset{static_cast<uint64_t>(200)},
+                std::span<const char>(second.data(), static_cast<size_t>(static_cast<int64_t>(second.size()))));
+    file->Sync();
+
+    // Assert
+    std::vector<char> actual(static_cast<size_t>(page));
+    ASSERT_EQ(page, static_cast<int64_t>(file->Read(ByteOffset{static_cast<uint64_t>(0)},
+                                                    std::span<char>(actual.data(), static_cast<size_t>(page)))
+                                             .Value()));
+    std::vector<char> expected(static_cast<size_t>(page), 'X');
+    std::fill_n(expected.begin() + 100, first.size(), 'A');
+    std::fill_n(expected.begin() + 200, second.size(), 'B');
+    EXPECT_EQ(expected, actual);
+}
+
+TEST_F(ReadWriteFileImplTests, Flush_WritesSharingAPage_AreMergedIntoOneUploadAndOnlyTheGapsAreRead) {
+    // Arrange
+    constexpr int64_t page = Configuration::PageBlob::PageSize;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), 2 * page, 'X'); });
+    m_env.Blob->SetSize(2 * page);
+    auto file = CreateFile();
+
+    // Act - two writes in page 0 and one in page 1: all three share one page-aligned extent
+    const std::string payload(10, 'A');
+    file->Write(ByteOffset{static_cast<uint64_t>(100)},
+                std::span<const char>(payload.data(), static_cast<size_t>(static_cast<int64_t>(payload.size()))));
+    file->Write(ByteOffset{static_cast<uint64_t>(200)},
+                std::span<const char>(payload.data(), static_cast<size_t>(static_cast<int64_t>(payload.size()))));
+    file->Write(ByteOffset{static_cast<uint64_t>(page + 50)},
+                std::span<const char>(payload.data(), static_cast<size_t>(static_cast<int64_t>(payload.size()))));
+    file->Sync();
+
+    // Assert
+    ASSERT_EQ(1u, m_env.Blob->Uploads.size());
+    EXPECT_EQ(0, m_env.Blob->Uploads[0].Offset);
+    EXPECT_EQ(static_cast<size_t>(2 * page), m_env.Blob->Uploads[0].Data.size());
+    // The gaps are close together, so one read covers them; the writes are overlaid afterwards.
+    EXPECT_EQ(1u, m_env.Blob->Downloads.size());
+    std::vector<char> actual(static_cast<size_t>(2 * page));
+    ASSERT_EQ(2 * page, static_cast<int64_t>(file->Read(ByteOffset{static_cast<uint64_t>(0)},
+                                                        std::span<char>(actual.data(), static_cast<size_t>(2 * page)))
+                                                 .Value()));
+    std::vector<char> expected(static_cast<size_t>(2 * page), 'X');
+    std::fill_n(expected.begin() + 100, payload.size(), 'A');
+    std::fill_n(expected.begin() + 200, payload.size(), 'A');
+    std::fill_n(expected.begin() + page + 50, payload.size(), 'A');
+    EXPECT_EQ(expected, actual);
+}
+
+// Many tiny writes scattered over one merged extent leave a gap between each pair; they must be read with a bounded
+// number of requests, and the buffered writes must still win over the bytes the wider read returned.
+TEST_F(ReadWriteFileImplTests, Flush_ManySmallWritesAcrossPages_CoalesceGapReadsAndKeepLastWriteWins) {
+    constexpr int64_t page = Configuration::PageBlob::PageSize;
+    constexpr int64_t pages = 64;
+    std::vector<char> original(static_cast<size_t>(pages * page));
+    for (size_t i = 0; i < original.size(); ++i) {
+        original[i] = static_cast<char>('a' + i % 23);
+    }
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::ranges::copy(original, b.Data.begin()); });
+    m_env.Blob->SetSize(pages * page);
+    auto file = CreateFile();
+
+    auto expected = original;
+    for (int64_t p = 0; p < pages; ++p) {
+        const std::string first(10, 'A');
+        const std::string second(4, 'B');
+        file->Write(ByteOffset{static_cast<uint64_t>(p * page + 100)},
+                    std::span<const char>(first.data(), static_cast<size_t>(static_cast<int64_t>(first.size()))));
+        file->Write(ByteOffset{static_cast<uint64_t>(p * page + 104)},
+                    std::span<const char>(second.data(), static_cast<size_t>(static_cast<int64_t>(
+                                                             second.size())))); // overlaps: later wins
+        std::ranges::fill_n(expected.begin() + p * page + 100, static_cast<std::ptrdiff_t>(first.size()), 'A');
+        std::ranges::fill_n(expected.begin() + p * page + 104, static_cast<std::ptrdiff_t>(second.size()), 'B');
+    }
+    file->Sync();
+
+    EXPECT_LE(m_env.Blob->Downloads.size(), 2u);
+    ASSERT_EQ(1u, m_env.Blob->Uploads.size());
+    std::vector<char> actual(expected.size());
+    ASSERT_EQ(pages * page,
+              static_cast<int64_t>(file->Read(ByteOffset{static_cast<uint64_t>(0)},
+                                              std::span<char>(actual.data(), static_cast<size_t>(pages * page)))
+                                       .Value()));
+    EXPECT_EQ(expected, actual);
+}
+
+// Islands wider than the bridging threshold, one per two pages, merge into a single extent (their padded ranges touch)
+// yet leave a gap read apart from each other.
+class ReadWriteFileGapWindowTests : public ReadWriteFileImplTests {
+  protected:
+    static constexpr int64_t page = Configuration::PageBlob::PageSize;
+    static constexpr int64_t islandPages = 32;
+    static constexpr int64_t secondExtentPage = 40;
+    static constexpr size_t gapsPerExtent = islandPages / 2;
+
+    std::vector<char> m_expected;
+    std::unique_ptr<FakeReadWriteFileImpl> m_file;
+
+    void Arrange() {
+        const auto total = (secondExtentPage + islandPages) * page;
+        m_expected.resize(static_cast<size_t>(total));
+        for (size_t i = 0; i < m_expected.size(); ++i) {
+            m_expected[i] = static_cast<char>('a' + i % 23);
+        }
+        m_env.Blob->WithPrimaryBlob([&](auto& b) { std::ranges::copy(m_expected, b.Data.begin()); });
+        m_env.Blob->SetSize(total);
+        m_file = CreateFile();
+        const std::string payload(600, 'Z');
+        for (const auto base : {int64_t{0}, secondExtentPage}) {
+            for (int64_t p = 0; p < islandPages; p += 2) {
+                const auto offset = (base + p) * page;
+                m_file->Write(
+                    ByteOffset{static_cast<uint64_t>(offset)},
+                    std::span<const char>(payload.data(), static_cast<size_t>(static_cast<int64_t>(payload.size()))));
+                std::ranges::fill_n(m_expected.begin() + offset, static_cast<std::ptrdiff_t>(payload.size()), 'Z');
+            }
+        }
+    }
+
+    // Serves held downloads from the blob until Sync finishes, returning the most that were ever outstanding.
+    size_t ServeDownloads(std::future<void>& sync) {
+        size_t maxPending = 0;
+        while (sync.wait_for(std::chrono::milliseconds(1)) != std::future_status::ready) {
+            maxPending = std::max(maxPending, m_env.Blob->PendingDownloads());
+            if (m_env.Blob->PendingDownloads() > 0) {
+                auto held = m_env.Blob->TakeDownload();
+                const auto bytes = m_env.Blob->Bytes();
+                const auto first = bytes.begin() + held.Request.Offset;
+                held.Succeed(std::string(first, first + held.Request.Length));
+            }
+        }
+        return maxPending;
+    }
+};
+
+TEST_F(ReadWriteFileGapWindowTests, Flush_ManySeparatedGaps_KeepsOutstandingReadsBoundedAndPreservesBytes) {
+    Arrange();
+    m_env.Blob->DeferDownloads = true;
+
+    auto sync = std::async(std::launch::async, [&] { m_file->Sync(); });
+    const auto maxPending = ServeDownloads(sync);
+    m_env.Blob->DeferDownloads = false;
+
+    EXPECT_NO_THROW(sync.get());
+    EXPECT_LE(maxPending, Configuration::Transfer::MaxConcurrentPageCopies);
+    EXPECT_GE(m_env.Blob->Downloads.size(), 2 * gapsPerExtent);
+    std::vector<char> actual(m_expected.size());
+    ASSERT_EQ(static_cast<int64_t>(actual.size()),
+              static_cast<int64_t>(
+                  m_file
+                      ->Read(ByteOffset{static_cast<uint64_t>(0)},
+                             std::span<char>(actual.data(), static_cast<size_t>(static_cast<int64_t>(actual.size()))))
+                      .Value()));
+    EXPECT_EQ(m_expected, actual);
+}
+
+TEST_F(ReadWriteFileGapWindowTests, Flush_GapReadFailsWhileOthersAreOutstanding_DrainsThemAndUploadsNothing) {
+    Arrange();
+    m_env.Blob->DeferDownloads = true;
+
+    auto sync = std::async(std::launch::async, [&] { m_file->Sync(); });
+    struct Release {
+        FakeBlobServer& Blob;
+        std::future<void>& Sync;
+        ~Release() {
+            Blob.DeferDownloads = false;
+            while (Sync.valid() && Sync.wait_for(std::chrono::milliseconds(1)) != std::future_status::ready) {
+                if (Blob.PendingDownloads() > 0) {
+                    Blob.TakeDownload().Succeed(std::string(512, 'q'));
+                }
+            }
+        }
+    } release{*m_env.Blob, sync};
+    ASSERT_TRUE(m_env.Blob->WaitForPendingDownloads(Configuration::Transfer::MaxConcurrentPageCopies));
+
+    // Fails the oldest once the window is full, so the flush must still wait out the other held reads.
+    m_env.Blob->TakeDownload().Succeed(std::string(1, 'x')); // short read of the oldest
+    m_env.Blob->DeferDownloads = false;
+    while (sync.wait_for(std::chrono::milliseconds(1)) != std::future_status::ready) {
+        if (m_env.Blob->PendingDownloads() > 0) {
+            m_env.Blob->TakeDownload().Succeed(std::string(512, 'q'));
+        }
+    }
+    EXPECT_THROW(sync.get(), AVEVA::RocksDB::Plugin::Azure::RequestFailedException);
+    EXPECT_TRUE(m_env.Blob->Uploads.empty());
+}
+
+TEST_F(ReadWriteFileImplTests, Flush_Coalesced_ReadsStillFailOnShortDownload) {
+    constexpr int64_t page = Configuration::PageBlob::PageSize;
+    m_env.Blob->SetSize(4 * page);
+    auto file = CreateFile();
+    m_env.Blob->WithPrimaryBlob([page](auto& b) { b.Data.resize(static_cast<size_t>(page)); });
+    const std::string payload(10, 'Y');
+    file->Write(ByteOffset{static_cast<uint64_t>(100)}, std::span<const char>(payload.data(), static_cast<size_t>(10)));
+    file->Write(ByteOffset{static_cast<uint64_t>(page + 100)},
+                std::span<const char>(payload.data(), static_cast<size_t>(10)));
+
+    EXPECT_THROW(file->Sync(), AVEVA::RocksDB::Plugin::Azure::RequestFailedException);
+    EXPECT_TRUE(m_env.Blob->Uploads.empty());
+}
+
+TEST_F(ReadWriteFileImplTests, Flush_ReusedBufferDoesNotLeakEarlierBytesIntoUnwrittenGaps) {
+    // Arrange
+    constexpr int64_t page = Configuration::PageBlob::PageSize;
+    auto file = CreateFile();
+    const std::string first(static_cast<size_t>(page), 'A');
+    file->Write(ByteOffset{static_cast<uint64_t>(0)}, std::span<const char>(first.data(), static_cast<size_t>(page)));
+    file->Sync();
+
+    // Act - a later flush past the old end leaves gaps that must read as zero, not as the first flush's 'A's
+    const std::string payload(10, 'B');
+    file->Write(ByteOffset{static_cast<uint64_t>(2 * page + 10)},
+                std::span<const char>(payload.data(), static_cast<size_t>(static_cast<int64_t>(payload.size()))));
+    file->Sync();
+
+    // Assert
+    const auto length = page + 10 + static_cast<int64_t>(payload.size());
+    std::vector<char> actual(static_cast<size_t>(length));
+    ASSERT_EQ(length, static_cast<int64_t>(file->Read(ByteOffset{static_cast<uint64_t>(page)},
+                                                      std::span<char>(actual.data(), static_cast<size_t>(length)))
+                                               .Value()));
+    std::vector<char> expected(static_cast<size_t>(length), '\0');
+    std::fill_n(expected.begin() + page + 10, payload.size(), 'B');
+    EXPECT_EQ(expected, actual);
+}
+
+TEST_F(ReadWriteFileImplTests, Flush_OverlappingWritesToOnePage_LastWriteWins) {
+    // Arrange
+    constexpr int64_t page = Configuration::PageBlob::PageSize;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), page, 'X'); });
+    m_env.Blob->SetSize(page);
+    auto file = CreateFile();
+
+    // Act
+    const std::string first(50, 'A');
+    const std::string second(20, 'B');
+    file->Write(ByteOffset{static_cast<uint64_t>(100)},
+                std::span<const char>(first.data(), static_cast<size_t>(static_cast<int64_t>(first.size()))));
+    file->Write(ByteOffset{static_cast<uint64_t>(120)},
+                std::span<const char>(second.data(), static_cast<size_t>(static_cast<int64_t>(second.size()))));
+    file->Sync();
+
+    // Assert
+    EXPECT_EQ(1u, m_env.Blob->Uploads.size());
+    std::vector<char> actual(static_cast<size_t>(page));
+    ASSERT_EQ(page, static_cast<int64_t>(file->Read(ByteOffset{static_cast<uint64_t>(0)},
+                                                    std::span<char>(actual.data(), static_cast<size_t>(page)))
+                                             .Value()));
+    std::vector<char> expected(static_cast<size_t>(page), 'X');
+    std::fill_n(expected.begin() + 100, first.size(), 'A');
+    std::fill_n(expected.begin() + 120, second.size(), 'B');
+    EXPECT_EQ(expected, actual);
+}
+
+TEST_F(ReadWriteFileImplTests, Flush_OverlappingWritesWithTheSameStart_LastWriteWins) {
+    // Arrange
+    constexpr int64_t page = Configuration::PageBlob::PageSize;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), page, 'X'); });
+    m_env.Blob->SetSize(page);
+    auto file = CreateFile();
+
+    // Act
+    const std::string first(50, 'A');
+    const std::string second(20, 'B');
+    const std::string third(10, 'C');
+    file->Write(ByteOffset{static_cast<uint64_t>(100)},
+                std::span<const char>(first.data(), static_cast<size_t>(static_cast<int64_t>(first.size()))));
+    file->Write(ByteOffset{static_cast<uint64_t>(100)},
+                std::span<const char>(second.data(), static_cast<size_t>(static_cast<int64_t>(second.size()))));
+    file->Write(ByteOffset{static_cast<uint64_t>(100)},
+                std::span<const char>(third.data(), static_cast<size_t>(static_cast<int64_t>(third.size()))));
+    file->Sync();
+
+    // Assert
+    EXPECT_EQ(1u, m_env.Blob->Uploads.size());
+    std::vector<char> actual(static_cast<size_t>(page));
+    ASSERT_EQ(page, static_cast<int64_t>(file->Read(ByteOffset{static_cast<uint64_t>(0)},
+                                                    std::span<char>(actual.data(), static_cast<size_t>(page)))
+                                             .Value()));
+    std::vector<char> expected(static_cast<size_t>(page), 'X');
+    std::fill_n(expected.begin() + 100, first.size(), 'A');
+    std::fill_n(expected.begin() + 100, second.size(), 'B');
+    std::fill_n(expected.begin() + 100, third.size(), 'C');
+    EXPECT_EQ(expected, actual);
+}
+
+TEST_F(ReadWriteFileImplTests, Flush_AppendingPastTheEnd_ReadsNothing) {
+    // Arrange
+    auto file = CreateFile();
+
+    // Act - the file is empty, so the unwritten bytes around the data hold nothing worth reading
+    const std::string payload(300, 'A');
+    file->Write(ByteOffset{static_cast<uint64_t>(0)},
+                std::span<const char>(payload.data(), static_cast<size_t>(static_cast<int64_t>(payload.size()))));
+    file->Sync();
+
+    // Assert
+    EXPECT_TRUE(m_env.Blob->Downloads.empty());
+    EXPECT_EQ(1u, m_env.Blob->Uploads.size());
+}
+
+TEST_F(ReadWriteFileImplTests, Flush_WritesOnDifferentPages_AreUploadedConcurrently) {
+    // Arrange
+    constexpr int64_t page = Configuration::PageBlob::PageSize;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), 5 * page, 'X'); });
+    m_env.Blob->SetSize(5 * page);
+    auto file = CreateFile();
+    const std::string payload(10, 'A');
+    // Every other page, so the extents are not adjacent and stay separate requests
+    for (int64_t i = 0; i < 3; ++i) {
+        file->Write(ByteOffset{static_cast<uint64_t>(2 * i * page + 10)},
+                    std::span<const char>(payload.data(), static_cast<size_t>(static_cast<int64_t>(payload.size()))));
+    }
+    m_env.Blob->DeferUploads = true;
+
+    // Act - the flush blocks until the uploads complete, so it runs on its own thread
+    auto sync = std::async(std::launch::async, [&] { file->Sync(); });
+    // Releases whatever is held however the test exits, so a failed assertion cannot leave Sync (and the future's
+    // destructor) blocked forever.
+    struct Release {
+        FakeBlobServer& Blob;
+        ~Release() {
+            Blob.DeferUploads = false;
+            while (Blob.PendingUploads() > 0) {
+                Blob.CompleteUpload();
+            }
+        }
+    } release{*m_env.Blob};
+    const bool allHeld = m_env.Blob->WaitForPendingUploads(3);
+
+    // Assert - all three were in flight at once, before any completed
+    ASSERT_TRUE(allHeld);
+    ASSERT_EQ(3u, m_env.Blob->PendingUploads());
+    m_env.Blob->DeferUploads = false;
+    for (size_t i = 0; i < 3; ++i) {
+        m_env.Blob->CompleteUpload();
+    }
+    EXPECT_NO_THROW(sync.get());
+    EXPECT_EQ(3u, m_env.Blob->Uploads.size());
+}
+
+TEST_F(ReadWriteFileImplTests, Flush_ManyExtents_ReusesBuffersAcrossWavesAndKeepsThePoolBounded) {
+    // Arrange
+    constexpr int64_t page = Configuration::PageBlob::PageSize;
+    constexpr auto extentCount = 3 * Configuration::Transfer::MaxConcurrentPageCopies;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), 2 * extentCount * page, 'X'); });
+    m_env.Blob->SetSize(static_cast<int64_t>(2 * extentCount) * page);
+    auto file = CreateFile();
+    const std::string payload(10, 'A');
+    const auto writeEveryOtherPage = [&] {
+        for (int64_t i = 0; i < static_cast<int64_t>(extentCount); ++i) {
+            file->Write(
+                ByteOffset{static_cast<uint64_t>(2 * i * page + 10)},
+                std::span<const char>(payload.data(), static_cast<size_t>(static_cast<int64_t>(payload.size()))));
+        }
+    };
+
+    // Act / Assert - later waves reuse the buffers of earlier ones, on a clean flush
+    writeEveryOtherPage();
+    file->Sync();
+    EXPECT_LE(file->PooledExtentBufferCount(), Configuration::Transfer::MaxConcurrentPageCopies);
+    writeEveryOtherPage();
+    file->Sync();
+    EXPECT_LE(file->PooledExtentBufferCount(), Configuration::Transfer::MaxConcurrentPageCopies);
+
+    // and on a flush whose later wave fails
+    bool fail = false;
+    size_t uploads = 0;
+    m_env.Blob->Fault =
+        [&](FakeBlobServer::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::UploadPages &&
+            ++uploads > Configuration::Transfer::MaxConcurrentPageCopies) {
+            fail = true;
+            return FakeBlobServer::Error(AVEVA::HttpStatus::BadRequest, "InvalidInput");
+        }
+        return std::nullopt;
+    };
+    writeEveryOtherPage();
+    EXPECT_ANY_THROW(file->Sync());
+    EXPECT_TRUE(fail);
+    EXPECT_LE(file->PooledExtentBufferCount(), Configuration::Transfer::MaxConcurrentPageCopies);
+
+    m_env.Blob->Fault = nullptr;
+    EXPECT_NO_THROW(file->Sync());
+    EXPECT_LE(file->PooledExtentBufferCount(), Configuration::Transfer::MaxConcurrentPageCopies);
+}
+
+TEST_F(ReadWriteFileImplTests, Flush_UploadFailure_KeepsTheBufferedWritesForARetry) {
+    // Arrange
+    constexpr int64_t page = Configuration::PageBlob::PageSize;
+    m_env.Blob->WithPrimaryBlob([&](auto& b) { std::fill_n(b.Data.begin(), 2 * page, 'X'); });
+    m_env.Blob->SetSize(2 * page);
+    auto file = CreateFile();
+    const std::string payload(10, 'A');
+    file->Write(ByteOffset{static_cast<uint64_t>(10)},
+                std::span<const char>(payload.data(), static_cast<size_t>(static_cast<int64_t>(payload.size()))));
+    file->Write(ByteOffset{static_cast<uint64_t>(page + 10)},
+                std::span<const char>(payload.data(), static_cast<size_t>(static_cast<int64_t>(payload.size()))));
+    bool fail = true;
+    m_env.Blob->Fault =
+        [&](FakeBlobServer::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+        if (fail && operation == FakeBlobServer::Operation::UploadPages) {
+            return FakeBlobServer::Error(AVEVA::HttpStatus::BadRequest, "InvalidInput");
+        }
+        return std::nullopt;
+    };
+
+    // Act
+    EXPECT_ANY_THROW(file->Sync());
+    fail = false;
+    file->Sync();
+
+    // Assert
+    std::vector<char> actual(static_cast<size_t>(2 * page));
+    ASSERT_EQ(2 * page, static_cast<int64_t>(file->Read(ByteOffset{static_cast<uint64_t>(0)},
+                                                        std::span<char>(actual.data(), static_cast<size_t>(2 * page)))
+                                                 .Value()));
+    std::vector<char> expected(static_cast<size_t>(2 * page), 'X');
+    std::fill_n(expected.begin() + 10, payload.size(), 'A');
+    std::fill_n(expected.begin() + page + 10, payload.size(), 'A');
+    EXPECT_EQ(expected, actual);
 }
 
 // Test Sync updates file size metadata
 TEST_F(ReadWriteFileImplTests, Sync_UpdatesFileSizeMetadata) {
     // Arrange
     const int64_t dataSize = 500;
-    EXPECT_CALL(*m_mockBlobClient, SetSize(500)).Times(::testing::Exactly(1)).WillOnce(::testing::DoDefault());
 
     auto file = CreateFile();
     std::vector<char> data(dataSize, 'E');
 
     // Act
-    file->Write(0, data.data(), dataSize);
+    file->Write(ByteOffset{static_cast<uint64_t>(0)},
+                std::span<const char>(data.data(), static_cast<size_t>(dataSize)));
     file->Close(); // Close will call Sync internally
 
-    // Assert - verify that the file size was actually updated in the simulator
-    EXPECT_EQ(dataSize, m_blobSim->GetSize());
+    // Assert - the size was written to the blob metadata exactly once
+    EXPECT_EQ(dataSize, m_env.Blob->Size());
+    EXPECT_EQ((std::vector<int64_t>{dataSize}), m_env.Blob->SizeWrites);
+}
+
+TEST_F(ReadWriteFileImplTests, Sync_WithNothingNewToPublish_SendsNoMetadataWriteAndKeepsEtag) {
+    // Arrange
+    auto file = CreateFile();
+    std::vector<char> data(500, 'F');
+    file->Write(ByteOffset{static_cast<uint64_t>(0)},
+                std::span<const char>(data.data(), static_cast<size_t>(static_cast<int64_t>(data.size()))));
+    file->Sync();
+    const auto etag = m_env.Blob->ETag();
+    ASSERT_EQ(1U, m_env.Blob->SizeWrites.size());
+
+    // Act
+    file->Sync();
+    file->Close();
+
+    // Assert
+    EXPECT_EQ(1U, m_env.Blob->SizeWrites.size());
+    EXPECT_EQ(etag, m_env.Blob->ETag());
+}
+
+TEST_F(ReadWriteFileImplTests, Sync_AfterWriteThatChangesSize_PublishesNewSize) {
+    // Arrange
+    auto file = CreateFile();
+    std::vector<char> data(500, 'G');
+    file->Write(ByteOffset{static_cast<uint64_t>(0)},
+                std::span<const char>(data.data(), static_cast<size_t>(static_cast<int64_t>(data.size()))));
+    file->Sync();
+
+    // Act
+    file->Write(ByteOffset{static_cast<uint64_t>(500)},
+                std::span<const char>(data.data(), static_cast<size_t>(static_cast<int64_t>(data.size()))));
+    file->Sync();
+
+    // Assert
+    EXPECT_EQ((std::vector<int64_t>{500, 1000}), m_env.Blob->SizeWrites);
+}
+
+TEST_F(ReadWriteFileImplTests, Read_AfterWriteWithoutSync_ReturnsTheUnsyncedBytes) {
+    // Arrange
+    auto file = CreateFile();
+    std::vector<char> data(1000, 'U');
+    file->Write(ByteOffset{static_cast<uint64_t>(0)},
+                std::span<const char>(data.data(), static_cast<size_t>(static_cast<int64_t>(data.size()))));
+
+    // Act
+    std::vector<char> readBuffer(1000);
+    const auto bytesRead = static_cast<int64_t>(
+        file->Read(ByteOffset{static_cast<uint64_t>(0)}, std::span<char>(readBuffer.data(), static_cast<size_t>(1000)))
+            .Value());
+
+    // Assert
+    EXPECT_EQ(1000, bytesRead);
+    EXPECT_EQ(data, readBuffer);
+}
+
+TEST_F(ReadWriteFileImplTests, Read_OverwriteWithoutSync_ReturnsTheNewBytes) {
+    // Arrange
+    auto file = CreateFile();
+    std::vector<char> original(1000, 'A');
+    file->Write(ByteOffset{static_cast<uint64_t>(0)},
+                std::span<const char>(original.data(), static_cast<size_t>(static_cast<int64_t>(original.size()))));
+    file->Sync();
+    std::vector<char> patch(100, 'B');
+    file->Write(ByteOffset{static_cast<uint64_t>(450)},
+                std::span<const char>(patch.data(), static_cast<size_t>(static_cast<int64_t>(patch.size()))));
+
+    // Act
+    std::vector<char> readBuffer(1000);
+    const auto bytesRead = static_cast<int64_t>(
+        file->Read(ByteOffset{static_cast<uint64_t>(0)}, std::span<char>(readBuffer.data(), static_cast<size_t>(1000)))
+            .Value());
+
+    // Assert
+    auto expected = original;
+    std::ranges::copy(patch, expected.begin() + 450);
+    EXPECT_EQ(1000, bytesRead);
+    EXPECT_EQ(expected, readBuffer);
+}
+
+TEST_F(ReadWriteFileImplTests, Read_AfterUnsyncedReadThenSync_PublishesTheSize) {
+    // Arrange
+    auto file = CreateFile();
+    std::vector<char> data(300, 'S');
+    file->Write(ByteOffset{static_cast<uint64_t>(0)},
+                std::span<const char>(data.data(), static_cast<size_t>(static_cast<int64_t>(data.size()))));
+    std::vector<char> readBuffer(300);
+    ASSERT_EQ(300, static_cast<int64_t>(file->Read(ByteOffset{static_cast<uint64_t>(0)},
+                                                   std::span<char>(readBuffer.data(), static_cast<size_t>(300)))
+                                            .Value()));
+
+    // Act
+    file->Sync();
+
+    // Assert
+    EXPECT_EQ(300, m_env.Blob->Size());
 }
 
 // Test Read returns correct data
@@ -269,12 +841,15 @@ TEST_F(ReadWriteFileImplTests, Read_ReturnsDataFromBlob) {
     const int64_t dataSize = 1000;
     std::vector<char> data(dataSize, 'F');
 
-    file->Write(0, data.data(), dataSize);
+    file->Write(ByteOffset{static_cast<uint64_t>(0)},
+                std::span<const char>(data.data(), static_cast<size_t>(dataSize)));
     file->Sync();
 
     // Act
     std::vector<char> readBuffer(dataSize);
-    auto bytesRead = file->Read(0, dataSize, readBuffer.data());
+    auto bytesRead = static_cast<int64_t>(file->Read(ByteOffset{static_cast<uint64_t>(0)},
+                                                     std::span<char>(readBuffer.data(), static_cast<size_t>(dataSize)))
+                                              .Value());
 
     // Assert
     EXPECT_EQ(dataSize, bytesRead);
@@ -287,12 +862,15 @@ TEST_F(ReadWriteFileImplTests, Read_OffsetBeyondFileSize_ReturnsZero) {
     const int64_t dataSize = 100;
     std::vector<char> data(dataSize, 'G');
 
-    file->Write(0, data.data(), dataSize);
+    file->Write(ByteOffset{static_cast<uint64_t>(0)},
+                std::span<const char>(data.data(), static_cast<size_t>(dataSize)));
     file->Sync();
 
     // Act
     std::vector<char> readBuffer(100);
-    auto bytesRead = file->Read(1000, 100, readBuffer.data());
+    auto bytesRead = static_cast<int64_t>(file->Read(ByteOffset{static_cast<uint64_t>(1000)},
+                                                     std::span<char>(readBuffer.data(), static_cast<size_t>(100)))
+                                              .Value());
 
     // Assert
     EXPECT_EQ(0, bytesRead);
@@ -304,12 +882,15 @@ TEST_F(ReadWriteFileImplTests, Read_PartialRead_ReturnsTruncatedData) {
     const int64_t dataSize = 100;
     std::vector<char> data(dataSize, 'H');
 
-    file->Write(0, data.data(), dataSize);
+    file->Write(ByteOffset{static_cast<uint64_t>(0)},
+                std::span<const char>(data.data(), static_cast<size_t>(dataSize)));
     file->Sync();
 
     // Act - try to read more than available
     std::vector<char> readBuffer(200);
-    auto bytesRead = file->Read(50, 200, readBuffer.data());
+    auto bytesRead = static_cast<int64_t>(
+        file->Read(ByteOffset{static_cast<uint64_t>(50)}, std::span<char>(readBuffer.data(), static_cast<size_t>(200)))
+            .Value());
 
     // Assert - should only get 50 bytes (from offset 50 to end at 100)
     EXPECT_EQ(50, bytesRead);
@@ -322,31 +903,32 @@ TEST_F(ReadWriteFileImplTests, Close_CallsSync) {
     const int64_t dataSize = 100;
     std::vector<char> data(dataSize, 'I');
 
-    file->Write(0, data.data(), dataSize);
-
-    EXPECT_CALL(*m_mockBlobClient, SetSize(dataSize)).Times(1);
+    file->Write(ByteOffset{static_cast<uint64_t>(0)},
+                std::span<const char>(data.data(), static_cast<size_t>(dataSize)));
 
     // Act
     file->Close();
 
-    // Assert - mock expectation validates sync was called
+    // Assert - sync recorded the size
+    EXPECT_EQ((std::vector<int64_t>{dataSize}), m_env.Blob->SizeWrites);
 }
 
 // Test Close is idempotent
 TEST_F(ReadWriteFileImplTests, Close_CalledTwice_IsIdempotent) {
     // Arrange
-    EXPECT_CALL(*m_mockBlobClient, SetSize(_)).Times(1);
     auto file = CreateFile();
     const int64_t dataSize = 100;
     std::vector<char> data(dataSize, 'J');
 
-    file->Write(0, data.data(), dataSize);
+    file->Write(ByteOffset{static_cast<uint64_t>(0)},
+                std::span<const char>(data.data(), static_cast<size_t>(dataSize)));
 
     // Act
     file->Close();
     file->Close(); // Second close should be no-op
 
-    // Assert - mock expectation validates sync was called only once
+    // Assert - sync ran only once
+    EXPECT_EQ(1U, m_env.Blob->SizeWrites.size());
 }
 
 // Test Expand increases capacity
@@ -356,40 +938,13 @@ TEST_F(ReadWriteFileImplTests, Expand_IncreasesCapacity) {
     const int64_t largeDataSize = Configuration::PageBlob::DefaultSize + 1000;
     std::vector<char> data(largeDataSize, 'K');
 
-    // Expect SetCapacity to be called
-    EXPECT_CALL(*m_mockBlobClient, SetCapacity(_)).Times(testing::AtLeast(1));
-
     // Act
-    file->Write(0, data.data(), largeDataSize);
+    file->Write(ByteOffset{static_cast<uint64_t>(0)},
+                std::span<const char>(data.data(), static_cast<size_t>(largeDataSize)));
     file->Sync();
 
-    // Assert - mock expectation validates SetCapacity was called
-}
-
-// Test destructor retries Close on failure
-TEST_F(ReadWriteFileImplTests, Destructor_RetriesCloseOnFailure) {
-    // Arrange
-    auto strictMock = std::make_shared<StrictMock<BlobClientMock>>();
-
-    // Setup initial calls for construction
-    EXPECT_CALL(*strictMock, GetSize()).WillOnce(Return(0));
-    // GetCapacity is called once at construction and again inside Flush() on each
-    // Close() retry, so allow it to be called repeatedly.
-    EXPECT_CALL(*strictMock, GetCapacity()).WillRepeatedly(Return(Configuration::PageBlob::DefaultSize));
-
-    // Setup SetSize to fail a few times then succeed
-    EXPECT_CALL(*strictMock, SetSize(_))
-        .Times(3)
-        .WillOnce(testing::Throw(std::runtime_error("Network error")))
-        .WillOnce(testing::Throw(std::runtime_error("Network error")))
-        .WillOnce(Return());
-
-    // Act - destructor should retry
-    {
-        ReadWriteFileImpl file(m_testFileName, strictMock, nullptr, m_logger);
-    } // Destructor called here
-
-    // Assert - mock expectations verify retry behavior
+    // Assert - the blob had to grow
+    EXPECT_FALSE(m_env.Blob->CapacityWrites.empty());
 }
 
 // Test move constructor
@@ -398,38 +953,27 @@ TEST_F(ReadWriteFileImplTests, MoveConstructor_TransfersOwnership) {
     auto file1 = CreateFile();
     const int64_t dataSize = 100;
     std::vector<char> data(dataSize, 'L');
-    file1->Write(0, data.data(), dataSize);
+    file1->Write(ByteOffset{static_cast<uint64_t>(0)},
+                 std::span<const char>(data.data(), static_cast<size_t>(dataSize)));
 
     // Act
-    ReadWriteFileImpl file2(std::move(*file1));
+    FakeReadWriteFileImpl file2(std::move(*file1));
     file2.Sync();
 
     // Assert - data should be accessible from moved object
     std::vector<char> readBuffer(dataSize);
-    auto bytesRead = file2.Read(0, dataSize, readBuffer.data());
+    auto bytesRead = static_cast<int64_t>(file2
+                                              .Read(ByteOffset{static_cast<uint64_t>(0)},
+                                                    std::span<char>(readBuffer.data(), static_cast<size_t>(dataSize)))
+                                              .Value());
     EXPECT_EQ(dataSize, bytesRead);
     EXPECT_EQ(data, readBuffer);
 }
 
-// Test move assignment
-TEST_F(ReadWriteFileImplTests, MoveAssignment_TransfersOwnership) {
-    // Arrange
-    auto file1 = CreateFile();
-    auto file2 = CreateFile();
-
-    const int64_t dataSize = 100;
-    std::vector<char> data(dataSize, 'M');
-    file1->Write(0, data.data(), dataSize);
-
-    // Act
-    *file2 = std::move(*file1);
-    file2->Sync();
-
-    // Assert - data should be accessible from moved object
-    std::vector<char> readBuffer(dataSize);
-    auto bytesRead = file2->Read(0, dataSize, readBuffer.data());
-    EXPECT_EQ(dataSize, bytesRead);
-    EXPECT_EQ(data, readBuffer);
+// Assignment would drop buffered data and in-flight uploads, so it is deleted.
+TEST_F(ReadWriteFileImplTests, MoveAssignment_IsDeleted) {
+    static_assert(!std::is_move_assignable_v<FakeReadWriteFileImpl>);
+    static_assert(!std::is_copy_assignable_v<FakeReadWriteFileImpl>);
 }
 
 // Test sequential writes
@@ -442,9 +986,12 @@ TEST_F(ReadWriteFileImplTests, Write_Sequential_AccumulatesData) {
     std::vector<char> chunk3(chunkSize, 'P');
 
     // Act
-    file->Write(0, chunk1.data(), chunkSize);
-    file->Write(chunkSize, chunk2.data(), chunkSize);
-    file->Write(chunkSize * 2, chunk3.data(), chunkSize);
+    file->Write(ByteOffset{static_cast<uint64_t>(0)},
+                std::span<const char>(chunk1.data(), static_cast<size_t>(chunkSize)));
+    file->Write(ByteOffset{static_cast<uint64_t>(chunkSize)},
+                std::span<const char>(chunk2.data(), static_cast<size_t>(chunkSize)));
+    file->Write(ByteOffset{static_cast<uint64_t>(chunkSize * 2)},
+                std::span<const char>(chunk3.data(), static_cast<size_t>(chunkSize)));
     file->Sync();
 
     // Assert
@@ -452,9 +999,18 @@ TEST_F(ReadWriteFileImplTests, Write_Sequential_AccumulatesData) {
     std::vector<char> readBuffer2(chunkSize);
     std::vector<char> readBuffer3(chunkSize);
 
-    file->Read(0, chunkSize, readBuffer1.data());
-    file->Read(chunkSize, chunkSize, readBuffer2.data());
-    file->Read(chunkSize * 2, chunkSize, readBuffer3.data());
+    ASSERT_EQ(static_cast<uint64_t>(chunkSize),
+              file->Read(ByteOffset{static_cast<uint64_t>(0)},
+                         std::span<char>(readBuffer1.data(), static_cast<size_t>(chunkSize)))
+                  .Value());
+    ASSERT_EQ(static_cast<uint64_t>(chunkSize),
+              file->Read(ByteOffset{static_cast<uint64_t>(chunkSize)},
+                         std::span<char>(readBuffer2.data(), static_cast<size_t>(chunkSize)))
+                  .Value());
+    ASSERT_EQ(static_cast<uint64_t>(chunkSize),
+              file->Read(ByteOffset{static_cast<uint64_t>(chunkSize * 2)},
+                         std::span<char>(readBuffer3.data(), static_cast<size_t>(chunkSize)))
+                  .Value());
 
     EXPECT_EQ(chunk1, readBuffer1);
     EXPECT_EQ(chunk2, readBuffer2);
@@ -470,13 +1026,18 @@ TEST_F(ReadWriteFileImplTests, Write_Overlapping_OverwritesData) {
     std::vector<char> data2(100, 'R');
 
     // Act
-    file->Write(0, data1.data(), dataSize);
-    file->Write(50, data2.data(), 100); // Overwrite middle section
+    file->Write(ByteOffset{static_cast<uint64_t>(0)},
+                std::span<const char>(data1.data(), static_cast<size_t>(dataSize)));
+    file->Write(ByteOffset{static_cast<uint64_t>(50)},
+                std::span<const char>(data2.data(), static_cast<size_t>(100))); // Overwrite middle section
     file->Sync();
 
     // Assert
     std::vector<char> readBuffer(dataSize);
-    file->Read(0, dataSize, readBuffer.data());
+    ASSERT_EQ(static_cast<uint64_t>(dataSize),
+              file->Read(ByteOffset{static_cast<uint64_t>(0)},
+                         std::span<char>(readBuffer.data(), static_cast<size_t>(dataSize)))
+                  .Value());
 
     // First 50 bytes should be 'Q'
     EXPECT_EQ('Q', readBuffer[0]);
@@ -489,4 +1050,65 @@ TEST_F(ReadWriteFileImplTests, Write_Overlapping_OverwritesData) {
     // Last 50 bytes should be 'Q'
     EXPECT_EQ('Q', readBuffer[150]);
     EXPECT_EQ('Q', readBuffer[199]);
+}
+TEST_F(ReadWriteFileImplTests, DestructorWithoutCloseDoesNotRetryOrPersistBufferedData) {
+    int sizeWriteAttempts = 0;
+    m_env.Blob->Fault =
+        [&sizeWriteAttempts](
+            const FakeBlobServer::Operation operation) -> std::optional<AVEVA::AzureClient::BlobStorageError> {
+        if (operation == FakeBlobServer::Operation::SetMetadata) {
+            ++sizeWriteAttempts;
+        }
+        return std::nullopt;
+    };
+
+    const auto start = std::chrono::steady_clock::now();
+    {
+        FakeReadWriteFileImpl file(m_testFileName, m_env.Runtime, m_env.Client, nullptr, m_logger);
+        file.Write(ByteOffset{static_cast<uint64_t>(0)}, std::span<const char>("data", static_cast<size_t>(4)));
+    }
+
+    EXPECT_EQ(0, sizeWriteAttempts);
+    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(700));
+}
+
+TEST_F(ReadWriteFileImplTests, DestructorAfterExplicitCloseIsQuiet) {
+    {
+        auto file = CreateFile();
+        file->Write(ByteOffset{static_cast<uint64_t>(0)}, std::span<const char>("data", static_cast<size_t>(4)));
+        file->Close();
+    }
+    EXPECT_EQ(1U, m_env.Blob->SizeWrites.size());
+}
+
+TEST(PageBlobWriterTests, EnsureCapacityHonoursTheRequirementAndDoublesOtherwise) {
+    FakeBlobEnvironment env;
+    auto logger = AVEVA::RocksDB::Plugin::Tests::MakeTestLogger();
+    AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobWriter<std::remove_reference_t<decltype(*env.Client)>> writer(
+        "f", env.Runtime, env.Client, nullptr, logger, 0);
+    EXPECT_EQ(writer.Capacity(), 0);
+    const auto huge = Configuration::PageBlob::DefaultSize * 3 + 1;
+    writer.EnsureCapacity(huge);
+    EXPECT_GE(writer.Capacity(), huge);
+    EXPECT_EQ(writer.Capacity() % 512, 0);
+    const auto before = writer.Capacity();
+    writer.EnsureCapacity(before - 1);
+    EXPECT_EQ(writer.Capacity(), before);
+    writer.EnsureCapacity(before + 1);
+    EXPECT_GE(writer.Capacity(), before * 2);
+}
+TEST(PageBlobWriterTests, GrowthTarget_NearInt64Max_SaturatesInsteadOfOverflowing) {
+    using Writer = AVEVA::RocksDB::Plugin::Azure::Impl::PageBlobWriter<
+        std::remove_reference_t<decltype(*FakeBlobEnvironment{}.Client)>>;
+    constexpr auto max = std::numeric_limits<int64_t>::max();
+
+    constexpr auto limit = Configuration::PageBlob::MaxPageBlobSize;
+
+    EXPECT_EQ(limit, Writer::GrowthTarget(1, max / 2 + 1));
+    EXPECT_EQ(limit, Writer::GrowthTarget(1, limit - 1));
+    EXPECT_EQ(limit + 1, Writer::GrowthTarget(limit + 1, limit));
+    EXPECT_EQ(max, Writer::GrowthTarget(max, max));
+    EXPECT_EQ(Configuration::PageBlob::DefaultSize * 4,
+              Writer::GrowthTarget(1, Configuration::PageBlob::DefaultSize * 2));
+    EXPECT_EQ(max - 5, Writer::GrowthTarget(max - 5, 10));
 }

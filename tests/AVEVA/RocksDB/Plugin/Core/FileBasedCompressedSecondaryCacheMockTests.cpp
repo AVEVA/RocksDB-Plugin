@@ -8,8 +8,7 @@
 // usage at zero — the entry must not be tracked in the index
 // --------------------------------------------------------------------------
 TEST_F(FileBasedCompressedSecondaryCacheMockTests, WriteFileAtomicFailure_InsertReturnsIOError) {
-    // NiceMock returns false for bool by default; explicit ON_CALL documents intent.
-    ON_CALL(*m_mockFs, WriteFileAtomic(_, _, _)).WillByDefault(Return(false));
+    ON_CALL(*m_mockFs, WriteFileAtomic(_, _)).WillByDefault(Return(FilesystemResult::Failed));
 
     auto cache = std::make_unique<FileBasedCompressedSecondaryCache>(
         m_cacheDir, m_mockFs, FileBasedCompressedSecondaryCache::kDefaultCapacity, MakeNullLogger());
@@ -19,8 +18,7 @@ TEST_F(FileBasedCompressedSecondaryCacheMockTests, WriteFileAtomicFailure_Insert
 
     EXPECT_TRUE(s.IsIOError()) << "WriteFileAtomic failure must surface as IOError; got: " << s.ToString();
 
-    size_t usage = 0;
-    ASSERT_TRUE(cache->GetUsage(usage).ok());
+    const auto usage = cache->GetUsage().Value();
     EXPECT_EQ(usage, 0u) << "No bytes must be tracked when the write fails";
 
     bool kept = false;
@@ -35,7 +33,7 @@ TEST_F(FileBasedCompressedSecondaryCacheMockTests, WriteFileAtomicFailure_Insert
 // --------------------------------------------------------------------------
 TEST_F(FileBasedCompressedSecondaryCacheMockTests, ReadFileContentsFailure_LookupReturnsNullAndCleansIndex) {
     // Make WriteFileAtomic succeed so the entry is added to the in-memory index.
-    ON_CALL(*m_mockFs, WriteFileAtomic(_, _, _)).WillByDefault(Return(true));
+    ON_CALL(*m_mockFs, WriteFileAtomic(_, _)).WillByDefault(Return(FilesystemResult::Succeeded));
     // ReadFileContents returns nullopt — simulates the file going missing between
     // Insert (index registration) and Lookup.
     ON_CALL(*m_mockFs, ReadFileContents(_))
@@ -50,8 +48,7 @@ TEST_F(FileBasedCompressedSecondaryCacheMockTests, ReadFileContentsFailure_Looku
     auto s = cache->Insert(MakeKey("read_fail_key"), &payload, &m_helper, /*force_insert=*/true);
     ASSERT_TRUE(s.ok()) << s.ToString();
 
-    size_t usage = 0;
-    ASSERT_TRUE(cache->GetUsage(usage).ok());
+    auto usage = cache->GetUsage().Value();
     EXPECT_GT(usage, 0u) << "Entry must be tracked in the index after a successful Insert";
 
     // Lookup fails because ReadFileContents returns nullopt.
@@ -61,7 +58,7 @@ TEST_F(FileBasedCompressedSecondaryCacheMockTests, ReadFileContentsFailure_Looku
     EXPECT_FALSE(kept);
 
     // The failed read must have removed the entry from the index.
-    ASSERT_TRUE(cache->GetUsage(usage).ok());
+    usage = cache->GetUsage().Value();
     EXPECT_EQ(usage, 0u) << "Entry must be removed from the index after a failed read";
 
     // A second Lookup must also miss — no phantom index entry remains.
@@ -74,7 +71,7 @@ TEST_F(FileBasedCompressedSecondaryCacheMockTests, ReadFileContentsFailure_Looku
 // pre-serialised block data to disk when RocksDB hands it to the secondary tier.
 // --------------------------------------------------------------------------
 TEST_F(FileBasedCompressedSecondaryCacheMockTests, InsertSaved_CallsWriteFileAtomic) {
-    EXPECT_CALL(*m_mockFs, WriteFileAtomic(_, _, _)).Times(1).WillOnce(Return(true));
+    EXPECT_CALL(*m_mockFs, WriteFileAtomic(_, _)).Times(1).WillOnce(Return(FilesystemResult::Succeeded));
 
     auto cache = std::make_unique<FileBasedCompressedSecondaryCache>(
         m_cacheDir, m_mockFs, FileBasedCompressedSecondaryCache::kDefaultCapacity, MakeNullLogger());
@@ -86,4 +83,29 @@ TEST_F(FileBasedCompressedSecondaryCacheMockTests, InsertSaved_CallsWriteFileAto
                                      rocksdb::CompressionType::kNoCompression, rocksdb::CacheTier::kVolatileTier);
 
     EXPECT_TRUE(status.ok()) << status.ToString();
+}
+
+// --------------------------------------------------------------------------
+// [Mock I/O] An eviction whose rename fails (Windows: a reader holds the file open) falls back to deleting the
+// original file, so it does not stay on disk uncounted
+// --------------------------------------------------------------------------
+TEST_F(FileBasedCompressedSecondaryCacheMockTests, EvictionRenameFailure_DeletesTheOriginalFile) {
+    ON_CALL(*m_mockFs, WriteFileAtomic(_, _)).WillByDefault(Return(FilesystemResult::Succeeded));
+    ON_CALL(*m_mockFs, RenameFile(_, _)).WillByDefault(Return(FilesystemResult::Failed));
+    ON_CALL(*m_mockFs, DeleteFile(_)).WillByDefault(Return(FilesystemResult::Succeeded));
+    std::vector<std::filesystem::path> deleted;
+    EXPECT_CALL(*m_mockFs, DeleteFile(_)).WillRepeatedly([&deleted](const std::filesystem::path& path) {
+        deleted.push_back(path);
+        return FilesystemResult::Succeeded;
+    });
+
+    auto cache = std::make_unique<FileBasedCompressedSecondaryCache>(
+        m_cacheDir, m_mockFs, FileBasedCompressedSecondaryCache::kDefaultCapacity, MakeNullLogger());
+    TestPayload payload{"data"};
+    ASSERT_TRUE(cache->Insert(MakeKey("evicted_key"), &payload, &m_helper, /*force_insert=*/true).ok());
+
+    cache->Erase(MakeKey("evicted_key"));
+
+    ASSERT_EQ(deleted.size(), 1U);
+    EXPECT_NE(deleted.front().extension(), ".del");
 }

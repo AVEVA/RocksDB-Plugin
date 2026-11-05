@@ -3,6 +3,7 @@
 
 #include "AVEVA/RocksDB/Plugin/Azure/WriteableFile.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/AzureErrorTranslator.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
 
 #include <boost/log/trivial.hpp>
 #include <cassert>
@@ -11,97 +12,62 @@ namespace AVEVA::RocksDB::Plugin::Azure {
 using namespace boost::log::trivial;
 
 WriteableFile::WriteableFile(
-    Impl::WriteableFileImpl file,
+    Impl::WriteableFileImpl&& file,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
-    : m_file(std::move(file)), m_logger(std::move(logger)) {}
+    : m_file(std::make_unique<Impl::WriteableFileImpl>(std::move(file))), m_logger(std::move(logger)) {}
+
+WriteableFile::~WriteableFile() = default;
 
 rocksdb::IOStatus WriteableFile::Append(const rocksdb::Slice& data, const rocksdb::IOOptions&,
                                         rocksdb::IODebugContext*) {
-    try {
-        m_file.Append(std::span(data.data(), data.size()));
-    } catch (const ::Azure::Core::RequestFailedException& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
-                                        << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when appending to file");
-    }
-
-    return rocksdb::IOStatus::OK();
+    return AzureErrorTranslator::Invoke(*m_logger, "Append", [&] {
+        m_file->Append(std::span(data.data(), data.size()));
+        return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus WriteableFile::Close(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
-    try {
-        m_file.Close();
-    } catch (const ::Azure::Core::RequestFailedException& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
-                                        << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when closing file");
-    }
-
-    return rocksdb::IOStatus::OK();
+    return AzureErrorTranslator::Invoke(*m_logger, "Close", [&] {
+        m_file->Close();
+        return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus WriteableFile::Flush(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
-    try {
-        m_file.Flush();
-    } catch (const ::Azure::Core::RequestFailedException& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
-                                        << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when flushing file");
+    return AzureErrorTranslator::Invoke(*m_logger, "Flush", [&] {
+        m_file->Flush();
+        return rocksdb::IOStatus::OK();
+    });
+}
+
+// RocksDB calls this every `bytes_per_sync` bytes while writing an SST. Starting the page uploads now (without waiting
+// for them) spreads the transfer across the write instead of bursting it at the final Sync. Durability is still only
+// established by Sync/Close, so strict mode defers to Sync.
+rocksdb::IOStatus WriteableFile::RangeSync(uint64_t, uint64_t, const rocksdb::IOOptions& options,
+                                           rocksdb::IODebugContext* dbg) {
+    if (strict_bytes_per_sync_) {
+        return Sync(options, dbg);
     }
 
-    return rocksdb::IOStatus::OK();
+    return AzureErrorTranslator::Invoke(*m_logger, "RangeSync", [&] {
+        m_file->RangeSync();
+        return rocksdb::IOStatus::OK();
+    });
 }
 
 rocksdb::IOStatus WriteableFile::Sync(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
-    try {
-        m_file.Sync();
-    } catch (const ::Azure::Core::RequestFailedException& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
-                                        << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
-        return AzureErrorTranslator::IOStatusFromError(ex.Message, ex.StatusCode);
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return rocksdb::IOStatus::IOError(ex.what());
-    } catch (...) {
-        return rocksdb::IOStatus::IOError("Unknown error when syncing file");
-    }
-
-    return rocksdb::IOStatus::OK();
+    return AzureErrorTranslator::Invoke(*m_logger, "Sync", [&] {
+        m_file->Sync();
+        return rocksdb::IOStatus::OK();
+    });
 }
 
 uint64_t WriteableFile::GetFileSize(const rocksdb::IOOptions&, rocksdb::IODebugContext*) {
-    try {
-        const auto fileSize = m_file.GetFileSize();
-
-        assert(fileSize >= 0 && "File size should not be negative");
-        assert(fileSize <= std::numeric_limits<int64_t>::max() && "File size must fit in int64_t");
-
-        return static_cast<uint64_t>(fileSize);
-    } catch (const ::Azure::Core::RequestFailedException& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << "[" << ex.ErrorCode << "]"
-                                        << " (Status Code: " << static_cast<int>(ex.StatusCode) << ") " << ex.Message;
-        return 0;
-    } catch (const std::exception& ex) {
-        BOOST_LOG_SEV(*m_logger, error) << ex.what();
-        return 0;
-    } catch (...) {
-        BOOST_LOG_SEV(*m_logger, error) << "Unknown error when syncing file";
-        return 0;
-    }
+    // The writer tracks its own size, so this never needs a round-trip to Azure and cannot fail: a transient service
+    // error must not make RocksDB believe the file is empty.
+    static_assert(noexcept(std::declval<const Impl::WriteableFileImpl&>().GetFileSize()));
+    const auto fileSize = m_file->GetFileSize();
+    assert(fileSize >= 0 && "File size should not be negative");
+    return static_cast<uint64_t>(fileSize);
 }
 } // namespace AVEVA::RocksDB::Plugin::Azure
