@@ -196,6 +196,18 @@ plugin:
   `-DAVEVA_ROCKSDB_WITH_CACHELIB=ON` (Linux x64 only; the CMake build fails
   fast with a `FATAL_ERROR` if you force it on elsewhere).
 
+The file-based secondary cache uses direct I/O for local entry reads and writes
+by default (`O_DIRECT` on Linux, `FILE_FLAG_NO_BUFFERING` on Windows), bypassing
+the OS file-data cache. Other `LocalFilesystem` users remain buffered. A startup
+write/read probe verifies support and aborts cache construction on failure; there
+is no buffered fallback. Linux requires the filesystem/kernel to report alignment
+through `STATX_DIOALIGN` (Linux 6.1 or newer with filesystem support). Entry bytes
+and logical file lengths remain unchanged; aligned writes are trimmed before the
+atomic rename. Custom filesystem implementations retain their own I/O policy.
+Direct I/O does not bypass storage-controller/cloud caches or eliminate temporary
+reconstruction buffers. Earlier benchmark results used buffered entry I/O and
+must not be presented as measurements of this direct-I/O default.
+
 Both backends require a cache directory. Set these before launching:
 
 ```powershell
@@ -228,6 +240,7 @@ AVEVA_DB_BENCH_CACHELIB_BLOCK_SIZE                          (4096)
 AVEVA_DB_BENCH_CACHELIB_READER_THREADS                      (4)
 AVEVA_DB_BENCH_CACHELIB_WRITER_THREADS                      (4)
 AVEVA_DB_BENCH_CACHELIB_MAX_PARCEL_MEMORY_MB                (32)
+AVEVA_DB_BENCH_CACHELIB_REQUEST_ORDERING_SHARDS_POWER       (16, range 1-20)
 AVEVA_DB_BENCH_CACHELIB_EVICTION_POLICY                     (fifo|lru, default fifo)
 AVEVA_DB_BENCH_CACHELIB_DATA_CHECKSUM                       (0|1, default 1)
 AVEVA_DB_BENCH_CACHELIB_ADMISSION_WRITE_RATE_BYTES_PER_SEC  (unset = admit everything)
@@ -235,6 +248,17 @@ AVEVA_DB_BENCH_CACHELIB_LOG_LEVEL                           (WARN)
 AVEVA_DB_BENCH_CACHELIB_FILE_NAME                           (navy.cache)
 AVEVA_DB_BENCH_CACHELIB_LOG_COUNTERS                        (0|1, default 1)
 ```
+
+`REQUEST_ORDERING_SHARDS_POWER` is the log2 of Navy's request-ordering slot
+count, not a thread count or data-cache capacity. The default 16 creates
+65,536 slots (about 4.5 MiB of fixed bookkeeping on Linux x64), rather than
+Navy's upstream default 20 (1,048,576 slots, about 72 MiB). Set it to 20 to
+reproduce earlier runs. Smaller values preserve ordering but can make unrelated
+requests share a slot and wait for each other; compare throughput before tuning
+further. Slot bookkeeping is allocated at construction, not on demand.
+The approximately 67.5 MiB saving is not a total-RAM limit: region buffers
+(8 MiB with the defaults), indexes, queued inserts and thread stacks are separate.
+`MAX_PARCEL_MEMORY_MB` limits pending insert payloads; it is not preallocated.
 
 With `LOG_COUNTERS` on, closing the cache prints one `CACHELIB_COUNTER name=value`
 line per Navy counter (e.g. `navy_bc_lookups`, `navy_bc_succ_lookups`, `navy_bc_inserts`,

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp"
 
 #include "LruFileIndex.hpp"
 #include "ResultHandle.hpp"
@@ -106,13 +107,27 @@ class FileBasedCompressedSecondaryCache::Impl {
         if (!m_logger) {
             throw std::invalid_argument("FileBasedCompressedSecondaryCache: logger cannot be null");
         }
+        // Do not modify the caller's shared filesystem: other users retain their buffered-I/O behavior.
+        const bool directIo = std::dynamic_pointer_cast<LocalFilesystem>(m_fs) != nullptr;
+        if (directIo)
+            m_fs = std::make_shared<LocalFilesystem>(m_logger, true);
 
         m_fs->DeleteDir(m_cacheDir);
         m_fs->CreateDir(m_cacheDir);
+        if (directIo) {
+            const auto probe = m_cacheDir / ".direct-io-probe";
+            const std::string contents = "direct I/O probe";
+            const bool written = m_fs->WriteFileAtomic(probe, contents.data(), contents.size());
+            const auto read = written ? m_fs->ReadFileContents(probe) : std::nullopt;
+            const bool removed = m_fs->DeleteFile(probe);
+            if (!written || !read || *read != contents || !removed)
+                throw std::runtime_error("FileBasedCompressedSecondaryCache: direct-I/O startup check failed; see log");
+        }
 
         BOOST_LOG_SEV(*m_logger, info) << "FileBasedCompressedSecondaryCache: initialized dir='" << m_cacheDir.string()
                                        << "', capacity=" << capacity
-                                       << " bytes, always_force_insert=" << m_alwaysForceInsert;
+                                       << " bytes, always_force_insert=" << m_alwaysForceInsert
+                                       << ", local_direct_io=" << directIo;
     }
 
     const char* Name() const noexcept { return "FileBasedCompressedSecondaryCache"; }

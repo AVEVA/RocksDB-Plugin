@@ -41,8 +41,10 @@ class FileBasedCompressedSecondaryCache final : public rocksdb::SecondaryCache {
     /// </summary>
     /// <param name="cacheDir">Cache directory; will be created if it does not already exist.</param>
     /// <param name="fs">
-    /// Filesystem implementation used for all I/O.  Pass a
-    /// <c>LocalFilesystem</c> for production use or a mock for testing.
+    /// Pass a <c>LocalFilesystem</c> for production use or a mock for testing.
+    /// A LocalFilesystem is replaced by a private direct-I/O instance, leaving the supplied
+    /// instance unchanged. Linux requires STATX_DIOALIGN support; Windows requires unbuffered I/O.
+    /// Unsupported direct I/O causes construction to fail. Custom filesystems retain their own I/O policy.
     /// </param>
     /// <param name="capacity">Maximum number of bytes of entry data stored on disk.</param>
     /// <param name="logger">A logger implementation.</param>

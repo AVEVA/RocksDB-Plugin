@@ -21,17 +21,23 @@ class LocalFilesystem final : public Filesystem {
     explicit LocalFilesystem(
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger);
 
+    /// <summary>Enables unbuffered whole-file reads and atomic writes when directIo is true.
+    /// Unsupported direct I/O is reported as an error; buffered I/O is never used as a fallback.</summary>
+    LocalFilesystem(
+        std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger,
+        bool directIo);
+
     std::unique_ptr<File> Open(const std::filesystem::path& path) override;
     bool DeleteFile(const std::filesystem::path& path) override;
     bool DeleteDir(const std::filesystem::path& path) override;
     bool CreateDir(const std::filesystem::path& path) override;
 
     /// <summary>Reads the entire contents of <paramref name="path"/> into a string using
-    /// standard buffered I/O.  Returns <c>std::nullopt</c> on any failure.</summary>
+    /// the configured I/O mode. Returns <c>std::nullopt</c> on any failure.</summary>
     std::optional<std::string> ReadFileContents(const std::filesystem::path& path) noexcept override;
 
     /// <summary>Writes <paramref name="size"/> bytes to <paramref name="finalPath"/>
-    /// atomically via a staging file and rename.  Uses standard buffered OS writes;
+    /// atomically via a staging file and rename. Uses the configured I/O mode;
     /// observers see either the prior version or the complete new contents.</summary>
     bool WriteFileAtomic(const std::filesystem::path& finalPath, const char* data, size_t size) noexcept override;
 
@@ -43,6 +49,7 @@ class LocalFilesystem final : public Filesystem {
 
     /// <summary>Monotonically increasing counter for unique staging file names.</summary>
     std::atomic<uint64_t> m_seq{0};
+    bool m_directIo = false;
 
     /// <summary>Writes all bytes to <paramref name="path"/> using standard buffered I/O.
     /// Returns <c>true</c> on success.</summary>
