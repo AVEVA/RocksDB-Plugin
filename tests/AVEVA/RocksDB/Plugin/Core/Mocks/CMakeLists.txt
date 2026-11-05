@@ -3,8 +3,6 @@ add_library(aveva-rocksdb-plugin-core-mocks
     FilesystemMock.hpp
     ContainerClientMock.cpp
     ContainerClientMock.hpp
-    BlobClientMock.cpp
-    BlobClientMock.hpp
     FileMock.hpp
     FileMock.cpp
 )

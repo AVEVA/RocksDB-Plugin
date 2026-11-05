@@ -1,57 +1,64 @@
-add_library(aveva-rocksdb-plugin-azure-impl
-    BlobHelpers.cpp
-    PageBlob.cpp
-    ReadableFileImpl.cpp
-    WriteableFileImpl.cpp
-    ReadWriteFileImpl.cpp
-    BlobFilesystemImpl.cpp
-    StorageAccount.cpp
-    LoggerImpl.cpp
-    LogRateLimiter.cpp
-    LockFileImpl.cpp
-    BlobAttributes.cpp
-    DirectoryImpl.cpp
-    AzureContainerClient.cpp
+add_library(aveva-rocksdb-plugin-azure-impl STATIC
+    Async/AsyncReadRequest.cpp
+    Async/AsyncReadTracker.cpp
+    Files/ReadableFileImpl.cpp
+    Files/SequentialFileImpl.cpp
+    Files/WriteableFileImpl.cpp
+    Files/ReadWriteFileImpl.cpp
+    Files/LockFileImpl.cpp
+    Filesystem/BlobFilesystemImpl.cpp
+    Filesystem/BlobHelpers.cpp
+    Filesystem/StorageAccount.cpp
+    Filesystem/BlobAttributes.cpp
+    Filesystem/DirectoryImpl.cpp
+    Filesystem/BlobMetadataCache.cpp
+    Runtime/ClientFactory.cpp
+    Runtime/LoggerImpl.cpp
+    Runtime/LogRateLimiter.cpp
+    Runtime/ClientRuntime.cpp
+    Runtime/WriteFence.cpp
+    Runtime/PluginClients.cpp
 )
 add_library(aveva::rocksdb-plugin-azure-impl ALIAS aveva-rocksdb-plugin-azure-impl)
 set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../../../include")
+# Only Configuration.hpp is public (Plugin.hpp uses it). Every other header here includes Boost.Asio and the Azure
+# client, so they live under include/ in this directory, are not installed, and are visible to in-tree consumers only.
 target_sources(aveva-rocksdb-plugin-azure-impl
   PUBLIC
   FILE_SET HEADERS
   BASE_DIRS "${base-include-dir}"
   FILES
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobHelpers.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/PageBlob.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ReadableFileImpl.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/ReadWriteFileImpl.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/Configuration.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BufferChunkInfo.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobFilesystemImpl.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/StorageAccount.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/LoggerImpl.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/LogRateLimiter.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/LockFileImpl.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/BlobAttributes.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/DirectoryImpl.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Azure/Impl/AzureContainerClient.hpp"
 )
-install(TARGETS aveva-rocksdb-plugin-azure-impl
-    EXPORT
+target_include_directories(aveva-rocksdb-plugin-azure-impl PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
-find_package(azure-identity-cpp CONFIG REQUIRED)
-find_package(azure-storage-blobs-cpp CONFIG REQUIRED)
+target_include_directories(aveva-rocksdb-plugin-azure-impl PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/..")
+find_package(boost_asio CONFIG REQUIRED)
 find_package(boost_log CONFIG REQUIRED)
+find_package(boost_json CONFIG REQUIRED)
+find_package(boost_scope CONFIG REQUIRED)
 find_package(aveva-install-library CONFIG REQUIRED)
 target_link_libraries(aveva-rocksdb-plugin-azure-impl PUBLIC
     aveva-rocksdb-plugin-core
     aveva-rocksdb-plugin-azure-models
-    Azure::azure-storage-blobs
-    Azure::azure-identity
+    aveva::azure-client
+    aveva::http-client
+    Boost::asio
     Boost::log
+    Boost::json
+    Boost::scope
 )
+target_link_libraries(aveva-rocksdb-plugin-azure-impl PRIVATE
+    $<$<PLATFORM_ID:Windows>:crypt32>
+)
+if(MSVC)
+    target_compile_options(aveva-rocksdb-plugin-azure-impl PRIVATE /bigobj)
+endif()
+# The one precompiled header for the Azure plugin; the azure target and the tests reuse it via REUSE_FROM.
+target_precompile_headers(aveva-rocksdb-plugin-azure-impl PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/PrecompiledHeader.hpp")
 aveva_install_library(aveva-rocksdb-plugin-azure-impl)
 target_compile_features(aveva-rocksdb-plugin-azure-impl PUBLIC cxx_std_23)
 set_target_properties(aveva-rocksdb-plugin-azure-impl PROPERTIES
-    WINDOWS_EXPORT_ALL_SYMBOLS ON
+    POSITION_INDEPENDENT_CODE ON
 )

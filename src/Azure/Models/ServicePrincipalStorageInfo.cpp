@@ -2,24 +2,23 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #include "AVEVA/RocksDB/Plugin/Azure/Models/ServicePrincipalStorageInfo.hpp"
+
+#include <utility>
 namespace AVEVA::RocksDB::Plugin::Azure::Models {
-ServicePrincipalStorageInfo::ServicePrincipalStorageInfo(const std::string& dbName,
-                                                         const std::string& storageAccountUrl,
-                                                         const std::string& servicePrincipalId,
-                                                         const std::string& servicePrincipalSecret,
-                                                         const std::string& tenantId)
-    : m_dbName(dbName), m_storageAccountUrl(storageAccountUrl), m_servicePrincipalId(servicePrincipalId),
-      m_servicePrincipalSecret(servicePrincipalSecret), m_tenantId(tenantId) {}
+ServicePrincipalStorageInfo::ServicePrincipalStorageInfo(DbName dbName, AccountUrl storageAccountUrl,
+                                                         ClientId servicePrincipalId,
+                                                         ClientSecret servicePrincipalSecret, TenantId tenantId)
+    : m_dbName(std::move(dbName)), m_storageAccountUrl(std::move(storageAccountUrl)),
+      m_servicePrincipalId(std::move(servicePrincipalId)), m_servicePrincipalSecret(std::move(servicePrincipalSecret)),
+      m_tenantId(std::move(tenantId)) {}
 
-const std::string& ServicePrincipalStorageInfo::GetDbName() const noexcept { return m_dbName; }
+DbName ServicePrincipalStorageInfo::GetDbName() const { return m_dbName; }
 
-const std::string& ServicePrincipalStorageInfo::GetStorageAccountUrl() const noexcept { return m_storageAccountUrl; }
+AccountUrl ServicePrincipalStorageInfo::GetStorageAccountUrl() const { return m_storageAccountUrl; }
 
-const std::string& ServicePrincipalStorageInfo::GetServicePrincipalId() const noexcept { return m_servicePrincipalId; }
+ClientId ServicePrincipalStorageInfo::GetServicePrincipalId() const { return m_servicePrincipalId; }
 
-const std::string& ServicePrincipalStorageInfo::GetServicePrincipalSecret() const noexcept {
-    return m_servicePrincipalSecret;
-}
+ClientSecret ServicePrincipalStorageInfo::GetServicePrincipalSecret() const { return m_servicePrincipalSecret; }
 
-const std::string& ServicePrincipalStorageInfo::GetTenantId() const noexcept { return m_tenantId; }
+TenantId ServicePrincipalStorageInfo::GetTenantId() const { return m_tenantId; }
 } // namespace AVEVA::RocksDB::Plugin::Azure::Models

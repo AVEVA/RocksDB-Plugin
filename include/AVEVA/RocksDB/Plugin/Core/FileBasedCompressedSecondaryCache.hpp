@@ -4,6 +4,7 @@
 #pragma once
 
 #include "AVEVA/RocksDB/Plugin/Core/Filesystem.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/Units.hpp"
 
 #include <rocksdb/secondary_cache.h>
 
@@ -28,13 +29,13 @@ namespace AVEVA::RocksDB::Plugin::Core {
 /// </summary>
 class FileBasedCompressedSecondaryCache final : public rocksdb::SecondaryCache {
   public:
-    static constexpr size_t kDefaultCapacity = 512ULL * 1024 * 1024; // 512 MiB
+    static constexpr ByteCount kDefaultCapacity{512ULL * 1024 * 1024}; // 512 MiB
 
     /// <summary>
     /// Per-entry on-disk overhead: one byte stores the RocksDB CompressionType
     /// of the payload so it can be faithfully restored on lookup.
     /// </summary>
-    static constexpr size_t kFileHeaderSize = 1;
+    static constexpr ByteCount kFileHeaderSize{1};
 
     /// <summary>
     /// Constructs the cache.
@@ -47,7 +48,7 @@ class FileBasedCompressedSecondaryCache final : public rocksdb::SecondaryCache {
     /// <param name="capacity">Maximum number of bytes of entry data stored on disk.</param>
     /// <param name="logger">A logger implementation.</param>
     explicit FileBasedCompressedSecondaryCache(
-        std::filesystem::path cacheDir, std::shared_ptr<Filesystem> fs, size_t capacity,
+        std::filesystem::path cacheDir, std::shared_ptr<Filesystem> fs, ByteCount capacity,
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger);
 
     ~FileBasedCompressedSecondaryCache() override;
@@ -125,8 +126,7 @@ class FileBasedCompressedSecondaryCache final : public rocksdb::SecondaryCache {
     rocksdb::Status Inflate(size_t increase) noexcept override;
 
     /// <summary>Returns the number of bytes currently stored on disk.</summary>
-    /// <param name="usage">Out-parameter receiving the number of bytes currently used by stored entries.</param>
-    rocksdb::Status GetUsage(size_t& usage) const noexcept;
+    [[nodiscard]] ByteCount GetUsage() const noexcept;
 
   private:
     class Impl;

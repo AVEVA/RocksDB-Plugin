@@ -32,12 +32,10 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConcurrentSameKeyInsert_UsageAcco
     delete static_cast<TestPayload*>(handle->Value());
 
     // Usage must reflect at most one entry, not kThreadCount copies.
-    size_t usage = 0;
-    ASSERT_TRUE(m_cache->GetUsage(usage).ok());
-    EXPECT_LE(usage, FileBasedCompressedSecondaryCache::kFileHeaderSize + data.size())
-        << "m_currentSize must not exceed one entry after concurrent same-key inserts "
-        << "(usage=" << usage << " B, max=" << FileBasedCompressedSecondaryCache::kFileHeaderSize + data.size()
-        << " B)";
+    const auto usage = m_cache->GetUsage().Value();
+    const auto entryBound = FileBasedCompressedSecondaryCache::kFileHeaderSize.Value() + data.size();
+    EXPECT_LE(usage, entryBound) << "m_currentSize must not exceed one entry after concurrent same-key inserts "
+                                 << "(usage=" << usage << " B, max=" << entryBound << " B)";
 }
 
 // --------------------------------------------------------------------------
@@ -53,8 +51,9 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConcurrentDifferentKeyInserts_Usa
     constexpr size_t kThreadCount = 16;
 
     // Capacity allows exactly 3 entries; the remaining 13 must be evicted.
-    const size_t capacity = 3 * (FileBasedCompressedSecondaryCache::kFileHeaderSize + kEntrySize);
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, MakeNullLogger());
+    const size_t capacity = 3 * (FileBasedCompressedSecondaryCache::kFileHeaderSize.Value() + kEntrySize);
+    m_cache =
+        std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, ByteCount{capacity}, MakeNullLogger());
 
     std::vector<std::thread> threads;
     threads.reserve(kThreadCount);
@@ -68,8 +67,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConcurrentDifferentKeyInserts_Usa
     for (auto& t : threads)
         t.join();
 
-    size_t usage = 0;
-    ASSERT_TRUE(m_cache->GetUsage(usage).ok());
+    const auto usage = m_cache->GetUsage().Value();
     EXPECT_LE(usage, capacity) << "m_currentSize must never exceed capacity after concurrent inserts "
                                << "(usage=" << usage << " B, capacity=" << capacity << " B)";
 }
@@ -173,8 +171,8 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, ConcurrentMixedInsertEraseLookup)
         t.join();
 
     // The cache must remain internally consistent: usage <= capacity.
-    size_t usage = 0, cap = 0;
-    ASSERT_TRUE(m_cache->GetUsage(usage).ok());
+    size_t cap = 0;
+    const auto usage = m_cache->GetUsage().Value();
     ASSERT_TRUE(m_cache->GetCapacity(cap).ok());
     EXPECT_LE(usage, cap) << "Internal state must remain consistent after concurrent mixed operations";
 

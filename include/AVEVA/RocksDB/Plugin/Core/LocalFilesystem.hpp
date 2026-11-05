@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <span>
 namespace AVEVA::RocksDB::Plugin::Core {
 class LocalFilesystem final : public Filesystem {
   public:
@@ -22,21 +23,22 @@ class LocalFilesystem final : public Filesystem {
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger);
 
     std::unique_ptr<File> Open(const std::filesystem::path& path) override;
-    bool DeleteFile(const std::filesystem::path& path) override;
-    bool DeleteDir(const std::filesystem::path& path) override;
-    bool CreateDir(const std::filesystem::path& path) override;
+    FilesystemResult DeleteFile(const std::filesystem::path& path) override;
+    FilesystemResult DeleteDir(const std::filesystem::path& path) override;
+    FilesystemResult CreateDir(const std::filesystem::path& path) override;
 
     /// <summary>Reads the entire contents of <paramref name="path"/> into a string using
     /// standard buffered I/O.  Returns <c>std::nullopt</c> on any failure.</summary>
     std::optional<std::string> ReadFileContents(const std::filesystem::path& path) noexcept override;
 
-    /// <summary>Writes <paramref name="size"/> bytes to <paramref name="finalPath"/>
+    /// <summary>Writes <paramref name="contents"/> to <paramref name="finalPath"/>
     /// atomically via a staging file and rename.  Uses standard buffered OS writes;
     /// observers see either the prior version or the complete new contents.</summary>
-    bool WriteFileAtomic(const std::filesystem::path& finalPath, const char* data, size_t size) noexcept override;
+    FilesystemResult WriteFileAtomic(const std::filesystem::path& finalPath,
+                                     std::span<const char> contents) noexcept override;
 
     /// <summary>Renames <paramref name="from"/> to <paramref name="to"/>.</summary>
-    bool RenameFile(const std::filesystem::path& from, const std::filesystem::path& to) noexcept override;
+    FilesystemResult RenameFile(const RenameSource& from, const RenameDestination& to) noexcept override;
 
   private:
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
@@ -44,8 +46,8 @@ class LocalFilesystem final : public Filesystem {
     /// <summary>Monotonically increasing counter for unique staging file names.</summary>
     std::atomic<uint64_t> m_seq{0};
 
-    /// <summary>Writes all bytes to <paramref name="path"/> using standard buffered I/O.
-    /// Returns <c>true</c> on success.</summary>
-    static bool WriteAllBytesToFile(const std::filesystem::path& path, const char* data, size_t size) noexcept;
+    /// <summary>Writes all bytes to <paramref name="path"/> using standard buffered I/O.</summary>
+    static FilesystemResult WriteAllBytesToFile(const std::filesystem::path& path,
+                                                std::span<const char> contents) noexcept;
 };
 } // namespace AVEVA::RocksDB::Plugin::Core

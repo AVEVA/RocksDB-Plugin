@@ -1,0 +1,88 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2025 AVEVA
+
+#include "AVEVA/RocksDB/Plugin/Azure/Impl/LoggerImpl.hpp"
+#include <format>
+namespace AVEVA::RocksDB::Plugin::Azure::Impl {
+LoggerImpl::LoggerImpl(std::unique_ptr<LogSink> sink, std::unique_ptr<LogRateLimiter> rateLimiter)
+    : m_file(std::move(sink)), m_buffer(4096), m_rateLimiter(std::move(rateLimiter)) {}
+
+void LoggerImpl::Logv(const rocksdb::InfoLogLevel logLevel, const char* format, ...) {
+    va_list va;
+    va_start(va, format);
+    Logv(logLevel, format, va);
+    va_end(va);
+}
+
+void LoggerImpl::Logv(const rocksdb::InfoLogLevel logLevel, const char* format, va_list ap) {
+    // RocksDB has already filtered by the info log level it was configured with, so filtering again here would only
+    // drop messages the user asked for.
+    (void)logLevel;
+    std::scoped_lock lock(*m_mutex);
+    if (m_rateLimiter) {
+        const auto result = m_rateLimiter->CheckAndRecord(format);
+        if (result.decision == RateDecision::Suppress) {
+            return;
+        }
+        if (result.decision == RateDecision::AllowWithSummary) {
+            // Emit the suppression summary as its own line before the current message.
+            // Format: "[N similar messages suppressed in last 30s]\n"
+            const auto seconds = m_rateLimiter->Cooldown().count();
+            const auto summary =
+                std::format("[{} similar messages suppressed in last {}s]\n", result.suppressedCount, seconds);
+            m_file->Append(std::span(summary.data(), summary.data() + summary.size()));
+        }
+    }
+
+    // RFC 3339 format UTC time
+    // See: https://en.cppreference.com/w/cpp/chrono/c/strftime
+    const auto now = std::time(nullptr);
+    std::tm tm = {};
+#ifdef _WIN32
+    gmtime_s(&tm, &now);
+#else
+    gmtime_r(&now, &tm);
+#endif
+
+    auto offset = strftime(m_buffer.data(), m_buffer.size(), "%Y-%m-%dT%H:%M:%SZ", &tm);
+    m_buffer[offset++] = ' ';
+
+    // Copy va_list because vsnprintf may consume it
+    va_list apCopy;
+    va_copy(apCopy, ap);
+
+    const int result = vsnprintf(m_buffer.data() + offset, m_buffer.size() - offset, format, apCopy);
+    va_end(apCopy);
+    if (result < 0) {
+        throw std::runtime_error("Unable to format log message");
+    }
+
+    auto totalBufferOffset = static_cast<size_t>(result) + offset;
+    // Room for the NUL terminator and the newline appended below.
+    if (totalBufferOffset + 2 > m_buffer.size()) {
+        // vsnprintf truncates unless the buffer can also hold the trailing NUL terminator,
+        // so size it for totalBufferOffset characters plus one NUL byte.
+        m_buffer.resize(totalBufferOffset + 2);
+        const int newResult = vsnprintf(m_buffer.data() + offset, m_buffer.size() - offset, format, ap);
+        if (newResult < 0) {
+            throw std::runtime_error("Unable to format log message");
+        }
+    }
+
+    if (totalBufferOffset == offset || m_buffer[totalBufferOffset - 1] != '\n') {
+        m_buffer[totalBufferOffset++] = '\n';
+    }
+
+    m_file->Append(std::span(m_buffer.data(), m_buffer.data() + totalBufferOffset));
+}
+
+void LoggerImpl::Flush() {
+    std::scoped_lock lock(*m_mutex);
+    m_file->Sync();
+}
+
+void LoggerImpl::Close() {
+    std::scoped_lock lock(*m_mutex);
+    m_file->Close();
+}
+} // namespace AVEVA::RocksDB::Plugin::Azure::Impl
