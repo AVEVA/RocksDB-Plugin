@@ -57,7 +57,7 @@ Group by area:
 
 Use the **Review Agent** as a sub-agent for detailed code analysis:
 - **C++ correctness**: RAII, ownership, lifetime issues, thread safety
-- **Azure SDK usage**: proper error translation, correct async patterns
+- **Azure client usage**: proper error translation, correct async patterns
 - **RocksDB integration**: status code mapping, filesystem contract adherence
 - **Security**: buffer overflows, integer overflow, unchecked casts
 - **Build**: CMake target changes, new source files added to CMakeLists
