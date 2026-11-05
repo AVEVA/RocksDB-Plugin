@@ -11,17 +11,29 @@ This repository is currently maintained by AVEVA teams.
    (CMake, clang-format/clang-tidy, gitleaks, vcpkg) and configures the shared git
    hooks path (`core.hooksPath = .github/hooks`) so the pre-commit hook runs locally.
 
+The CI format check pins clang-format 22.1.3 (`CLANG_FORMAT_VERSION` in `.github/workflows/build-and-test.yml`).
+Use clang-format 22.x locally; `devdoctor.ps1` warns on a different major version.
+
 ## Build and Test
 
 1. Configure: `cmake --preset WindowsDebug` or `cmake --preset LinuxDebug`
 2. Build: `cmake --build build/<preset> --config Debug`
 3. Test: `ctest --test-dir build/<preset> --output-on-failure --build-config Debug`
 
+## Dependency Pins
+
+- `vcpkg.json` `builtin-baseline` pins the default vcpkg registry; Dependabot proposes bumps.
+- `vcpkg-configuration.json` pins the `microsoft` artifact catalog to a commit archive
+  (`.../vcpkg-ce-catalog/archive/<commit>.zip`) so a build never changes underneath you. To bump it, pick a new
+  commit of `microsoft/vcpkg-ce-catalog`, replace the commit in the URL, and run a full configure and build.
+- `infrastructure/vcpkg-overlays/rocksdb/` overrides the RocksDB port only for `AVEVA_ROCKSDB_BUILD_DB_BENCH=ON`
+  builds (the root `CMakeLists.txt` adds it to `VCPKG_OVERLAY_PORTS`); see its `README.md` before touching it.
+
 ## Code Guidelines
 
 1. Follow modern C++ practices (RAII, strong typing, clear ownership).
 2. Keep public headers in `include/AVEVA/RocksDB/Plugin/` backward compatible.
-3. For Azure layer changes, preserve complete Azure SDK error to RocksDB status mapping.
+3. For Azure layer changes, preserve complete Azure client error to RocksDB status mapping.
 4. Add tests for all functional changes.
 
 ## Pull Request Expectations

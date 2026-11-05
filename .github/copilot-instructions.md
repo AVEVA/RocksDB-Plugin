@@ -17,17 +17,18 @@ Azure Blob Storage as a local filesystem.
 
 | Path | Purpose |
 |------|---------|
-| `src/AVEVA/RocksDB/Plugin/Azure/` | Azure Page Blob Filesystem plugin (blob storage integration, file read/write, directory ops, error translation) |
-| `src/AVEVA/RocksDB/Plugin/Core/` | Filesystem abstractions: local filesystem, compressed secondary cache, file cache with LRU index, utilities |
+| `src/Azure/` | Azure Page Blob Filesystem plugin (blob storage integration, file read/write, directory ops, error translation) |
+| `src/Core/` | Filesystem abstractions: local filesystem, file cache with an intrusive LRU list, compressed secondary cache (which has its own `LruFileIndex`), utilities |
 | `include/AVEVA/RocksDB/Plugin/` | Public C++ headers |
 | `tests/` | C++ test suites |
 | `infrastructure/` | Build and CI infrastructure |
-| `pipelines/` | Azure DevOps pipeline definitions |
+| `libs/AzureClient/`, `libs/HttpClient/` | In-tree Azure Blob client and the HTTP client it is built on |
+| `.github/workflows/` | GitHub Actions build, test and sanitizer workflows |
 
 ## Procedure
 
-1. Classify the change: Azure storage layer (`src/.../Azure/`) or Core abstractions (`src/.../Core/`).
-2. For Azure-layer changes, verify error translation is complete — map all Azure SDK error
+1. Classify the change: Azure storage layer (`src/Azure/`) or Core abstractions (`src/Core/`).
+2. For Azure-layer changes, verify error translation is complete — map all Azure client (libs/AzureClient) error
    codes to appropriate RocksDB `rocksdb::Status` codes. Never swallow errors silently.
 3. For file-cache changes (`Core/FileCache`), confirm LRU eviction logic and thread safety.
 4. Plan the smallest safe change that preserves the public header API surface.
@@ -72,14 +73,14 @@ support, CMake, clang-format/clang-tidy, gitleaks, vcpkg, and git hook configura
 
 ## Conventions
 
-- Follow modern C++ (C++17 or newer) idioms.
+- Follow modern C++ (C++23 is required) idioms.
 - Use RAII for resource management — avoid raw pointers with manual `delete`.
-- Map Azure SDK errors to meaningful `rocksdb::Status` codes; do not swallow errors silently.
+- Map Azure client errors (`RequestFailedException`) to meaningful `rocksdb::Status` codes; do not swallow errors silently.
 - New source files must be added to the owning `CMakeLists.txt`.
 - Public headers go in `include/AVEVA/RocksDB/Plugin/` — do not leak implementation details
   into headers.
 - Respect [.clang-format](../.clang-format) and [.clang-tidy](../.clang-tidy); the pre-commit
-  hook runs `clang-format` on staged C/C++ files under `src/`, `include/`, and `tests/`.
+  hook runs `clang-format` on staged C/C++ files under `src/`, `include/`, `tests/`, `libs/`, and `tools/` (including `.ipp`); CI fails on unformatted files.
 
 ## Documentation/Comments
 
@@ -91,7 +92,8 @@ support, CMake, clang-format/clang-tidy, gitleaks, vcpkg, and git hook configura
 - CMake cache issues are common after branch switches — delete `build/` and reconfigure
   rather than patching the cache.
 - On Windows, long path support must be enabled for stable builds (`devdoctor.ps1` reports this).
-- Azure SDK calls are asynchronous; ensure proper `.get()` / `.wait()` handling on futures to
-  avoid races.
+- Azure client (`libs/AzureClient`) calls are asynchronous; the plugin blocks on them with `co_spawn(..., use_future)` + `.get()` (the bridge in `Impl/RequestHelpers.hpp`). Never call `.get()` on a thread that runs the host-supplied `io_context`: it can deadlock or race with
+ the completion that must run on that thread. The plugin never owns or runs an `io_context` itself; it is injected
+ via `Plugin::Register` / `BlobFilesystemImpl`.
 - `vcpkg` is used for dependency management — ensure `VCPKG_ROOT` is set and bootstrap vcpkg
   before the first build.
