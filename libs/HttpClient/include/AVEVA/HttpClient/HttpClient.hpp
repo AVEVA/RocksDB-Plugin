@@ -1,0 +1,74 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
+#pragma once
+
+#include <AVEVA/HttpClient/HttpClientError.hpp>
+#include <AVEVA/HttpClient/HttpClientOptions.hpp>
+#include <AVEVA/HttpClient/HttpFailure.hpp>
+#include <AVEVA/HttpClient/HttpRequest.hpp>
+#include <AVEVA/HttpClient/HttpRequestOptions.hpp>
+#include <AVEVA/HttpClient/HttpResponse.hpp>
+
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/io_context.hpp>
+
+#include <gsl/pointers>
+
+#include <memory>
+
+namespace AVEVA {
+/// <summary>
+/// Asynchronous HTTP client, used from C++20 coroutines. Non-copyable and non-movable. Each request is a single
+/// coroutine, so cancelling the awaiting coroutine cancels the request.
+/// </summary>
+class HttpClient {
+  public:
+    using executor_type = boost::asio::io_context::executor_type;
+
+    /// <summary>
+    /// Creates a client that runs its work on an io_context. Throws if the requested TLS settings cannot be
+    /// applied.
+    /// </summary>
+    /// <param name="context">The io_context the client runs on. The caller owns it and must keep it alive,
+    /// and keep running it, for as long as requests are outstanding.</param>
+    /// <param name="options">The client-wide settings to apply.</param>
+    explicit HttpClient(boost::asio::io_context& context, HttpClientOptions options = {});
+
+    HttpClient(const HttpClient&) = delete;
+    HttpClient& operator=(const HttpClient&) = delete;
+    HttpClient(HttpClient&&) = delete;
+    HttpClient& operator=(HttpClient&&) = delete;
+
+    /// <summary>
+    /// Fails every request still waiting for a per-origin slot. Requests already running keep the state they
+    /// need alive on their own.
+    /// </summary>
+    ~HttpClient();
+
+    /// <summary>
+    /// The executor associated with this client (used as the default executor for completion tokens that do
+    /// not carry their own associated executor).
+    /// </summary>
+    /// <returns>The client's executor.</returns>
+    executor_type get_executor() const noexcept { return m_context->get_executor(); }
+
+    /// <summary>
+    /// Sends a request. Cancelling the awaiting coroutine cancels the request, and the per-request timeout covers
+    /// everything, including time spent waiting for a per-origin connection slot.
+    /// Nothing is thrown for a rejected request: the result carries <c>std::errc::not_enough_memory</c> for
+    /// <c>std::bad_alloc</c>, <c>HttpClientError::InvalidRequest</c> for rejected input, and
+    /// <c>std::errc::state_not_recoverable</c> for anything else.
+    /// </summary>
+    /// <param name="request">The request to send.</param>
+    /// <param name="options">The per-request settings to apply.</param>
+    /// <returns>The response, or why there is none.</returns>
+    [[nodiscard]] boost::asio::awaitable<HttpResult> SendAsync(HttpRequest request, HttpRequestOptions options);
+
+  private:
+    class Impl;
+
+    gsl::not_null<boost::asio::io_context*> m_context;
+    std::unique_ptr<Impl> m_impl;
+};
+} // namespace AVEVA
