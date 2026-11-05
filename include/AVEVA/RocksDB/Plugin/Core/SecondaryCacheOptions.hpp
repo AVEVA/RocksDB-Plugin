@@ -31,9 +31,11 @@ enum class SecondaryCacheBackend {
 /// <summary>
 /// Tuning knobs for the CacheLib (Navy) secondary cache. The defaults minimize DRAM
 /// because RocksDB's block cache already provides the in-memory tier.
-/// Fixed DRAM overhead is roughly
-/// <c>2 * cleanRegions * regionSizeBytes + maxParcelMemoryMB + thread stacks</c>
-/// plus about 12-16 bytes per cached block for the index.
+/// Region buffers reserve <c>2 * cleanRegions * regionSizeBytes</c> bytes.
+/// Request-ordering bookkeeping uses about <c>72 * 2^requestOrderingShardsPower</c>
+/// bytes on Linux x64 (4.5 MiB by default). Indexes, thread stacks and queued
+/// inserts consume additional RAM; maxParcelMemoryMB limits pending insert bytes,
+/// not total RAM, and is not an upfront reservation.
 /// I/O is synchronous (pread/pwrite) on Navy's reader and writer thread pools.
 /// </summary>
 struct CacheLibSecondaryCacheOptions {
@@ -85,6 +87,13 @@ struct CacheLibSecondaryCacheOptions {
     /// since the cache is reset on every open and the totals therefore cover one DB session.
     /// </summary>
     bool logCountersOnShutdown = false;
+
+    /// <summary>
+    /// Log2 of the request-ordering slot count (1-20). Fewer slots save fixed RAM
+    /// but can serialize unrelated requests. 16 uses 65,536 slots; 20 restores
+    /// Navy's upstream default of 1,048,576 slots (about 72 MiB of bookkeeping).
+    /// </summary>
+    uint32_t requestOrderingShardsPower = 16;
 };
 
 /// <summary>

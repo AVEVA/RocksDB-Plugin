@@ -197,6 +197,9 @@ void Validate(const SecondaryCacheOptions& options) {
     if (o.maxParcelMemoryMB == 0) {
         throw std::invalid_argument("CacheLibSecondaryCache: maxParcelMemoryMB must be non-zero");
     }
+    if (o.requestOrderingShardsPower == 0 || o.requestOrderingShardsPower > 20) {
+        throw std::invalid_argument("CacheLibSecondaryCache: requestOrderingShardsPower must be between 1 and 20");
+    }
     (void)ParseLogLevel(o.cachelibLogLevel);
 }
 
@@ -207,6 +210,7 @@ navy::NavyConfig MakeNavyConfig(const SecondaryCacheOptions& options, const std:
     config.setBlockSize(o.blockSize);
     config.setMaxParcelMemoryMB(o.maxParcelMemoryMB);
     config.setReaderAndWriterThreads(o.readerThreads, o.writerThreads);
+    config.setNavyReqOrderingShards(o.requestOrderingShardsPower);
     if (o.admissionWriteRateBytesPerSec) {
         config.enableDynamicRandomAdmPolicy().setAdmWriteRate(*o.admissionWriteRateBytesPerSec);
     }
@@ -250,7 +254,8 @@ class CacheLibSecondaryCache::Impl {
         m_maxEntrySize = o.regionSizeBytes;
         BOOST_LOG_SEV(*m_logger, info) << "CacheLibSecondaryCache: initialized file='" << filePath
                                        << "', capacity=" << options.capacity
-                                       << " bytes, usable=" << m_navy->getUsableSize() << " bytes";
+                                       << " bytes, usable=" << m_navy->getUsableSize()
+                                       << " bytes, request_ordering_shards_power=" << o.requestOrderingShardsPower;
     }
 
     ~Impl() {

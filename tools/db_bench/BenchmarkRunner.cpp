@@ -42,6 +42,7 @@
 //   AVEVA_DB_BENCH_CACHELIB_READER_THREADS             (4)
 //   AVEVA_DB_BENCH_CACHELIB_WRITER_THREADS             (4)
 //   AVEVA_DB_BENCH_CACHELIB_MAX_PARCEL_MEMORY_MB       (32)
+//   AVEVA_DB_BENCH_CACHELIB_REQUEST_ORDERING_SHARDS_POWER (16, log2 of slot count; 1-20)
 //   AVEVA_DB_BENCH_CACHELIB_EVICTION_POLICY            (fifo|lru, default fifo)
 //   AVEVA_DB_BENCH_CACHELIB_DATA_CHECKSUM              (0|1, default 1)
 //   AVEVA_DB_BENCH_CACHELIB_ADMISSION_WRITE_RATE_BYTES_PER_SEC  (unset = admit everything)
@@ -235,6 +236,8 @@ void RegisterCacheLibSecondaryCache() {
             cachelib.blockSize = EnvOr<uint32_t>("AVEVA_DB_BENCH_CACHELIB_BLOCK_SIZE", cachelib.blockSize);
             cachelib.readerThreads = EnvOr<uint32_t>("AVEVA_DB_BENCH_CACHELIB_READER_THREADS", cachelib.readerThreads);
             cachelib.writerThreads = EnvOr<uint32_t>("AVEVA_DB_BENCH_CACHELIB_WRITER_THREADS", cachelib.writerThreads);
+            cachelib.requestOrderingShardsPower = EnvOr<uint32_t>(
+                "AVEVA_DB_BENCH_CACHELIB_REQUEST_ORDERING_SHARDS_POWER", cachelib.requestOrderingShardsPower);
             cachelib.maxParcelMemoryMB =
                 EnvOr<uint64_t>("AVEVA_DB_BENCH_CACHELIB_MAX_PARCEL_MEMORY_MB", cachelib.maxParcelMemoryMB);
             cachelib.dataChecksum = EnvFlagOr("AVEVA_DB_BENCH_CACHELIB_DATA_CHECKSUM", cachelib.dataChecksum);

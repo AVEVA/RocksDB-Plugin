@@ -16,6 +16,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 using namespace AVEVA::RocksDB::Plugin::Core;
 using namespace AVEVA::RocksDB::Plugin::Core::Testing;
@@ -55,8 +56,8 @@ class CacheLibSecondaryCacheTests : public ::testing::Test {
     std::filesystem::path m_dir;
     std::unique_ptr<CacheLibSecondaryCache> m_cache;
     rocksdb::Cache::CacheItemHelper m_helperNoSec{rocksdb::CacheEntryRole::kDataBlock, DeleteCb};
-    rocksdb::Cache::CacheItemHelper m_helper{rocksdb::CacheEntryRole::kDataBlock, DeleteCb, SizeCb, SaveToCb,
-                                             CreateCb, &m_helperNoSec};
+    rocksdb::Cache::CacheItemHelper m_helper{
+        rocksdb::CacheEntryRole::kDataBlock, DeleteCb, SizeCb, SaveToCb, CreateCb, &m_helperNoSec};
 
     void SetUp() override {
         m_dir = MakeUniqueTempDir("cachelib");
@@ -69,8 +70,8 @@ class CacheLibSecondaryCacheTests : public ::testing::Test {
     }
 
     void Open(size_t capacity = 16ULL * 1024 * 1024) {
-        m_cache = std::make_unique<CacheLibSecondaryCache>(
-            MakeTestOptions(SecondaryCacheBackend::CacheLib, m_dir, capacity));
+        m_cache =
+            std::make_unique<CacheLibSecondaryCache>(MakeTestOptions(SecondaryCacheBackend::CacheLib, m_dir, capacity));
     }
 
     rocksdb::Status Put(const std::string& key, const std::string& value) {
@@ -179,8 +180,7 @@ TEST_F(CacheLibSecondaryCacheTests, CreateFailureIsAMissAndDropsEntry) {
 TEST_F(CacheLibSecondaryCacheTests, InsertSavedPreservesSourceTier) {
     Open();
     ASSERT_TRUE(
-        m_cache->InsertSaved("tier", "value", rocksdb::kNoCompression, rocksdb::CacheTier::kNonVolatileBlockTier)
-            .ok());
+        m_cache->InsertSaved("tier", "value", rocksdb::kNoCompression, rocksdb::CacheTier::kNonVolatileBlockTier).ok());
     m_cache->Drain();
 
     t_lastSource = rocksdb::CacheTier::kVolatileTier;
@@ -232,6 +232,55 @@ TEST_F(CacheLibSecondaryCacheTests, LruEvictionPolicyWorks) {
     EXPECT_TRUE(Has("lru"));
 }
 
+// Two slots deliberately force unrelated keys to share ordering queues.
+TEST_F(CacheLibSecondaryCacheTests, RequestOrderingSlotsPreserveConcurrentRoundTrips) {
+    for (const uint32_t power : {1U, 16U, 20U}) {
+        SCOPED_TRACE(power);
+        m_cache.reset();
+        auto options = MakeTestOptions(SecondaryCacheBackend::CacheLib, m_dir);
+        options.cachelib.requestOrderingShardsPower = power;
+        m_cache = std::make_unique<CacheLibSecondaryCache>(options);
+        EXPECT_NE(m_cache->GetPrintableOptions().find("navyConfig::navyReqOrderingShards: " + std::to_string(power)),
+                  std::string::npos);
+
+        std::vector<std::thread> writers;
+        for (int t = 0; t < 8; ++t) {
+            writers.emplace_back([&, t] {
+                for (int i = 0; i < 32; ++i) {
+                    const auto key = std::to_string(t) + ":" + std::to_string(i);
+                    EXPECT_TRUE(Put(key, "value:" + key).ok());
+                }
+            });
+        }
+        for (auto& writer : writers) {
+            writer.join();
+        }
+        m_cache->Drain();
+
+        std::vector<std::thread> readers;
+        for (int t = 0; t < 8; ++t) {
+            readers.emplace_back([&, t] {
+                for (int i = 0; i < 32; ++i) {
+                    const auto key = std::to_string(t) + ":" + std::to_string(i);
+                    bool kept = false;
+                    auto handle = m_cache->Lookup(key, &m_helper, nullptr, false, false, nullptr, kept);
+                    ASSERT_NE(handle, nullptr);
+                    handle->Wait();
+                    std::unique_ptr<Payload> value(static_cast<Payload*>(handle->Value()));
+                    ASSERT_NE(value, nullptr);
+                    EXPECT_EQ(value->data, "value:" + key);
+                    m_cache->Erase(key);
+                }
+            });
+        }
+        for (auto& reader : readers) {
+            reader.join();
+        }
+        m_cache->Drain();
+        EXPECT_FALSE(Has("0:0"));
+    }
+}
+
 TEST_F(CacheLibSecondaryCacheTests, InvalidOptionsAreRejected) {
     auto tooSmall = MakeTestOptions(SecondaryCacheBackend::CacheLib, m_dir, 1024 * 1024);
     EXPECT_THROW(CacheLibSecondaryCache{tooSmall}, std::invalid_argument);
@@ -246,11 +295,19 @@ TEST_F(CacheLibSecondaryCacheTests, InvalidOptionsAreRejected) {
     auto badBlock = MakeTestOptions(SecondaryCacheBackend::CacheLib, m_dir);
     badBlock.cachelib.blockSize = 1000;
     EXPECT_THROW(CacheLibSecondaryCache{badBlock}, std::invalid_argument);
+
+    auto badShards = MakeTestOptions(SecondaryCacheBackend::CacheLib, m_dir);
+    for (const uint32_t power : {0U, 21U, 64U}) {
+        badShards.cachelib.requestOrderingShardsPower = power;
+        EXPECT_THROW(CacheLibSecondaryCache{badShards}, std::invalid_argument);
+    }
 }
 
 TEST_F(CacheLibSecondaryCacheTests, OnlyTheCacheFileIsRemovedOnOpen) {
     const auto other = m_dir / "keep.me";
-    { std::ofstream(other) << "x"; }
+    {
+        std::ofstream(other) << "x";
+    }
     Open();
     EXPECT_TRUE(std::filesystem::exists(other));
     EXPECT_TRUE(std::filesystem::exists(m_dir / "navy.cache"));
