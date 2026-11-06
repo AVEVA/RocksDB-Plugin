@@ -17,6 +17,7 @@ add_executable(aveva-http-client-tests
 	HttpClientConstructionTests.cpp
 	HttpClientRequestTests.cpp
 	HttpClientResponseTests.cpp
+	HttpClientRetryTests.cpp
 	HttpClientRobustnessTests.cpp
 	HttpClientTestHelpers.cpp
 	HttpClientTlsTests.cpp

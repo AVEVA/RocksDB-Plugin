@@ -31,4 +31,6 @@ void HttpRequestOptions::SetTruncatedTlsBodyPolicy(TruncatedTlsBodyPolicy policy
 const std::optional<RetryOptions>& HttpRequestOptions::GetRetryOptions() const noexcept { return m_retry; }
 
 void HttpRequestOptions::SetRetryOptions(RetryOptions retry) noexcept { m_retry = retry; }
+
+void HttpRequestOptions::ClearRetryOptions() noexcept { m_retry.reset(); }
 } // namespace AVEVA

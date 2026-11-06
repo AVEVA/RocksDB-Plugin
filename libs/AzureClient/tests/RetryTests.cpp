@@ -114,7 +114,7 @@ TEST(RetryTests, EachRetryConstructsExactlyOneBackoffTimer) {
     httpClient.EnqueueResponse(HttpResponse{HttpStatus::Ok, {}, ""});
 
     BlobClientOptions options = MakeBlobClientOptions("container", "blob.txt");
-    options.Retry.MaxRetries =     AVEVA::RetryCount{2U};
+    options.Retry.MaxRetries = AVEVA::RetryCount{2U};
     options.Retry.InitialDelay = std::chrono::milliseconds{0};
 
     BlobClient client{httpClient, options};
@@ -1202,8 +1202,8 @@ TEST(BackoffTests, InjectedGeneratorMakesTheJitterDeterministic) {
     retry.MaxDelay = AVEVA::AzureClient::Tests::JitterMaxDelay;
     FixedGenerator generator;
 
-    const auto first = AVEVA::AzureClient::Private::RetryDetail::ComputeBackoff(retry, 1, generator);
-    const auto second = AVEVA::AzureClient::Private::RetryDetail::ComputeBackoff(retry, 2, generator);
+    const auto first = AVEVA::ComputeBackoff(retry, 1, generator);
+    const auto second = AVEVA::ComputeBackoff(retry, 2, generator);
 
     EXPECT_EQ(first, std::chrono::milliseconds{80});   // 100 ms * lowest jitter (0.8)
     EXPECT_EQ(second, std::chrono::milliseconds{160}); // doubled per retry
@@ -1215,15 +1215,14 @@ TEST(BackoffTests, ExtremeDelaysAreClampedBeforeFloatingPointConversion) {
     FixedGenerator generator;
 
     for (const int retryNumber : {1, 2, 64, std::numeric_limits<int>::max()}) {
-        const auto delay = AVEVA::AzureClient::Private::RetryDetail::ComputeBackoff(retry, retryNumber, generator);
+        const auto delay = AVEVA::ComputeBackoff(retry, retryNumber, generator);
         EXPECT_GE(delay, std::chrono::milliseconds{0}) << retryNumber;
         EXPECT_LE(delay, AVEVA::AzureClient::AzureRequestOptions::MaxTotalDeadline) << retryNumber;
     }
 
     retry.InitialDelay = std::chrono::milliseconds::min();
     retry.MaxDelay = std::chrono::milliseconds::min();
-    EXPECT_EQ(AVEVA::AzureClient::Private::RetryDetail::ComputeBackoff(retry, 3, generator),
-              std::chrono::milliseconds{0});
+    EXPECT_EQ(AVEVA::ComputeBackoff(retry, 3, generator), std::chrono::milliseconds{0});
 }
 
 TEST(RetryTests, WidelySeparatedRetryAfterAndServerDatesAreBounded) {
