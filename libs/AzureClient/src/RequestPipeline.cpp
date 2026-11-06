@@ -93,11 +93,6 @@ std::optional<std::chrono::milliseconds> ParseRetryAfter(const HttpResponse& res
 }
 
 namespace RetryDetail {
-[[nodiscard]] std::chrono::milliseconds ComputeBackoff(const RetryOptions& retry, int retryNumber) {
-    thread_local std::mt19937_64 generator{std::random_device{}()};
-    return ComputeBackoff(retry, retryNumber, generator);
-}
-
 void ResolveCopySourceAuthorization(HttpRequest& request, std::string_view bearerToken) {
     const auto& headers = request.GetHeaders();
     const auto marked = std::ranges::any_of(headers, [](const HttpHeader& header) {
