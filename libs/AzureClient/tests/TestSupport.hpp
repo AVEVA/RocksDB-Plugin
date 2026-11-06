@@ -86,7 +86,7 @@ inline constexpr std::string_view DefaultETag = "\"0x8D1234\"";
     options.ApiVersion = std::string(DefaultApiVersion);
     // Scripted single-response tests must not consume extra responses through automatic
     // retries; retry behavior is covered explicitly by RetryTests.
-    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{0U};
+    options.Retry.MaxRetries = AVEVA::RetryCount{0U};
     return options;
 }
 
@@ -96,7 +96,7 @@ inline constexpr std::string_view DefaultETag = "\"0x8D1234\"";
     options.ContainerName = std::move(containerName);
     options.SasToken = std::string(DefaultSasToken);
     options.ApiVersion = std::string(DefaultApiVersion);
-    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{0U};
+    options.Retry.MaxRetries = AVEVA::RetryCount{0U};
     return options;
 }
 
@@ -105,7 +105,7 @@ inline constexpr std::string_view DefaultETag = "\"0x8D1234\"";
     options.ServiceEndpoint = ResolveServiceEndpoint();
     options.SasToken = std::string(DefaultSasToken);
     options.ApiVersion = std::string(DefaultApiVersion);
-    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{0U};
+    options.Retry.MaxRetries = AVEVA::RetryCount{0U};
     return options;
 }
 
