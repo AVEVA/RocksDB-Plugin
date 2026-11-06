@@ -118,6 +118,13 @@ template <typename TBlob> class BasicWriteableFileImpl {
     // Blocking counterparts for RocksDB's threads, which must not be running the client's executor. Append and Flush
     // only touch the executor when they have to wait; the rest are one-line Block wrappers.
     void Close();
+    // Gives up on a file whose blob was deleted while it was open (RocksDB's DestroyDB does this to a live LOG): there
+    // is nothing left to persist into, so the destructor must not report the buffered tail as lost.
+    void AbandonDeleted() {
+        BOOST_LOG_SEV(*m_w.H.Logger, boost::log::trivial::info)
+            << "File '" << m_w.H.Name << "' was deleted while open; its buffered data is discarded";
+        m_close.MarkClosed();
+    }
     void Append(const std::span<const char> data);
     void Flush();
     void RangeSync();

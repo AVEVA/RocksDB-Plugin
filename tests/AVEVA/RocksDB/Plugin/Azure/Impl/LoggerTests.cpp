@@ -59,7 +59,41 @@ class RecordingSink final : public LogSink {
         }
     }
 };
+
+struct FakeLogFile {
+    AVEVA::RocksDB::Plugin::Azure::HttpStatusCode closeFailsWith;
+    bool abandoned = false;
+
+    void Close() const {
+        using namespace AVEVA::RocksDB::Plugin::Azure;
+        throw RequestFailedException(closeFailsWith, ServiceErrorCode{"BlobNotFound"}, ErrorMessage{"gone"},
+                                     ServiceRequestId{"id"}, {});
+    }
+    void Append(std::span<const char>) const {}
+    void Sync() const {}
+    void AbandonDeleted() { abandoned = true; }
+};
 } // namespace
+
+TEST(LoggerTests, FileLogSink_CloseOfADeletedBlob_AbandonsTheFile) {
+    using namespace AVEVA::RocksDB::Plugin::Azure;
+    auto file = std::make_unique<FakeLogFile>(FakeLogFile{HttpStatus::NotFound});
+    auto* raw = file.get();
+    Impl::FileLogSink<FakeLogFile> sink(std::move(file));
+
+    EXPECT_NO_THROW(sink.Close());
+    EXPECT_TRUE(raw->abandoned);
+}
+
+TEST(LoggerTests, FileLogSink_CloseFailingForAnotherReason_Throws) {
+    using namespace AVEVA::RocksDB::Plugin::Azure;
+    auto file = std::make_unique<FakeLogFile>(FakeLogFile{HttpStatus::InternalServerError});
+    auto* raw = file.get();
+    Impl::FileLogSink<FakeLogFile> sink(std::move(file));
+
+    EXPECT_THROW(sink.Close(), RequestFailedException);
+    EXPECT_FALSE(raw->abandoned);
+}
 
 TEST(LoggerTests, ConcurrentLogv_EveryLineIsIntact) {
     // Arrange
