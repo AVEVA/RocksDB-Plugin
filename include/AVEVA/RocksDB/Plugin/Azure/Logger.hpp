@@ -2,16 +2,34 @@
 // SPDX-FileCopyrightText: Copyright 2025 AVEVA
 
 #pragma once
-#include "AVEVA/RocksDB/Plugin/Azure/Impl/LoggerImpl.hpp"
+#include <boost/log/sources/severity_logger.hpp>
+#include <boost/log/trivial.hpp>
 #include <rocksdb/env.h>
-namespace AVEVA::RocksDB::Plugin::Azure
-{
-    class Logger final : public rocksdb::Logger
-    {
-        Impl::LoggerImpl m_logger;
-    public:
-        explicit Logger(Impl::LoggerImpl logger);
-        virtual void Logv(const rocksdb::InfoLogLevel log_level, const char* format, va_list ap) override;
-        virtual void Flush() override;
-    };
-}
+
+#include <memory>
+namespace AVEVA::RocksDB::Plugin::Azure::Impl {
+class LoggerImpl;
+struct HandleFactory;
+} // namespace AVEVA::RocksDB::Plugin::Azure::Impl
+namespace AVEVA::RocksDB::Plugin::Azure {
+class Logger final : public rocksdb::Logger {
+    using DiagnosticLogger = boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>;
+
+    friend struct Impl::HandleFactory; // the only creator: the constructor takes an implementation type
+    std::unique_ptr<Impl::LoggerImpl> m_logger;
+    std::shared_ptr<DiagnosticLogger> m_diagnostics;
+
+    /// <param name="diagnostics">Where failures of this logger are reported, since the RocksDB logger interface must
+    /// not throw. Defaults to a fresh boost logger.</param>
+    explicit Logger(Impl::LoggerImpl&& logger, std::shared_ptr<DiagnosticLogger> diagnostics = nullptr);
+
+  public:
+    ~Logger() override;
+    virtual void Logv(const rocksdb::InfoLogLevel log_level, const char* format, va_list ap) override;
+    virtual void Flush() override;
+
+  protected:
+    // Persists the buffered tail of the log; RocksDB calls this through Close() when the DB shuts down.
+    rocksdb::Status CloseImpl() override;
+};
+} // namespace AVEVA::RocksDB::Plugin::Azure
