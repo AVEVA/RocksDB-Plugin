@@ -12,6 +12,7 @@ add_library(aveva-http-client STATIC
     HttpResponse.cpp
     RetryOptions.cpp
     private/HttpErrorCategory.cpp
+    private/HttpClientCore.cpp
     private/Exchange.cpp
     private/IdleSweeper.cpp
     private/RequestValidation.cpp
