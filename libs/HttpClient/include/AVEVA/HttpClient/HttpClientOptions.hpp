@@ -39,7 +39,7 @@ enum class PeerVerification : std::uint8_t { Verify, Skip };
 /// TLS handshake, sending the request or reading the response.
 /// </summary>
 enum class HttpRequestPhase {
-    /// <summary>Not yet on the network: queued behind the per-origin cap or still being prepared.</summary>
+    /// <summary>Not yet on the network: still being prepared.</summary>
     Queued,
     Resolve,
     Connect,
@@ -170,12 +170,6 @@ class HttpClientOptions {
     [[nodiscard]] std::chrono::milliseconds GetIdleProbeThreshold() const noexcept;
 
     /// <summary>
-    /// The cap on concurrent in-flight requests per origin.
-    /// </summary>
-    /// <returns>The cap; 0 means unlimited.</returns>
-    [[nodiscard]] ConnectionCount GetMaxConnectionsPerHost() const noexcept;
-
-    /// <summary>
     /// Sets the TLS version policy.
     /// </summary>
     /// <param name="version">The policy to apply to HTTPS connections.</param>
@@ -234,15 +228,6 @@ class HttpClientOptions {
     void SetIdleProbeThreshold(std::chrono::milliseconds idleProbeThreshold);
 
     /// <summary>
-    /// Caps in-flight requests per origin (scheme, host, port); further requests wait in FIFO order until one
-    /// finishes, and a waiting request still honors its cancellation slot. The request timeout counts from
-    /// submission,     so queue time is part of it: a waiting request is woken at its own deadline and completes
-    /// with <c>HttpClientError::TimedOut</c> without connecting.
-    /// </summary>
-    /// <param name="maxConnectionsPerHost">The per-origin cap; 0 (the default) means unlimited.</param>
-    void SetMaxConnectionsPerHost(ConnectionCount maxConnectionsPerHost) noexcept;
-
-    /// <summary>
     /// Reports events the client otherwise handles silently: stale-connection retries, connections not returned
     /// to the pool, swallowed exceptions, DNS cache invalidations and the stage a timeout happened in.
     /// </summary>
@@ -264,7 +249,6 @@ class HttpClientOptions {
     ConnectionCount m_maxIdleConnectionsPerHost{6};
     Timeout m_idleConnectionTimeout{std::chrono::seconds{30}};
     std::chrono::milliseconds m_idleProbeThreshold{50};
-    ConnectionCount m_maxConnectionsPerHost{};
     std::optional<HttpDiagnosticsCallback> m_diagnosticsCallback;
 };
 } // namespace AVEVA
