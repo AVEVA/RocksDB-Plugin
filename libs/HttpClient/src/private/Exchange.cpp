@@ -203,63 +203,36 @@ template <typename Stream> std::error_code Exchange<Stream>::ConfigureTlsForHost
 }
 
 /// <summary>
-/// The leader of a lookup starts the resolve detached and then waits on a channel like every joiner. getaddrinfo cannot
-/// be cancelled, so awaiting the resolver directly would hold the request past its deadline; waiting on the channel
-/// lets the deadline or a cancellation end the wait at once while the lookup completes in the background and still
-/// publishes its answer to the cache and to the requests that joined it.
+/// The lookup runs detached and the request waits on a channel. getaddrinfo cannot be cancelled, so awaiting the
+/// resolver directly would hold the request past its deadline; waiting on the channel lets the deadline or a
+/// cancellation end the wait at once while the lookup finishes in the background.
 /// </summary>
 template <typename Stream> asio::awaitable<std::expected<ResolveResults, HttpFailure>> Exchange<Stream>::Resolve() {
     m_phase = HttpRequestPhase::Resolve;
-    m_resolveSource = ResolveSource::Network;
-    auto& cache = DnsCache::Shared();
-    const void* const scope = &m_env.context;
     const auto executor = m_env.context.get_executor();
 
-    for (;;) {
-        // Only created once the request has to wait, so a cache hit allocates nothing.
-        std::shared_ptr<ResolveChannel> outcome;
-        auto admission = cache.Acquire(
-            m_key.host, m_key.service,
-            [&] {
-                outcome = std::make_shared<ResolveChannel>(executor, 1);
-                return ResolveWaiter(outcome, m_env.diagnostics);
-            },
-            scope, m_env.diagnostics);
+    const auto outcome = std::make_shared<ResolveChannel>(executor, 1);
+    auto resolver = std::make_shared<Tcp::resolver>(executor);
+    auto& lookup = *resolver;
+    lookup.async_resolve(m_key.host, m_key.service,
+                         [resolver = std::move(resolver), waiter = ResolveWaiter(outcome, m_env.diagnostics)](
+                             const boost::system::error_code& error, const ResolveResults& results) {
+                             waiter(error, results);
+                         });
 
-        if (auto* const cached = std::get_if<DnsCache::CachedAnswer>(&admission)) {
-            m_resolveSource = ResolveSource::Cache;
-            co_return std::move(cached->results);
-        }
-        if (auto* const token = std::get_if<DnsCache::LeaderToken>(&admission)) {
-            outcome = std::make_shared<ResolveChannel>(executor, 1);
-            auto resolver = std::make_shared<Tcp::resolver>(executor);
-            auto& lookup = *resolver;
-            lookup.async_resolve(m_key.host, m_key.service,
-                                 [resolver = std::move(resolver), claim = std::move(*token),
-                                  waiter = ResolveWaiter(outcome, m_env.diagnostics)](
-                                     const boost::system::error_code& error, const ResolveResults& results) mutable {
-                                     std::move(claim).Publish(error, results);
-                                     waiter(error, results);
-                                 });
-        }
-
-        const auto [error, results] = co_await outcome->async_receive(Await);
-        if (error == asio::error::operation_aborted) {
-            continue; // The leading lookup was abandoned, which says nothing about this request's lookup.
-        }
-        if (error == asio::experimental::error::channel_cancelled) {
-            // This request's own deadline or cancellation fired while it waited for the lookup, not a failure of the
-            // lookup itself; let it unwind as cancellation instead of being reported as ResolveFailed.
-            ThrowIfAborted(asio::error::operation_aborted);
-        }
-        if (error == asio::experimental::error::channel_closed) {
-            co_return std::unexpected(HttpFailure{std::make_error_code(std::errc::not_enough_memory)});
-        }
-        if (error) {
-            co_return std::unexpected(HttpFailure{HttpClientError::ResolveFailed, TransportCause{error}});
-        }
-        co_return results;
+    const auto [error, results] = co_await outcome->async_receive(Await);
+    if (error == asio::experimental::error::channel_cancelled) {
+        // This request's own deadline or cancellation fired while it waited for the lookup, not a failure of the
+        // lookup itself; let it unwind as cancellation instead of being reported as ResolveFailed.
+        ThrowIfAborted(asio::error::operation_aborted);
     }
+    if (error == asio::experimental::error::channel_closed) {
+        co_return std::unexpected(HttpFailure{std::make_error_code(std::errc::not_enough_memory)});
+    }
+    if (error) {
+        co_return std::unexpected(HttpFailure{HttpClientError::ResolveFailed, TransportCause{error}});
+    }
+    co_return results;
 }
 template <typename Stream> asio::awaitable<std::optional<HttpFailure>> Exchange<Stream>::Connect() {
     const auto resolved = co_await Resolve();
@@ -270,12 +243,6 @@ template <typename Stream> asio::awaitable<std::optional<HttpFailure>> Exchange<
     const auto [connectError, endpoint] = co_await beast::get_lowest_layer(*m_stream).async_connect(*resolved, Await);
     if (connectError) {
         ThrowIfAborted(connectError);
-        if (m_resolveSource == ResolveSource::Cache) {
-            // The cached address may be stale; make the next request resolve again.
-            DnsCache::Shared().Invalidate(m_key.host, m_key.service);
-            Report(HttpDiagnosticKind::DnsInvalidated, connectError,
-                   "Connecting to a cached address failed; dropped the cached DNS answer");
-        }
         co_return HttpFailure{HttpClientError::ConnectFailed, TransportCause{connectError}};
     }
 

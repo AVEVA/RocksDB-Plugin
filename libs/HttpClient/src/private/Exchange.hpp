@@ -5,7 +5,6 @@
 
 #include "ConnectionPool.hpp"
 #include "DiagnosticsSink.hpp"
-#include "DnsCache.hpp"
 #include "HeaderArena.hpp"
 #include "Route.hpp"
 #include "StreamTypes.hpp"
@@ -35,15 +34,16 @@ using ArenaFields = boost::beast::http::basic_fields<ArenaAllocator<char>>;
 using RequestBody = boost::beast::http::span_body<const std::byte>;
 using RequestMessage = boost::beast::http::message<true, RequestBody, ArenaFields>;
 
-/// <summary>
-/// Carries the outcome of a DNS lookup led by another request to the request waiting on it. The channel holds one
-/// value, so the leader can publish from any thread without waiting for the joiner to be listening.
-/// </summary>
-using ResolveChannel =
-    boost::asio::experimental::concurrent_channel<void(boost::system::error_code, Tcp::resolver::results_type)>;
+using ResolveResults = Tcp::resolver::results_type;
 
 /// <summary>
-/// The DNS cache's waiter: forwards a lookup's outcome into a waiting request's channel.
+/// Carries the outcome of a request's DNS lookup back to the request. The channel holds one value, so the lookup can
+/// publish from any thread without waiting for the request to be listening.
+/// </summary>
+using ResolveChannel = boost::asio::experimental::concurrent_channel<void(boost::system::error_code, ResolveResults)>;
+
+/// <summary>
+/// Forwards a lookup's outcome into the waiting request's channel.
 /// </summary>
 class ResolveWaiter {
   public:
@@ -69,11 +69,6 @@ class ResolveWaiter {
     std::shared_ptr<ResolveChannel> m_channel;
     std::shared_ptr<const DiagnosticsSink> m_diagnostics;
 };
-
-/// <summary>
-/// The process-wide DNS cache type, whose waiters are the requests of this client.
-/// </summary>
-using DnsCache = BasicDnsCache<std::chrono::steady_clock, ResolveWaiter>;
 
 /// <summary>
 /// One HTTP request over a <see cref="PlainStream"/> or <see cref="TlsStream"/>, written as the sequence it is:
@@ -125,7 +120,6 @@ template <typename Stream> class Exchange {
     enum class Connection : std::uint8_t { Fresh, Reused };
     enum class RetryState : std::uint8_t { NotRetried, Retried };
     enum class RetryDecision : std::uint8_t { GiveUp, Retry };
-    enum class ResolveSource : std::uint8_t { Network, Cache };
     enum class InterimResponse : std::uint8_t { None, Seen };
 
     struct Failure {
@@ -155,7 +149,7 @@ template <typename Stream> class Exchange {
     std::error_code ConfigureTlsForHost();
 
     /// <summary>
-    /// Resolves the origin, sharing the lookup and its cached answer with concurrent requests.
+    /// Resolves the origin without blocking the request past its deadline.
     /// </summary>
     boost::asio::awaitable<std::expected<ResolveResults, HttpFailure>> Resolve();
     /// <summary>
@@ -197,7 +191,6 @@ template <typename Stream> class Exchange {
     beast::flat_buffer m_buffer;
     Connection m_connection = Connection::Fresh;
     RetryState m_retry = RetryState::NotRetried;
-    ResolveSource m_resolveSource = ResolveSource::Network;
     InterimResponse m_interim = InterimResponse::None; // Seen once a 1xx proves the server has the request.
     // Header storage for the request and the response. Declared before the messages that allocate from them
     // so they are destroyed last; each is reset only while no message using it is alive.
