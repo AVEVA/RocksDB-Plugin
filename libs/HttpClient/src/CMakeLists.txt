@@ -32,6 +32,7 @@ target_sources(aveva-http-client
         "${base-include-dir}/AVEVA/HttpClient/HttpMethod.hpp"
         "${base-include-dir}/AVEVA/HttpClient/HttpRequest.hpp"
         "${base-include-dir}/AVEVA/HttpClient/HttpRequestOptions.hpp"
+        "${base-include-dir}/AVEVA/HttpClient/RetryOptions.hpp"
         "${base-include-dir}/AVEVA/HttpClient/HttpResponse.hpp"
         "${base-include-dir}/AVEVA/HttpClient/HttpStatusCode.hpp"
         "${base-include-dir}/AVEVA/HttpClient/Units.hpp"

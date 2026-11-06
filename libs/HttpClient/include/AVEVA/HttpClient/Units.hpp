@@ -16,6 +16,7 @@
 namespace AVEVA {
 struct ByteCountTag;
 struct ConnectionCountTag;
+struct RetryCountTag;
 struct HeaderNameTag;
 struct HeaderValueTag;
 struct HttpUrlTag;
@@ -47,6 +48,8 @@ template <typename Tag, typename Rep> class StrongInteger {
 using ByteCount = StrongInteger<ByteCountTag, std::uint64_t>;
 /// <summary>A number of connections; zero means none are allowed or, where documented, no cap.</summary>
 using ConnectionCount = StrongInteger<ConnectionCountTag, std::size_t>;
+/// <summary>The number of retries after the first attempt; zero disables retries.</summary>
+using RetryCount = StrongInteger<RetryCountTag, std::uint32_t>;
 
 /// <summary>
 /// A string that has a meaning of its own, so a header value cannot be passed where a header name is expected.

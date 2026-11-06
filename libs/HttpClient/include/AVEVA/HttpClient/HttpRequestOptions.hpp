@@ -3,10 +3,12 @@
 
 #pragma once
 
+#include <AVEVA/HttpClient/RetryOptions.hpp>
 #include <AVEVA/HttpClient/Units.hpp>
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
 
 namespace AVEVA {
 /// <summary>
@@ -71,7 +73,21 @@ class HttpRequestOptions {
     /// <param name="policy">Whether to accept such bodies.</param>
     void SetTruncatedTlsBodyPolicy(TruncatedTlsBodyPolicy policy) noexcept;
 
+    /// <summary>
+    /// The retry policy for this request. The plain HttpClient never retries a request itself, since only the caller
+    /// knows whether it is safe to resend; layers that do retry (such as the Azure clients) honour this policy.
+    /// </summary>
+    /// <returns>The policy; empty when the retrying layer's own policy applies.</returns>
+    [[nodiscard]] const std::optional<RetryOptions>& GetRetryOptions() const noexcept;
+
+    /// <summary>
+    /// Replaces the retrying layer's policy (count and backoff) for this request.
+    /// </summary>
+    /// <param name="retry">The policy for this request.</param>
+    void SetRetryOptions(RetryOptions retry) noexcept;
+
   private:
+    std::optional<RetryOptions> m_retry;
     TruncatedTlsBodyPolicy m_truncatedTlsBodyPolicy = TruncatedTlsBodyPolicy::Reject;
     Timeout m_timeout{std::chrono::seconds{30}};
     ByteCount m_responseBodyLimit{8 * 1024 * 1024};

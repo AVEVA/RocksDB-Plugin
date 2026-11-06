@@ -40,7 +40,8 @@ class AzureRequestOptions : public HttpRequestOptions {
     std::optional<std::chrono::milliseconds> GetTotalDeadline() const noexcept { return m_totalDeadline; }
 
     /// <summary>
-    /// The number of retries after the first attempt that replaces the client's retry policy for this request.
+    /// The number of retries after the first attempt that replaces the client's retry policy for this request; it
+    /// takes precedence over the count in <c>GetRetryOptions()</c>.
     /// </summary>
     /// <returns>The override; empty when the client's policy applies.</returns>
     std::optional<RetryCount> GetMaxRetries() const noexcept { return m_maxRetries; }
