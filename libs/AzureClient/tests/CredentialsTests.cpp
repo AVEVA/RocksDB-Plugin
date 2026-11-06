@@ -89,7 +89,7 @@ template <class TCred>
     options.TenantId = "72f988bf-86f1-41af-91ab-2d7cd011db47";
     options.ClientId = "client id";
     options.ClientSecret = "s3cr&t=";
-    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{0U};
+    options.Retry.MaxRetries = AVEVA::RetryCount{0U};
     return options;
 }
 
@@ -99,7 +99,7 @@ template <class TCred>
     options.TenantId = std::move(tenantId);
     options.ClientId = std::move(clientId);
     options.TokenFilePath = std::move(tokenFile);
-    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{0U};
+    options.Retry.MaxRetries = AVEVA::RetryCount{0U};
     return options;
 }
 
@@ -111,7 +111,7 @@ template <class TCred>
     options.ResourceId = std::move(resourceId);
     options.IdentityEndpoint = std::move(identityEndpoint);
     options.IdentityHeader = std::move(identityHeader);
-    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{0U};
+    options.Retry.MaxRetries = AVEVA::RetryCount{0U};
     return options;
 }
 } // namespace
@@ -266,7 +266,7 @@ AssertionOptions(std::function<boost::asio::awaitable<AssertionResult>()> provid
     options.TenantId = "contoso.onmicrosoft.com";
     options.ClientId = "app";
     options.AssertionProvider = std::move(provider);
-    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{0U};
+    options.Retry.MaxRetries = AVEVA::RetryCount{0U};
     return options;
 }
 
@@ -440,7 +440,7 @@ TEST(CredentialsTests, ExpiresOnBeyondMaximumIsClampedNotRejected) {
 TEST(CredentialsTests, TransientTokenEndpointFailuresAreRetried) {
     FakeHttpClient httpClient;
     ClientSecretCredentialOptions options = SecretOptions();
-    options.Retry = {.MaxRetries = AVEVA::AzureClient::RetryCount{2U},
+    options.Retry = {.MaxRetries = AVEVA::RetryCount{2U},
                      .InitialDelay = std::chrono::milliseconds{1},
                      .MaxDelay = std::chrono::milliseconds{2}};
     ClientSecretCredential credential{httpClient, options};
@@ -456,7 +456,7 @@ TEST(CredentialsTests, TransientTokenEndpointFailuresAreRetried) {
 TEST(CredentialsTests, BadRequestTokenFailureIsNotRetried) {
     FakeHttpClient httpClient;
     ClientSecretCredentialOptions options = SecretOptions();
-    options.Retry = {.MaxRetries = AVEVA::AzureClient::RetryCount{3U},
+    options.Retry = {.MaxRetries = AVEVA::RetryCount{3U},
                      .InitialDelay = std::chrono::milliseconds{1},
                      .MaxDelay = std::chrono::milliseconds{2}};
     ClientSecretCredential credential{httpClient, options};
@@ -475,7 +475,7 @@ TEST(CredentialsTests, TokenEndpointErrorIsNeverFalsy) {
 TEST(CredentialsTests, ManagedIdentityRetriesNotFoundAndGone) {
     FakeHttpClient httpClient;
     ManagedIdentityCredentialOptions options = ManagedOptions({}, {});
-    options.Retry = {.MaxRetries = AVEVA::AzureClient::RetryCount{3U},
+    options.Retry = {.MaxRetries = AVEVA::RetryCount{3U},
                      .InitialDelay = std::chrono::milliseconds{1},
                      .MaxDelay = std::chrono::milliseconds{2}};
     ManagedIdentityCredential credential{httpClient, options};
@@ -643,7 +643,7 @@ namespace {
     options.ServiceConnectionId = "conn&id";
     options.SystemAccessToken = "system";
     options.OidcRequestUri = "https://pipelines.example/oidc";
-    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{0U};
+    options.Retry.MaxRetries = AVEVA::RetryCount{0U};
     return options;
 }
 } // namespace
@@ -760,7 +760,7 @@ TEST(CredentialsTests, AzurePipelinesCredentialHonorsRetryAfterOnTheOidcRequest)
     httpClient.EnqueueResponse(Json(AVEVA::HttpStatus::Ok, R"({"oidcToken":"oidc"})"));
     httpClient.EnqueueResponse(Json(AVEVA::HttpStatus::Ok, R"({"access_token":"tok","expires_in":"3600"})"));
     auto options = PipelinesOptions();
-    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{2U};
+    options.Retry.MaxRetries = AVEVA::RetryCount{2U};
     AzurePipelinesCredential credential{httpClient, options};
 
     FakeHttpClient::ClearRetryDelays();
@@ -776,7 +776,7 @@ TEST(CredentialsTests, AzurePipelinesCredentialDoesNotRetryNonTransientOidcFailu
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(Json(AVEVA::HttpStatus::Unauthorized, ""));
     auto options = PipelinesOptions();
-    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{2U};
+    options.Retry.MaxRetries = AVEVA::RetryCount{2U};
     AzurePipelinesCredential credential{httpClient, options};
 
     EXPECT_TRUE(GetToken(httpClient, credential).Error);

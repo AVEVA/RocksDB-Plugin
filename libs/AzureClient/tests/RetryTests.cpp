@@ -46,7 +46,7 @@ TEST(RetryTests, NoRetries_DoesNotRetryOnTransientFailure) {
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable, {}, ""});
 
     BlobClientOptions options = MakeBlobClientOptions("container", "blob.txt");
-    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{0U}; // no retries
+    options.Retry.MaxRetries = AVEVA::RetryCount{0U}; // no retries
 
     BlobClient client{httpClient, options};
 
@@ -80,7 +80,7 @@ TEST(RetryTests, Retries_OnTransientThenSucceeds) {
     httpClient.EnqueueResponse(HttpResponse{HttpStatus::Ok, {}, ""});
 
     BlobClientOptions options = MakeBlobClientOptions("container", "blob.txt");
-    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{1U}; // allow one retry
+    options.Retry.MaxRetries = AVEVA::RetryCount{1U}; // allow one retry
     options.Retry.InitialDelay = std::chrono::milliseconds{0};
 
     BlobClient client{httpClient, options};
@@ -96,7 +96,7 @@ TEST(RetryTests, FirstAttemptSuccessDoesNotConstructABackoffTimer) {
     httpClient.EnqueueResponse(HttpResponse{HttpStatus::Ok, {}, ""});
 
     BlobClientOptions options = MakeBlobClientOptions("container", "blob.txt");
-    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{3U};
+    options.Retry.MaxRetries = AVEVA::RetryCount{3U};
 
     BlobClient client{httpClient, options};
 
@@ -114,7 +114,7 @@ TEST(RetryTests, EachRetryConstructsExactlyOneBackoffTimer) {
     httpClient.EnqueueResponse(HttpResponse{HttpStatus::Ok, {}, ""});
 
     BlobClientOptions options = MakeBlobClientOptions("container", "blob.txt");
-    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{2U};
+    options.Retry.MaxRetries =     AVEVA::RetryCount{2U};
     options.Retry.InitialDelay = std::chrono::milliseconds{0};
 
     BlobClient client{httpClient, options};
@@ -1004,6 +1004,37 @@ TEST(RetryTests, MaxRetriesOverrideCanEnableRetriesDisabledOnTheClient) {
     EXPECT_TRUE(ValueOrFail(observed).has_value());
 }
 
+TEST(RetryTests, RetryOptionsOverrideReplacesClientPolicy) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable, {}, ""});
+    httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::Accepted, {}, ""});
+    BlobClient client{httpClient, MakeRetryOptions(RetryCount{0U})};
+
+    AVEVA::AzureClient::AzureRequestOptions requestOptions;
+    requestOptions.SetRetryOptions({.MaxRetries = RetryCount{1U}, .InitialDelay = std::chrono::milliseconds{0}});
+    std::optional<DeleteResult> observed;
+    StartInto(httpClient, client.DeleteAsync({}, requestOptions), observed);
+
+    ASSERT_EQ(PollUntil(httpClient, [&] { return observed.has_value(); }), WaitOutcome::Done);
+    EXPECT_EQ(httpClient.RequestCount(), 2U);
+    EXPECT_TRUE(ValueOrFail(observed).has_value());
+}
+
+TEST(RetryTests, MaxRetriesOverrideTakesPrecedenceOverRetryOptionsCount) {
+    FakeHttpClient httpClient;
+    httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable, {}, ""});
+    BlobClient client{httpClient, MakeRetryOptions(RetryCount{3U})};
+
+    AVEVA::AzureClient::AzureRequestOptions requestOptions;
+    requestOptions.SetRetryOptions({.MaxRetries = RetryCount{3U}, .InitialDelay = std::chrono::milliseconds{0}});
+    requestOptions.SetMaxRetries(RetryCount{0U});
+    std::optional<DeleteResult> observed;
+    StartInto(httpClient, client.DeleteAsync({}, requestOptions), observed);
+
+    ASSERT_EQ(PollUntil(httpClient, [&] { return observed.has_value(); }), WaitOutcome::Done);
+    EXPECT_EQ(httpClient.RequestCount(), 1U);
+}
+
 TEST(RetryTests, TotalDeadlineEndsRetryBackoffWithTimedOut) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable, {}, ""});
@@ -1067,6 +1098,7 @@ TEST(RetryTests, RequestOptionsWithoutOverridesKeepClientPolicy) {
     const AVEVA::AzureClient::AzureRequestOptions defaults;
     EXPECT_FALSE(defaults.GetTotalDeadline().has_value());
     EXPECT_FALSE(defaults.GetMaxRetries().has_value());
+    EXPECT_FALSE(defaults.GetRetryOptions().has_value());
 }
 
 TEST(RetryTests, ExtremeTotalDeadlinesAreSaturated) {
@@ -1165,7 +1197,7 @@ struct FixedGenerator {
 } // namespace
 
 TEST(BackoffTests, InjectedGeneratorMakesTheJitterDeterministic) {
-    AVEVA::AzureClient::RetryOptions retry;
+    AVEVA::RetryOptions retry;
     retry.InitialDelay = AVEVA::AzureClient::Tests::JitterInitialDelay;
     retry.MaxDelay = AVEVA::AzureClient::Tests::JitterMaxDelay;
     FixedGenerator generator;
@@ -1177,7 +1209,7 @@ TEST(BackoffTests, InjectedGeneratorMakesTheJitterDeterministic) {
     EXPECT_EQ(second, std::chrono::milliseconds{160}); // doubled per retry
 }
 TEST(BackoffTests, ExtremeDelaysAreClampedBeforeFloatingPointConversion) {
-    AVEVA::AzureClient::RetryOptions retry;
+    AVEVA::RetryOptions retry;
     retry.InitialDelay = std::chrono::milliseconds::max();
     retry.MaxDelay = std::chrono::milliseconds::max();
     FixedGenerator generator;
