@@ -116,7 +116,7 @@ TEST(LeaseTests, BlobAcquireLeaseRetryReusesGeneratedProposedLeaseId) {
     httpClient.EnqueueResponse(LeaseResponse(::AVEVA::HttpStatus::Created, "lease-a"));
 
     auto options = MakeBlobClientOptions();
-    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{1U};
+    options.Retry.MaxRetries = AVEVA::RetryCount{1U};
     options.Retry.InitialDelay = 0ms;
     BlobClient client{httpClient, options};
 

@@ -352,7 +352,7 @@ RunResult Measure(std::size_t readSize, std::size_t inFlight, std::size_t reads,
     options.InsecureHttp = AVEVA::AzureClient::InsecureHttpPolicy::Allow;
     if (behavior == ServerBehavior::Stall) {
         // Otherwise the pipeline would retry the closed connection with backoff and outlive the drain bound.
-        options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{0U};
+        options.Retry.MaxRetries = AVEVA::RetryCount{0U};
     }
     AVEVA::AzureClient::BlobClient client{http, options};
 

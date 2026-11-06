@@ -237,8 +237,8 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
     /// <param name="credential">The token credential for token authorization; may be null.</param>
     /// <param name="retry">The client's retry policy.</param>
     /// <param name="request">The caller's request.</param>
-    /// <param name="requestOptions">The per-request options; they may override the retry count and set a total
-    /// deadline.</param>
+    /// <param name="requestOptions">The per-request options;     they may override the retry policy or count and set a
+        /// total deadline.</param>
     /// <param name="notFoundRetry">Whether HTTP 404 and 410 are retried as well.</param>
     /// <param name="rebuild">The hook called before each attempt is authorized.</param>
     /// <param name="replaySafety">Whether the caller absorbs the outcome of a replay; <c>Unsafe</c> defers to
@@ -246,10 +246,11 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
     RetryingSender(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
                    HttpRequest request, AzureRequestOptions requestOptions, NotFoundRetry notFoundRetry,
                    TRebuild rebuild, ReplaySafety replaySafety)
-        : m_http(httpClient), m_auth(std::move(auth)), m_credential(std::move(credential)), m_retry(retry),
-          m_requestOptions(std::move(requestOptions)), m_notFoundRetry(notFoundRetry), m_rebuild(std::move(rebuild)),
-          m_totalDeadline(m_requestOptions.GetTotalDeadline()), m_start(std::chrono::steady_clock::now()),
-          m_maxAttempts(ComputeMaxAttempts(m_requestOptions.GetMaxRetries().value_or(retry.MaxRetries))),
+        : m_http(httpClient), m_auth(std::move(auth)),         m_credential(std::move(credential)),
+                  m_retry(requestOptions.GetRetryOptions().value_or(retry)), m_requestOptions(std::move(requestOptions)),
+                  m_notFoundRetry(notFoundRetry), m_rebuild(std::move(rebuild)),
+                  m_totalDeadline(m_requestOptions.GetTotalDeadline()), m_start(std::chrono::steady_clock::now()),
+                  m_maxAttempts(ComputeMaxAttempts(m_requestOptions.GetMaxRetries().value_or(m_retry.MaxRetries))),
           m_replaySafety(replaySafety == ReplaySafety::Safe ? ReplaySafety::Safe : ReplaySafetyOf(request)),
           m_attempts(std::move(request)) {}
 

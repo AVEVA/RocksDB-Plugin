@@ -503,7 +503,7 @@ TEST(BatchDeleteTests, RetriedBatchRebuildsSubrequestsWithAFreshToken) {
     credential->EnqueueImmediate({}, MakeToken("token-two", std::chrono::hours(1)));
     auto options = MakeBlobContainerClientOptions();
     options.SasToken.clear();
-    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{1U};
+    options.Retry.MaxRetries = AVEVA::RetryCount{1U};
     options.Retry.InitialDelay = std::chrono::milliseconds{0};
     AVEVA::AzureClient::BasicBlobContainerClient<FakeHttpClient, ScriptedTokenCredential> client{http, options,
                                                                                                  credential};
