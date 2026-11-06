@@ -48,7 +48,7 @@ class TokenCredentialsTests : public ::testing::Test {
         options.ServiceConnectionId = "connection";
         options.SystemAccessToken = "system";
         options.OidcRequestUri = "https://pipelines.example/oidc";
-        options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{2U};
+        options.Retry.MaxRetries = AVEVA::RetryCount{2U};
         return options;
     }
 
