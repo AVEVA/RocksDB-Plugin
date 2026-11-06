@@ -3,7 +3,6 @@
 
 #include "AVEVA/HttpClient/HttpClient.hpp"
 #include "HttpClientTestHelpers.hpp"
-#include "private/DnsCache.hpp"
 #include "private/Exchange.hpp"
 
 #include <gtest/gtest.h>
@@ -853,71 +852,6 @@ TEST(HttpClientRobustness, DestroyingTheClientBeforeTheIoContextRunsDoesNotTouch
     EXPECT_TRUE(completed);
 }
 
-TEST(HttpClientRobustness, StartedDnsLeaderKeepsItsPendingEntryWhileTheLookupIsInFlight) {
-    asio::io_context context;
-    auto client = std::make_unique<AVEVA::HttpClient>(context);
-    HttpClientTests::SendWith(*client, MakeRequest("http://leader-guard.invalid/"), AVEVA::HttpRequestOptions{},
-                              [](std::error_code, AVEVA::HttpResponse) {});
-    // Run the coroutine's start so the request has been submitted; the probe below is then queued behind the
-    // request's own start.
-    context.run_one();
-
-    std::optional<AVEVA::Private::DnsCache::Admission> probed;
-    // Queued behind the request's start, before the resolver thread can post its completion.
-    asio::post(context, [&] {
-        probed.emplace(AVEVA::Private::DnsCache::Shared().Acquire(
-            "leader-guard.invalid", "80",
-            [&context] {
-                return AVEVA::Private::ResolveWaiter(
-                    std::make_shared<AVEVA::Private::ResolveChannel>(context.get_executor(), 1), nullptr);
-            },
-            &context, nullptr));
-    });
-    RunBounded(context);
-
-    ASSERT_TRUE(probed.has_value());
-    EXPECT_TRUE(std::holds_alternative<AVEVA::Private::DnsCache::JoinedLookup>(*probed));
-}
-
-// getaddrinfo cannot be cancelled, so a hung lookup must not hold the request past its deadline. The lookup is held
-// open by taking its leadership in the cache first, which makes the request wait on it exactly like a slow resolve.
-TEST(HttpClientRobustness, TimeoutFiresWhileTheLookupHangs) {
-    asio::io_context context;
-    std::vector<AVEVA::HttpDiagnostic> events;
-    AVEVA::HttpClientOptions clientOptions;
-    clientOptions.SetDiagnosticsCallback(
-        AVEVA::HttpDiagnosticsCallback{[&](const AVEVA::HttpDiagnostic& event) noexcept { events.push_back(event); }});
-    auto client = std::make_unique<AVEVA::HttpClient>(context, std::move(clientOptions));
-
-    auto admission = AVEVA::Private::DnsCache::Shared().Acquire(
-        "hung-lookup.invalid", "80",
-        [&context] {
-            return AVEVA::Private::ResolveWaiter(
-                std::make_shared<AVEVA::Private::ResolveChannel>(context.get_executor(), 1), nullptr);
-        },
-        &context, nullptr);
-    ASSERT_TRUE(std::holds_alternative<AVEVA::Private::DnsCache::LeaderToken>(admission));
-
-    AVEVA::HttpRequestOptions requestOptions;
-    requestOptions.SetTimeout(AVEVA::Timeout{std::chrono::milliseconds(200)});
-    const auto started = std::chrono::steady_clock::now();
-    std::error_code result;
-    HttpClientTests::SendWith(*client, MakeRequest("http://hung-lookup.invalid/"), requestOptions,
-                              [&](std::error_code error, AVEVA::HttpResponse) {
-                                  result = error;
-                                  // Abandon the lookup only now, so it cannot have ended the wait.
-                                  admission = AVEVA::Private::DnsCache::CachedAnswer{};
-                              });
-    RunBounded(context);
-
-    EXPECT_EQ(result, AVEVA::make_error_code(AVEVA::HttpClientError::TimedOut));
-    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(5));
-    const auto timeout = std::ranges::find_if(
-        events, [](const auto& event) { return event.Kind == AVEVA::HttpDiagnosticKind::Timeout; });
-    ASSERT_NE(timeout, events.end());
-    EXPECT_EQ(timeout->Phase, AVEVA::HttpRequestPhase::Resolve);
-}
-
 TEST(HttpClientRobustness, RefusedConnectionCarriesTheTransportCause) {
     asio::io_context context;
     auto client = std::make_unique<AVEVA::HttpClient>(context);
@@ -1096,42 +1030,6 @@ TEST(HttpClientRobustness, DestroyingTheClientWhileSlotsReleaseOnAMultiThreadedC
     asio::post(serverContext, [&] { server.Stop(); });
     serverGuard.reset();
     serverThread.join();
-}
-
-TEST(HttpClientRobustness, CancellingTheSharedDnsLeaderStillCompletesEveryJoinedRequestOnce) {
-    for (int iteration = 0; iteration < 10; ++iteration) {
-        asio::io_context context;
-        auto client = std::make_unique<AVEVA::HttpClient>(context);
-        ScriptedServer server(
-            context, [](int, const http::request<http::string_body>&) -> ServerAction { return {OkResponse}; });
-        // The cache key includes the port, which is fresh per server, so every iteration starts a new lookup.
-        const auto url = server.Url();
-
-        asio::cancellation_signal leaderCancel;
-        int completions = 0;
-        std::error_code followerResult;
-        const auto finish = [&] {
-            if (++completions == 3) {
-                server.Stop();
-            }
-        };
-        HttpClientTests::SendWith(
-            *client, MakeRequest(url), AVEVA::HttpRequestOptions{},
-            [&](std::error_code, AVEVA::HttpResponse) { finish(); }, leaderCancel.slot());
-        for (int follower = 0; follower < 2; ++follower) {
-            HttpClientTests::SendWith(*client, MakeRequest(url), AVEVA::HttpRequestOptions{},
-                                      [&](std::error_code error, AVEVA::HttpResponse) {
-                                          followerResult = error;
-                                          finish();
-                                      });
-        }
-        // Queued behind the three starts, so it lands while the leader's lookup is in flight.
-        asio::post(context, [&] { leaderCancel.emit(asio::cancellation_type::terminal); });
-        RunBounded(context);
-
-        EXPECT_EQ(completions, 3);
-        EXPECT_NE(followerResult, std::make_error_code(std::errc::operation_canceled));
-    }
 }
 
 TEST(HttpClientRobustness, MixedCaseSchemeReusesTheSameConnection) {
