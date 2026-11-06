@@ -61,7 +61,7 @@ struct Route {
         route.Parsed = UrlParse::Parsed;
         route.Error = ValidateRequest(request, *parsed);
         route.Tls = parsed->scheme_id() == urls::scheme::https ? Transport::Tls : Transport::Plain;
-        // Scheme and DNS host names are case-insensitive, so they are folded here: the pool, limiter, DNS cache and TLS
+        // Scheme and DNS host names are case-insensitive, so they are folded here: the pool, limiter and TLS
         // session keys are all derived from them and must not split one origin into several.
         route.Host = parsed->host_address();
         // host_address() never brackets an IPv6 literal, which is what the resolver and TLS IP check want.
