@@ -27,4 +27,8 @@ TruncatedTlsBodyPolicy HttpRequestOptions::GetTruncatedTlsBodyPolicy() const noe
 void HttpRequestOptions::SetTruncatedTlsBodyPolicy(TruncatedTlsBodyPolicy policy) noexcept {
     m_truncatedTlsBodyPolicy = policy;
 }
+
+const std::optional<RetryOptions>& HttpRequestOptions::GetRetryOptions() const noexcept { return m_retry; }
+
+void HttpRequestOptions::SetRetryOptions(RetryOptions retry) noexcept { m_retry = retry; }
 } // namespace AVEVA
