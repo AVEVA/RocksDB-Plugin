@@ -4,6 +4,7 @@
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/LogRateLimiter.hpp"
 #include "AVEVA/RocksDB/Plugin/Azure/Impl/WriteableFileImpl.hpp"
+#include "AVEVA/RocksDB/Plugin/Azure/RequestFailedException.hpp"
 
 #include <rocksdb/env.h>
 
@@ -32,7 +33,17 @@ template <typename TFile> class FileLogSink final : public LogSink {
     explicit FileLogSink(std::unique_ptr<TFile> file) : m_file(std::move(file)) {}
     void Append(std::span<const char> data) override { m_file->Append(data); }
     void Sync() override { m_file->Sync(); }
-    void Close() override { m_file->Close(); }
+    // An info log is not worth failing a close over once its blob is gone.
+    void Close() override {
+        try {
+            m_file->Close();
+        } catch (const RequestFailedException& ex) {
+            if (ex.StatusCode() != HttpStatus::NotFound) {
+                throw;
+            }
+            m_file->AbandonDeleted();
+        }
+    }
 };
 
 class LoggerImpl {
