@@ -11,6 +11,7 @@
 #include "IdleSweeper.hpp"
 #include "OriginGate.hpp"
 #include "RequestValidation.hpp"
+#include "RetryDecision.hpp"
 #include "Route.hpp"
 #include "StreamTypes.hpp"
 
@@ -21,11 +22,14 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ssl/context.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
+#include <gsl/util>
 #include <memory>
 #include <optional>
 #include <string>
@@ -142,11 +146,54 @@ class HttpClientCore : public std::enable_shared_from_this<HttpClientCore> {
     }
 
     /// <summary>
-    /// Waits for a per-origin slot when a cap is configured, then runs the exchange over the stream the route calls
-    /// for. The slot is returned as the coroutine ends, before the caller sees the result. An abort is returned as
-    /// the phase it interrupted, so the caller can report where a timeout hit.
+    /// Runs the request, and again after a transient failure when the options carry a retry policy. Each attempt
+    /// releases its per-origin slot before the backoff wait, so a waiting retry does not hold up other requests. The
+    /// request's deadline covers every attempt and wait. The last attempt's outcome is returned when retries run out,
+    /// so a persistent 503 is still reported as a response.
     /// </summary>
     asio::awaitable<Outcome> Dispatch(Route route, HttpRequest request, HttpRequestOptions options) {
+        HttpRequestPhase phase = HttpRequestPhase::Queued;
+        const auto retry = options.GetRetryOptions();
+        if (!retry.has_value()) {
+            co_return co_await Attempt(std::move(route), std::move(request), std::move(options), phase);
+        }
+
+        const HttpMethod method = request.GetMethod();
+        for (std::uint32_t retries = 0;; ++retries) {
+            Outcome outcome = co_await Attempt(route, request, options, phase);
+            const auto* const result = std::get_if<HttpResult>(&outcome);
+            if (result == nullptr || retries >= retry->MaxRetries.Value()) {
+                co_return outcome;
+            }
+            const HttpResponse* const response = *result ? &**result : nullptr;
+            const bool again = response != nullptr ? ShouldRetryStatus(response->GetStatus(), method)
+                                                   : ShouldRetryFailure(result->error().Error(), phase, method);
+            if (!again) {
+                co_return outcome;
+            }
+
+            const auto delay = RetryDelay(*retry, gsl::narrow_cast<int>(retries + 1U), response);
+            asio::steady_timer timer(co_await asio::this_coro::executor, delay);
+            try {
+                co_await timer.async_wait(asio::use_awaitable);
+            } catch (const boost::system::system_error& aborted) {
+                if (aborted.code() != asio::error::operation_aborted) {
+                    throw;
+                }
+                co_return Interrupted{HttpRequestPhase::Queued};
+            }
+        }
+    }
+
+    /// <summary>
+    /// One attempt: waits for a per-origin slot when a cap is configured, then runs the exchange over the stream the
+    /// route calls for. The slot is returned as the coroutine ends, before the caller sees the result. An abort is
+    /// returned as the phase it interrupted, so the caller can report where a timeout hit.
+    /// </summary>
+    /// <param name="phase">Receives how far the attempt got, which tells the caller whether it can be replayed.</param>
+    asio::awaitable<Outcome> Attempt(Route route, HttpRequest request, HttpRequestOptions options,
+                                     HttpRequestPhase& phase) {
+        phase = HttpRequestPhase::Queued;
         OriginGate::Slot slot;
         if (m_gate) {
             auto acquired = co_await AcquireSlot(route.Origin());
@@ -158,11 +205,11 @@ class HttpClientCore : public std::enable_shared_from_this<HttpClientCore> {
         if (route.Tls == Transport::Tls) {
             Exchange<TlsStream> exchange({m_context, m_tlsContext, m_tlsPool, m_diagnostics}, std::move(route),
                                          std::move(request), std::move(options));
-            co_return co_await RunExchange(exchange);
+            co_return co_await RunExchange(exchange, phase);
         }
         Exchange<PlainStream> exchange({m_context, m_tlsContext, m_plainPool, m_diagnostics}, std::move(route),
                                        std::move(request), std::move(options));
-        co_return co_await RunExchange(exchange);
+        co_return co_await RunExchange(exchange, phase);
     }
 
     /// <summary>
@@ -188,10 +235,13 @@ class HttpClientCore : public std::enable_shared_from_this<HttpClientCore> {
     /// <summary>
     /// Runs an exchange, turning the operation_aborted its cancellation throws into the phase it interrupted.
     /// </summary>
-    template <typename Stream> static asio::awaitable<Outcome> RunExchange(Exchange<Stream>& exchange) {
+    template <typename Stream>
+    static asio::awaitable<Outcome> RunExchange(Exchange<Stream>& exchange, HttpRequestPhase& phase) {
         std::optional<Interrupted> interrupted;
         try {
-            co_return co_await exchange.Run();
+            auto outcome = co_await exchange.Run();
+            phase = exchange.Phase();
+            co_return outcome;
         } catch (const boost::system::system_error& aborted) {
             if (aborted.code() != asio::error::operation_aborted) {
                 throw;

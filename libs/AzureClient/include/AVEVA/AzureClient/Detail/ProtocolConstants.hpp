@@ -8,22 +8,6 @@
 #include <string_view>
 
 namespace AVEVA::AzureClient::Private {
-/// <summary>Client-side retry policy (not an Azure service limit).</summary>
-struct RetryPolicyConstants {
-    /// <summary>
-    /// Lower bound of the multiplicative jitter range applied to each exponential backoff delay, to de-synchronize
-    /// retries.
-    /// </summary>
-    static constexpr double MinBackoffJitter = 0.8;
-    /// <summary>
-    /// Upper bound of the multiplicative jitter range applied to each exponential backoff delay, to de-synchronize
-    /// retries.
-    /// </summary>
-    static constexpr double MaxBackoffJitter = 1.3;
-    /// <summary>Keeps <c>InitialDelay * 2^n</c> representable even for absurd retry counts.</summary>
-    static constexpr int MaxBackoffExponent = 62;
-};
-
 /// <summary>Azure Blob Storage size limits and client transfer defaults.</summary>
 struct BlobTransferLimits {
     /// <summary>
