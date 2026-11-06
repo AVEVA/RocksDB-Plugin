@@ -14,9 +14,9 @@
 #include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl::ClientFactory {
-AzureClient::RetryOptions CreateRetryOptions() {
-    AzureClient::RetryOptions retry;
-    retry.MaxRetries = AzureClient::RetryCount{static_cast<std::uint32_t>(Configuration::MaxClientRetries.Value())};
+AVEVA::RetryOptions CreateRetryOptions() {
+    AVEVA::RetryOptions retry;
+    retry.MaxRetries = AVEVA::RetryCount{static_cast<std::uint32_t>(Configuration::MaxClientRetries.Value())};
     retry.MaxDelay = Configuration::MaxRetryDelay;
     return retry;
 }

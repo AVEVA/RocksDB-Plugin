@@ -702,7 +702,7 @@ TEST_F(DownloadToFileTests, TransientServerErrorIsRetriedAndTheDownloadSucceeds)
     };
     const auto path = m_dir.Path() / "retried.sst";
     auto options = MakeBlobClientOptions("files", "test.sst");
-    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{2U};
+    options.Retry.MaxRetries = AVEVA::RetryCount{2U};
     options.Retry.InitialDelay = std::chrono::milliseconds{0};
     FakeBlobServer::BlobClientType retrying(m_env.Http, options);
 
