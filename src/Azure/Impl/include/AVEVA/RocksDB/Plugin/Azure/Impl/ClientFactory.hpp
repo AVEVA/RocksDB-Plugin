@@ -23,7 +23,7 @@
 /// Builds the Azure clients and credentials the filesystem uses. Kept apart from the blob operations so that code
 /// that only reads or writes blobs does not depend on every credential type.
 namespace AVEVA::RocksDB::Plugin::Azure::Impl::ClientFactory {
-AzureClient::RetryOptions CreateRetryOptions();
+AVEVA::RetryOptions CreateRetryOptions();
 AzureClient::BlobServiceClientOptions CreateServiceClientOptions(const std::string& storageAccountUrl);
 std::string AccountNameFromUrl(const std::string& storageAccountUrl);
 

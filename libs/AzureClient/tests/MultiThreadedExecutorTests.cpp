@@ -201,7 +201,7 @@ template <class T> T BlockOn(ThreadPoolBlobService& service, boost::asio::awaita
     options.ServiceEndpoint = "https://account.blob.core.windows.net";
     options.ContainerName = "container";
     options.SharedKey = {.AccountName = "account", .AccountKey = "a2V5LWJ5dGVzLWZvci10aHJlYWQtc2FuaXRpemVyLXRlc3Q="};
-    options.Retry.MaxRetries = AVEVA::AzureClient::RetryCount{ClientMaxRetries};
+    options.Retry.MaxRetries = AVEVA::RetryCount{ClientMaxRetries};
     options.Retry.InitialDelay = std::chrono::milliseconds{0};
     options.Retry.MaxDelay = std::chrono::milliseconds{1};
     return options;

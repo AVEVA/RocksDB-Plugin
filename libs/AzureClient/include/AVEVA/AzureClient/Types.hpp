@@ -13,7 +13,6 @@
 #include <string>
 
 namespace AVEVA::AzureClient {
-struct RetryCountTag;
 struct PageBlobSizeTag;
 struct PageOffsetTag;
 struct SourcePageOffsetTag;
@@ -30,9 +29,6 @@ inline constexpr std::size_t PageBlobPageSize = 512;
 /// of keys and log lines by accident.
 /// </summary>
 using SecretUrl = StrongString<SecretUrlTag>;
-
-/// <summary>The number of retries after the first attempt; zero disables retries.</summary>
-using RetryCount = StrongInteger<RetryCountTag, std::uint32_t>;
 
 /// <summary>
 /// A byte value of a page blob that is a whole number of pages (a multiple of PageBlobPageSize). A misaligned value
