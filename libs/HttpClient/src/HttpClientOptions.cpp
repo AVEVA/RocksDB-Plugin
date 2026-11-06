@@ -23,8 +23,6 @@ Timeout HttpClientOptions::GetIdleConnectionTimeout() const noexcept { return m_
 
 std::chrono::milliseconds HttpClientOptions::GetIdleProbeThreshold() const noexcept { return m_idleProbeThreshold; }
 
-ConnectionCount HttpClientOptions::GetMaxConnectionsPerHost() const noexcept { return m_maxConnectionsPerHost; }
-
 void HttpClientOptions::SetTlsVersion(TlsVersion version) noexcept { m_tlsVersion = version; }
 
 void HttpClientOptions::SetPeerVerification(PeerVerification peerVerification) noexcept {
@@ -50,10 +48,6 @@ void HttpClientOptions::SetIdleProbeThreshold(std::chrono::milliseconds idleProb
         throw std::invalid_argument("The idle probe threshold must not be negative.");
     }
     m_idleProbeThreshold = idleProbeThreshold;
-}
-
-void HttpClientOptions::SetMaxConnectionsPerHost(ConnectionCount maxConnectionsPerHost) noexcept {
-    m_maxConnectionsPerHost = maxConnectionsPerHost;
 }
 
 void HttpClientOptions::SetDiagnosticsCallback(HttpDiagnosticsCallback callback) {

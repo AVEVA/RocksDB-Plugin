@@ -9,7 +9,6 @@
 #include "DiagnosticsSink.hpp"
 #include "Exchange.hpp"
 #include "IdleSweeper.hpp"
-#include "OriginGate.hpp"
 #include "RequestValidation.hpp"
 #include "RetryDecision.hpp"
 #include "Route.hpp"
@@ -55,32 +54,22 @@ class HttpClientCore : public std::enable_shared_from_this<HttpClientCore> {
           m_tlsContext(MakeTlsContext(options, m_diagnostics)),
           m_sweeper(IdleSweeper::Create(options.GetMaxIdleConnectionsPerHost(), options.GetIdleConnectionTimeout(),
                                         options.GetIdleProbeThreshold(), m_diagnostics)),
-          m_plainPool(m_sweeper->PlainPool()), m_tlsPool(m_sweeper->TlsPool()) {
-        if (options.GetMaxConnectionsPerHost() != ConnectionCount{}) {
-            m_gate =
-                std::make_shared<OriginGate>(runtime.get_executor(), options.GetMaxConnectionsPerHost(), m_diagnostics);
-        }
-    }
+          m_plainPool(m_sweeper->PlainPool()), m_tlsPool(m_sweeper->TlsPool()) {}
 
     HttpClientCore(const HttpClientCore&) = delete;
     HttpClientCore& operator=(const HttpClientCore&) = delete;
     ~HttpClientCore() { Shutdown(); }
 
     /// <summary>
-    /// Fails requests still waiting for a slot and disposes idle connections now, while the caller's io_context is
-    /// still alive. Requests already running finish on their own. Safe to repeat.
+    /// Disposes idle connections now, while the caller's io_context is still alive. Requests already running finish
+    /// on their own. Safe to repeat.
     /// </summary>
-    void Shutdown() noexcept {
-        if (m_gate) {
-            m_gate->Close();
-        }
-        m_sweeper->Stop();
-    }
+    void Shutdown() noexcept { m_sweeper->Stop(); }
 
     [[nodiscard]] std::shared_ptr<const DiagnosticsSink> Diagnostics() const noexcept { return m_diagnostics; }
 
     /// <summary>
-    /// Sends a request. The deadline covers everything, including the wait for a per-origin slot, and cancelling the
+    /// Sends a request. The deadline covers everything, and cancelling the
     /// awaiting coroutine cancels the request. Nothing is thrown: a failure to even start the request is reported as
     /// a classified error code.
     /// </summary>
@@ -146,8 +135,7 @@ class HttpClientCore : public std::enable_shared_from_this<HttpClientCore> {
     }
 
     /// <summary>
-    /// Runs the request, and again after a transient failure when the options carry a retry policy. Each attempt
-    /// releases its per-origin slot before the backoff wait, so a waiting retry does not hold up other requests. The
+    /// Runs the request, and again after a transient failure when the options carry a retry policy. The
     /// request's deadline covers every attempt and wait. The last attempt's outcome is returned when retries run out,
     /// so a persistent 503 is still reported as a response.
     /// </summary>
@@ -186,22 +174,13 @@ class HttpClientCore : public std::enable_shared_from_this<HttpClientCore> {
     }
 
     /// <summary>
-    /// One attempt: waits for a per-origin slot when a cap is configured, then runs the exchange over the stream the
-    /// route calls for. The slot is returned as the coroutine ends, before the caller sees the result. An abort is
-    /// returned as the phase it interrupted, so the caller can report where a timeout hit.
+    /// One attempt: runs the exchange over the stream the route calls for. An abort is returned as the phase it
+    /// interrupted, so the caller can report where a timeout hit.
     /// </summary>
     /// <param name="phase">Receives how far the attempt got, which tells the caller whether it can be replayed.</param>
     asio::awaitable<Outcome> Attempt(Route route, HttpRequest request, HttpRequestOptions options,
                                      HttpRequestPhase& phase) {
         phase = HttpRequestPhase::Queued;
-        OriginGate::Slot slot;
-        if (m_gate) {
-            auto acquired = co_await AcquireSlot(route.Origin());
-            if (!acquired) {
-                co_return std::move(acquired.error());
-            }
-            slot = std::move(*acquired);
-        }
         if (route.Tls == Transport::Tls) {
             Exchange<TlsStream> exchange({m_context, m_tlsContext, m_tlsPool, m_diagnostics}, std::move(route),
                                          std::move(request), std::move(options));
@@ -210,26 +189,6 @@ class HttpClientCore : public std::enable_shared_from_this<HttpClientCore> {
         Exchange<PlainStream> exchange({m_context, m_tlsContext, m_plainPool, m_diagnostics}, std::move(route),
                                        std::move(request), std::move(options));
         co_return co_await RunExchange(exchange, phase);
-    }
-
-    /// <summary>
-    /// Waits for a per-origin slot. A closed gate fails the request; an abort while queued is returned as such.
-    /// </summary>
-    asio::awaitable<std::expected<OriginGate::Slot, Outcome>> AcquireSlot(std::string origin) {
-        std::optional<Outcome> failure;
-        try {
-            auto acquired = co_await m_gate->Acquire(std::move(origin));
-            if (acquired) {
-                co_return std::move(*acquired);
-            }
-            failure.emplace(HttpResult{std::unexpect, HttpFailure{acquired.error()}});
-        } catch (const boost::system::system_error& aborted) {
-            if (aborted.code() != asio::error::operation_aborted) {
-                throw;
-            }
-            failure.emplace(Interrupted{HttpRequestPhase::Queued});
-        }
-        co_return std::unexpected(std::move(*failure));
     }
 
     /// <summary>
@@ -257,6 +216,5 @@ class HttpClientCore : public std::enable_shared_from_this<HttpClientCore> {
     std::shared_ptr<IdleSweeper> m_sweeper;
     std::shared_ptr<PlainConnectionPool> m_plainPool;
     std::shared_ptr<TlsConnectionPool> m_tlsPool;
-    std::shared_ptr<OriginGate> m_gate; // Null when no per-origin cap is configured.
 };
 } // namespace AVEVA::Private
