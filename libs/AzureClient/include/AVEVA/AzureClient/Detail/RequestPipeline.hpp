@@ -18,7 +18,9 @@
 #include <AVEVA/HttpClient/HttpRequest.hpp>
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
@@ -38,6 +40,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <system_error>
 #include <type_traits>
 #include <utility>
@@ -386,6 +389,13 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
         co_await timer.async_wait(boost::asio::use_awaitable);
     }
 
+    /// <summary>Races the token request against <paramref name="limit"/>; see <see cref="AcquireToken"/>.</summary>
+    boost::asio::awaitable<std::variant<TokenResult, std::monostate>> RaceTokenAgainstLimit(
+        std::chrono::milliseconds limit) {
+        using namespace boost::asio::experimental::awaitable_operators;
+        co_return co_await (GetTokenForScopes(*m_credential, m_auth.TokenScopes) || Expire(limit));
+    }
+
     /// <summary>
     /// A hung identity endpoint must not stall an attempt past its timeout or the total deadline, so the token
     /// request is raced against the smaller of the two. Losing cancels the credential, which cancellation-aware
@@ -393,12 +403,16 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
     /// </summary>
     /// <returns>The credential's result; <c>std::errc::timed_out</c> when the limit won the race.</returns>
     boost::asio::awaitable<TokenResult> AcquireToken() {
-        using namespace boost::asio::experimental::awaitable_operators;
         auto limit = m_requestOptions.GetTimeout().Value();
         if (m_totalDeadline) {
             limit = std::min(limit, std::max(Remaining(), std::chrono::milliseconds{0}));
         }
-        auto outcome = co_await (GetTokenForScopes(*m_credential, m_auth.TokenScopes) || Expire(limit));
+        // `||` installs its cancellation handler on this coroutine's slot after starting both branches. On a
+        // multithreaded io_context a branch can finish, and resume this coroutine, while that is still happening,
+        // corrupting the slot (found with ThreadSanitizer; it later crashes in cancellation_slot::clear). Running the
+        // race on a strand serializes its start with its completions.
+        const auto strand = boost::asio::make_strand(co_await boost::asio::this_coro::executor);
+        auto outcome = co_await boost::asio::co_spawn(strand, RaceTokenAgainstLimit(limit), boost::asio::use_awaitable);
         if (outcome.index() == 0) {
             co_return std::move(std::get<0>(outcome));
         }
