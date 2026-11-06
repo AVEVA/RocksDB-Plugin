@@ -74,17 +74,27 @@ class HttpRequestOptions {
     void SetTruncatedTlsBodyPolicy(TruncatedTlsBodyPolicy policy) noexcept;
 
     /// <summary>
-    /// The retry policy for this request. The plain HttpClient never retries a request itself, since only the caller
-    /// knows whether it is safe to resend; layers that do retry (such as the Azure clients) honour this policy.
+    /// The retry policy for this request. When set, <c>HttpClient</c> sends the request again after a transient
+    /// failure (a connection that could not be made, or a dropped one, or a 408/429/500/502/503/504 response), up to
+    /// <c>MaxRetries</c> times with exponential backoff or the server's Retry-After. Because only the caller knows
+    /// whether a resend is safe, a request that may already have reached the server is retried only when its method
+    /// is GET, HEAD, OPTIONS or TRACE. The request's timeout covers every attempt and wait. Layers above the client
+    /// that do their own retrying (such as the Azure clients) honour this policy themselves.
     /// </summary>
-    /// <returns>The policy; empty when the retrying layer's own policy applies.</returns>
+    /// <returns>The policy; empty (no retries by <c>HttpClient</c>) unless set.</returns>
     [[nodiscard]] const std::optional<RetryOptions>& GetRetryOptions() const noexcept;
 
     /// <summary>
-    /// Replaces the retrying layer's policy (count and backoff) for this request.
+    /// Opts in to retrying this request with the given policy.
     /// </summary>
     /// <param name="retry">The policy for this request.</param>
     void SetRetryOptions(RetryOptions retry) noexcept;
+
+    /// <summary>
+    /// Removes the retry policy, so the request is sent once. A layer that retries by itself uses this on the options
+    /// it passes down, so the attempts are not multiplied.
+    /// </summary>
+    void ClearRetryOptions() noexcept;
 
   private:
     std::optional<RetryOptions> m_retry;

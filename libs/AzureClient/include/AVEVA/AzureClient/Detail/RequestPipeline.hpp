@@ -20,8 +20,8 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
-#include <boost/asio/strand.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
@@ -40,61 +40,13 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <variant>
 #include <system_error>
 #include <type_traits>
 #include <utility>
+#include <variant>
 
 namespace AVEVA::AzureClient::Private {
 namespace RetryDetail {
-/// <summary>
-/// The lower bound of the backoff jitter factor. Backoff jitter and exponent bounds live in RetryPolicyConstants.
-/// </summary>
-inline constexpr double MinBackoffJitter = RetryPolicyConstants::MinBackoffJitter;
-
-/// <summary>
-/// The upper bound of the backoff jitter factor.
-/// </summary>
-inline constexpr double MaxBackoffJitter = RetryPolicyConstants::MaxBackoffJitter;
-
-/// <summary>
-/// The largest exponent applied to the backoff.
-/// </summary>
-inline constexpr int MaxBackoffExponent = RetryPolicyConstants::MaxBackoffExponent;
-
-/// <summary>
-/// Exponential backoff (InitialDelay * 2^(retry-1)) with +/- jitter in [0.8, 1.3), capped at MaxDelay. The generator is
-/// a parameter so tests can make the jitter deterministic.
-/// </summary>
-/// <typeparam name="Generator">A random number generator type.</typeparam>
-/// <param name="retry">The retry policy that supplies the initial and maximum delay.</param>
-/// <param name="retryNumber">The number of the retry that is about to wait, starting at 1.</param>
-/// <param name="generator">The source of the jitter.</param>
-/// <returns>The delay to wait before the retry.</returns>
-template <typename Generator>
-[[nodiscard]] std::chrono::milliseconds ComputeBackoff(const RetryOptions& retry, int retryNumber,
-                                                       Generator& generator) {
-    std::uniform_real_distribution<double> jitter(MinBackoffJitter, MaxBackoffJitter);
-
-    // Bound the delays in integers first: int64 max rounds up to 2^63 as a double, which llround cannot convert.
-    constexpr auto maxBound = AzureRequestOptions::MaxTotalDeadline;
-    const double maxDelay =
-        static_cast<double>(std::clamp(retry.MaxDelay, std::chrono::milliseconds{0}, maxBound).count());
-    const double initial =
-        static_cast<double>(std::clamp(retry.InitialDelay, std::chrono::milliseconds{0}, maxBound).count());
-    const double exponential = initial * std::ldexp(1.0, std::clamp(retryNumber - 1, 0, MaxBackoffExponent));
-    const double delay = std::min(exponential * jitter(generator), maxDelay);
-    return std::chrono::milliseconds{static_cast<std::int64_t>(std::llround(delay))};
-}
-
-/// <summary>
-/// As the generator overload, drawing the jitter from a per-thread random generator.
-/// </summary>
-/// <param name="retry">The retry policy that supplies the initial and maximum delay.</param>
-/// <param name="retryNumber">The number of the retry that is about to wait, starting at 1.</param>
-/// <returns>The delay to wait before the retry.</returns>
-[[nodiscard]] std::chrono::milliseconds ComputeBackoff(const RetryOptions& retry, int retryNumber);
-
 /// <summary>
 /// Resolves the x-ms-copy-source-authorization placeholder (see CopySourceClientCredentialMarker): an empty
 /// <paramref name="bearerToken"/> means the client has no bearer token to forward, so the header is dropped before
@@ -238,7 +190,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
     /// <param name="retry">The client's retry policy.</param>
     /// <param name="request">The caller's request.</param>
     /// <param name="requestOptions">The per-request options;     they may override the retry policy or count and set a
-        /// total deadline.</param>
+    /// total deadline.</param>
     /// <param name="notFoundRetry">Whether HTTP 404 and 410 are retried as well.</param>
     /// <param name="rebuild">The hook called before each attempt is authorized.</param>
     /// <param name="replaySafety">Whether the caller absorbs the outcome of a replay; <c>Unsafe</c> defers to
@@ -246,11 +198,11 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
     RetryingSender(THttp& httpClient, RequestAuth auth, std::shared_ptr<TCred> credential, RetryOptions retry,
                    HttpRequest request, AzureRequestOptions requestOptions, NotFoundRetry notFoundRetry,
                    TRebuild rebuild, ReplaySafety replaySafety)
-        : m_http(httpClient), m_auth(std::move(auth)),         m_credential(std::move(credential)),
-                  m_retry(requestOptions.GetRetryOptions().value_or(retry)), m_requestOptions(std::move(requestOptions)),
-                  m_notFoundRetry(notFoundRetry), m_rebuild(std::move(rebuild)),
-                  m_totalDeadline(m_requestOptions.GetTotalDeadline()), m_start(std::chrono::steady_clock::now()),
-                  m_maxAttempts(ComputeMaxAttempts(m_requestOptions.GetMaxRetries().value_or(m_retry.MaxRetries))),
+        : m_http(httpClient), m_auth(std::move(auth)), m_credential(std::move(credential)),
+          m_retry(requestOptions.GetRetryOptions().value_or(retry)), m_requestOptions(std::move(requestOptions)),
+          m_notFoundRetry(notFoundRetry), m_rebuild(std::move(rebuild)),
+          m_totalDeadline(m_requestOptions.GetTotalDeadline()), m_start(std::chrono::steady_clock::now()),
+          m_maxAttempts(ComputeMaxAttempts(m_requestOptions.GetMaxRetries().value_or(m_retry.MaxRetries))),
           m_replaySafety(replaySafety == ReplaySafety::Safe ? ReplaySafety::Safe : ReplaySafetyOf(request)),
           m_attempts(std::move(request)) {}
 
@@ -391,8 +343,8 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
     }
 
     /// <summary>Races the token request against <paramref name="limit"/>; see <see cref="AcquireToken"/>.</summary>
-    boost::asio::awaitable<std::variant<TokenResult, std::monostate>> RaceTokenAgainstLimit(
-        std::chrono::milliseconds limit) {
+    boost::asio::awaitable<std::variant<TokenResult, std::monostate>>
+    RaceTokenAgainstLimit(std::chrono::milliseconds limit) {
         using namespace boost::asio::experimental::awaitable_operators;
         co_return co_await (GetTokenForScopes(*m_credential, m_auth.TokenScopes) || Expire(limit));
     }
@@ -474,6 +426,8 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
     /// must never start then.</returns>
     std::expected<AzureRequestOptions, std::error_code> AttemptOptions() const {
         AzureRequestOptions options = m_requestOptions;
+        // This pipeline owns the retrying; the client retrying again inside each attempt would multiply the attempts.
+        options.ClearRetryOptions();
         if (m_totalDeadline) {
             const auto left = Remaining();
             if (left <= std::chrono::milliseconds{0}) {
