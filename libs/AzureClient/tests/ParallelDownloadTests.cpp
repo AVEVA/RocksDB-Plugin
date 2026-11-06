@@ -34,6 +34,7 @@
 #include <limits>
 #include <new>
 #include <optional>
+#include <random>
 #include <span>
 #include <string>
 #include <string_view>
@@ -121,8 +122,11 @@ struct TempFile {
     TempFile& operator=(TempFile&&) = delete;
 
   private:
+    // ctest runs test binaries concurrently, so the name must differ between processes as well as between tests.
     [[nodiscard]] static std::string Name() {
-        return std::string("azure-client-pd-") + ::testing::UnitTest::GetInstance()->current_test_info()->name();
+        static const auto processId = std::to_string(std::random_device{}());
+        return std::string("azure-client-pd-") + processId + "-" +
+               ::testing::UnitTest::GetInstance()->current_test_info()->name();
     }
 
     void Remove() const {
@@ -544,8 +548,8 @@ TEST(T11_ParallelDownloadAcceptanceTests, TerminalCancellationAfterPartialStillA
 }
 
 TEST(T11_ParallelDownloadAcceptanceTests, ParallelFileDownloadReplacesTheTargetOnSuccess) {
-    const std::filesystem::path target =
-        std::filesystem::temp_directory_path() / "azure-client-t11-parallel-success.bin";
+    const TempFile file;
+    const auto& target = file.Path;
     CreateFileWithContents(target, "old contents that are longer than the new blob");
 
     FakeHttpClient httpClient;
@@ -562,13 +566,11 @@ TEST(T11_ParallelDownloadAcceptanceTests, ParallelFileDownloadReplacesTheTargetO
     EXPECT_EQ(peakPending, 3U);
     EXPECT_EQ(ReadFile(target), content);
     EXPECT_FALSE(HasPartialFiles(target));
-    std::error_code ignored;
-    std::filesystem::remove(target, ignored);
 }
 
 TEST(T11_ParallelDownloadAcceptanceTests, ParallelFileDownloadFailureLeavesTheTargetUntouched) {
-    const std::filesystem::path target =
-        std::filesystem::temp_directory_path() / "azure-client-t11-parallel-failure.bin";
+    const TempFile file;
+    const auto& target = file.Path;
     CreateFileWithContents(target, "previous");
 
     FakeHttpClient httpClient;
@@ -593,8 +595,6 @@ TEST(T11_ParallelDownloadAcceptanceTests, ParallelFileDownloadFailureLeavesTheTa
     EXPECT_EQ(httpClient.PendingCount(), 0U);
     EXPECT_EQ(ReadFile(target), "previous");
     EXPECT_FALSE(HasPartialFiles(target));
-    std::error_code ignored;
-    std::filesystem::remove(target, ignored);
 }
 
 namespace {
