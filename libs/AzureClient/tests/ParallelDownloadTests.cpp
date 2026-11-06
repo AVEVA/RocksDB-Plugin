@@ -1,0 +1,1084 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
+#include "AVEVA/AzureClient/BlobClientOptions.hpp"
+#include "AVEVA/AzureClient/BlobStorageError.hpp"
+#include "AVEVA/AzureClient/Models/BlobModels.hpp"
+#include "AVEVA/AzureClient/Response.hpp"
+#include "FakeHttpClient.hpp"
+#include "TestSupport.hpp"
+
+#include <AVEVA/AzureClient/AzureRequestOptions.hpp>
+#include <AVEVA/AzureClient/BlobOperationOptions.hpp>
+#include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
+#include <AVEVA/AzureClient/Detail/BlobDownload.hpp>
+#include <AVEVA/AzureClient/PageBlobClient.hpp>
+
+#include <AVEVA/HttpClient/HttpRequestOptions.hpp>
+#include <AVEVA/HttpClient/HttpResponse.hpp>
+#include <boost/asio/cancellation_type.hpp>
+#include <boost/asio/post.hpp>
+#include <boost/asio/thread_pool.hpp>
+#include <cstddef>
+#include <gtest/gtest.h>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <expected>
+#include <filesystem>
+#include <fstream>
+#include <future>
+#include <ios>
+#include <iterator>
+#include <limits>
+#include <new>
+#include <optional>
+#include <random>
+#include <span>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <thread>
+#include <utility>
+#include <vector>
+
+// T11: parallel chunked DownloadToAsync (Concurrency > 1).
+
+namespace {
+using AVEVA::HttpRequestOptions;
+using AVEVA::HttpResponse;
+using AVEVA::AzureClient::BlobClientOptions;
+using AVEVA::AzureClient::BlobStorageError;
+using AVEVA::AzureClient::ChunkSize;
+using AVEVA::AzureClient::DownloadToOptions;
+using AVEVA::AzureClient::Response;
+using AVEVA::AzureClient::Models::DownloadBlobToResult;
+using AVEVA::AzureClient::Tests::BlobClient;
+using AVEVA::AzureClient::Tests::EnqueueChunks;
+using AVEVA::AzureClient::Tests::EnqueueForRange;
+using AVEVA::AzureClient::Tests::FakeHttpClient;
+using AVEVA::AzureClient::Tests::FindRequestByRange;
+using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
+using AVEVA::AzureClient::Tests::MakeCanonicalSuccessHeaders;
+using AVEVA::AzureClient::Tests::Operation;
+using AVEVA::AzureClient::Tests::PageBlobClient;
+using AVEVA::AzureClient::Tests::RangeHeader;
+using AVEVA::AzureClient::Tests::RangeResponse;
+using AVEVA::AzureClient::Tests::RunAwaitable;
+using AVEVA::AzureClient::Tests::StartAwaitable;
+
+using DownloadToResult = std::expected<Response<DownloadBlobToResult>, BlobStorageError>;
+
+// The sizes and budgets the scenarios are built around, named for the role each plays.
+constexpr std::size_t AlphabetLength = 26U;
+constexpr int MaxPumpIterations = 100;
+constexpr std::size_t HalfBlobBytes = 6U;
+constexpr std::size_t QuarterChunkBytes = 4U;
+constexpr std::size_t ThirdChunkOffset = 2U * QuarterChunkBytes;
+constexpr std::size_t FourthChunkOffset = 3U * QuarterChunkBytes;
+constexpr std::uint64_t RangeStartBytes = 10U;
+constexpr std::uint64_t ShortRangeBytes = 5U;
+constexpr std::uint64_t MaxSizeBelowBlob = 10U;
+constexpr std::size_t SpanBlobBytes = 18U;
+constexpr std::size_t OversizedDestinationBytes = 20U;
+constexpr std::size_t OfferedSpanBytes = 10U;
+constexpr std::size_t ThreeChunkBlobBytes = 9U;
+constexpr int ConcurrentChunkRequests = 16;
+constexpr std::chrono::milliseconds ShortBudget{50};
+constexpr std::chrono::milliseconds PastShortBudget{150};
+constexpr std::chrono::milliseconds IdlePumpTime{300};
+constexpr std::chrono::milliseconds DiskWorkBudget{400};
+constexpr std::chrono::milliseconds PastDiskWorkBudget{450};
+
+[[nodiscard]] BlobClientOptions BuildOptions() { return MakeBlobClientOptions("logs", "t11.txt"); }
+
+[[nodiscard]] std::string MakeContent(std::size_t size) {
+    std::string content;
+    for (std::size_t i = 0; i < size; ++i) {
+        content += static_cast<char>('a' + (i % AlphabetLength));
+    }
+    return content;
+}
+
+[[nodiscard]] DownloadToOptions Parallel(ChunkSize chunkSize, AVEVA::AzureClient::Concurrency concurrency) {
+    DownloadToOptions options;
+    options.ChunkSize = chunkSize;
+    options.Concurrency = concurrency;
+    return options;
+}
+
+// Download target in the temp directory, named after the running test and removed on scope exit.
+struct TempFile {
+    std::filesystem::path Path;
+
+    TempFile() : Path(std::filesystem::temp_directory_path() / Name()) { Remove(); }
+
+    ~TempFile() { Remove(); }
+
+    TempFile(const TempFile&) = delete;
+    TempFile& operator=(const TempFile&) = delete;
+    TempFile(TempFile&&) = delete;
+    TempFile& operator=(TempFile&&) = delete;
+
+  private:
+    // ctest runs test binaries concurrently, so the name must differ between processes as well as between tests.
+    [[nodiscard]] static std::string Name() {
+        static const auto processId = std::to_string(std::random_device{}());
+        return std::string("azure-client-pd-") + processId + "-" +
+               ::testing::UnitTest::GetInstance()->current_test_info()->name();
+    }
+
+    void Remove() const {
+        std::error_code ignored;
+        std::filesystem::remove(Path, ignored);
+    }
+};
+
+// Completes the most recently issued pending request.
+[[nodiscard]] AVEVA::AzureClient::Tests::Settlement CompleteNewest(FakeHttpClient& httpClient) {
+    using AVEVA::AzureClient::Tests::Settlement;
+    for (std::size_t index = httpClient.RequestCount(); index-- > 0U;) {
+        if (httpClient.CompleteRequest(index) == Settlement::Settled) {
+            return Settlement::Settled;
+        }
+    }
+    return Settlement::NothingPending;
+}
+
+[[nodiscard]] std::string ReadFile(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return std::string{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+[[nodiscard]] bool HasPartialFiles(const std::filesystem::path& target) {
+    const std::string prefix = target.filename().string() + ".partial-";
+    const std::filesystem::directory_iterator entries(target.parent_path());
+    return std::any_of(begin(entries), end(entries),
+                       [&prefix](const auto& entry) { return entry.path().filename().string().starts_with(prefix); });
+}
+
+void ExpectSuccess(const DownloadToResult& result, std::size_t expectedBytes) {
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->Value().BytesWritten, expectedBytes);
+}
+
+void ExpectStatus(const DownloadToResult& result, AVEVA::HttpStatusCode expectedStatus,
+                  std::string_view expectedErrorCode = {}) {
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().StatusCode, expectedStatus);
+    if (!expectedErrorCode.empty()) {
+        EXPECT_EQ(result.error().ErrorCode, expectedErrorCode);
+    }
+}
+
+void ExpectCancellation(const DownloadToResult& result) {
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::operation_canceled));
+}
+
+[[nodiscard]] std::size_t CompleteNewestUntilDone(FakeHttpClient& httpClient, std::size_t maxPending,
+                                                  const Operation<DownloadToResult>& operation) {
+    std::size_t peakPending = 0;
+    for (int guard = 0; guard < MaxPumpIterations && !operation.Done(); ++guard) {
+        peakPending = std::max(peakPending, httpClient.PendingCount());
+        EXPECT_LE(httpClient.PendingCount(), maxPending);
+        EXPECT_EQ(CompleteNewest(httpClient), AVEVA::AzureClient::Tests::Settlement::Settled);
+        httpClient.Poll();
+    }
+    return peakPending;
+}
+
+void VerifyIfMatchHeaderOnChunkRequests(const FakeHttpClient& httpClient, std::string_view etag) {
+    for (std::size_t index = 1; index < httpClient.RequestCount(); ++index) {
+        EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(index).Request, "If-Match"), etag);
+    }
+}
+
+void CreateFileWithContents(const std::filesystem::path& path, std::string_view contents) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output << contents;
+}
+} // namespace
+
+TEST(T11_ParallelDownloadAcceptanceTests, OutOfOrderCompletionIsWrittenInOrderToAFile) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(18);
+    EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
+    BlobClient client{httpClient, BuildOptions()};
+
+    TempFile out;
+    auto operation = StartAwaitable(
+        httpClient, client.DownloadToAsync(out.Path, Parallel(ChunkSize{3U}, AVEVA::AzureClient::Concurrency{3U})));
+
+    ASSERT_EQ(httpClient.RequestCount(), 1U);
+    ASSERT_EQ(httpClient.CompleteRequest(0U), AVEVA::AzureClient::Tests::Settlement::Settled);
+    ASSERT_EQ(httpClient.PendingCount(), 3U);
+
+    const std::size_t peakPending = CompleteNewestUntilDone(httpClient, 3U, operation);
+
+    ASSERT_TRUE(operation.Done());
+    ExpectSuccess(operation.Result(), content.size());
+    EXPECT_EQ(peakPending, 3U);
+    EXPECT_EQ(ReadFile(out.Path), content);
+    EXPECT_EQ(httpClient.RequestCount(), 6U);
+    VerifyIfMatchHeaderOnChunkRequests(httpClient, "\"etag-a\"");
+}
+
+TEST(T11_ParallelDownloadAcceptanceTests, FileWritesRunOnTheInjectedWriteScheduler) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(18);
+    EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
+    BlobClient client{httpClient, BuildOptions()};
+
+    boost::asio::thread_pool pool{1U};
+    const std::size_t clientWritesBefore = AVEVA::AzureClient::Tests::DownloadWriters().Started.load();
+    auto options = Parallel(ChunkSize{3U}, AVEVA::AzureClient::Concurrency{3U});
+    options.WriteScheduler = pool.get_executor();
+
+    TempFile out;
+    auto operation = StartAwaitable(httpClient, client.DownloadToAsync(out.Path, options));
+    // The injected pool is not observed by Poll(), so wait for its work explicitly.
+    ASSERT_EQ(httpClient.WaitForRequest(1U), AVEVA::AzureClient::Tests::WaitOutcome::Done);
+    ASSERT_EQ(httpClient.CompleteRequest(0U), AVEVA::AzureClient::Tests::Settlement::Settled);
+    for (int guard = 0; guard < MaxPumpIterations && !operation.Done(); ++guard) {
+        ASSERT_EQ(httpClient.RunUntil([&] { return httpClient.PendingCount() > 0U || operation.Done(); }),
+                  AVEVA::AzureClient::Tests::WaitOutcome::Done);
+        if (!operation.Done()) {
+            ASSERT_EQ(CompleteNewest(httpClient), AVEVA::AzureClient::Tests::Settlement::Settled);
+        }
+    }
+
+    ASSERT_TRUE(operation.Done());
+    ExpectSuccess(operation.Result(), content.size());
+    // The injected scheduler takes precedence over the HTTP client's own writer.
+    EXPECT_EQ(AVEVA::AzureClient::Tests::DownloadWriters().Started.load(), clientWritesBefore);
+    EXPECT_EQ(ReadFile(out.Path), content);
+}
+
+TEST(T11_ParallelDownloadAcceptanceTests, ThrowWhileStartingALaterChunkFailsOnceWithoutEscaping) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(18);
+    EnqueueChunks(httpClient, content, 3U);
+    BlobClient client{httpClient, BuildOptions()};
+
+    TempFile out;
+    auto operation = StartAwaitable(
+        httpClient, client.DownloadToAsync(out.Path, Parallel(ChunkSize{3U}, AVEVA::AzureClient::Concurrency{3U})));
+
+    ASSERT_EQ(httpClient.RequestCount(), 1U);
+    httpClient.FailNextInitiation(std::make_exception_ptr(std::bad_alloc{}));
+    EXPECT_NO_THROW({
+        EXPECT_EQ(httpClient.CompleteRequest(0U), AVEVA::AzureClient::Tests::Settlement::Settled);
+        httpClient.CompleteAll();
+        httpClient.Poll();
+    });
+
+    ASSERT_TRUE(operation.Done());
+    EXPECT_FALSE(operation.Result().has_value());
+    EXPECT_EQ(httpClient.PendingCount(), 0U);
+    EXPECT_FALSE(std::filesystem::exists(out.Path));
+    EXPECT_EQ(httpClient.RunUntil([&] { return !HasPartialFiles(out.Path); }),
+              AVEVA::AzureClient::Tests::WaitOutcome::Done);
+}
+
+TEST(T11_ParallelDownloadAcceptanceTests, ReorderWindowBoundsBufferedChunksToConcurrency) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(30);
+    EnqueueChunks(httpClient, content, 3U);
+    BlobClient client{httpClient, BuildOptions()};
+
+    TempFile out;
+    auto operation = StartAwaitable(
+        httpClient, client.DownloadToAsync(out.Path, Parallel(ChunkSize{3U}, AVEVA::AzureClient::Concurrency{3U})));
+
+    ASSERT_EQ(httpClient.CompleteRequest(0U), AVEVA::AzureClient::Tests::Settlement::Settled);
+    ASSERT_EQ(httpClient.RequestCount(), 4U); // probe + 3 chunks (3-5, 6-8, 9-11)
+
+    // The two later chunks arrive while the first is still outstanding: they are buffered, and the
+    // window (1 in flight + 2 buffered) is full, so nothing new is requested.
+    ASSERT_EQ(httpClient.CompleteRequest(FindRequestByRange(httpClient, RangeHeader(6, 3))),
+              AVEVA::AzureClient::Tests::Settlement::Settled);
+    ASSERT_EQ(httpClient.CompleteRequest(FindRequestByRange(httpClient, RangeHeader(9, 3))),
+              AVEVA::AzureClient::Tests::Settlement::Settled);
+    EXPECT_EQ(httpClient.RequestCount(), 4U);
+
+    ASSERT_EQ(httpClient.CompleteRequest(FindRequestByRange(httpClient, RangeHeader(3, 3))),
+              AVEVA::AzureClient::Tests::Settlement::Settled);
+    EXPECT_EQ(httpClient.RequestCount(), 7U);
+
+    httpClient.CompleteAll();
+    httpClient.Poll();
+    ASSERT_TRUE(operation.Done());
+    ExpectSuccess(operation.Result(), content.size());
+    EXPECT_EQ(ReadFile(out.Path), content);
+}
+
+TEST(T11_ParallelDownloadAcceptanceTests, ETagChangeMidDownloadReportsConditionNotMet) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(12);
+    EnqueueForRange(httpClient, RangeHeader(0, HalfBlobBytes),
+                    RangeResponse(0, content.substr(0, HalfBlobBytes), content.size(), "\"etagA\""));
+    EnqueueForRange(
+        httpClient, RangeHeader(HalfBlobBytes, HalfBlobBytes),
+        HttpResponse{::AVEVA::HttpStatus::PreconditionFailed,
+                     MakeCanonicalSuccessHeaders({{"x-ms-error-code", "ConditionNotMet"}, {"ETag", "\"etagB\""}}), ""});
+    BlobClient client{httpClient, BuildOptions()};
+
+    TempFile out;
+    auto operation = StartAwaitable(
+        httpClient,
+        client.DownloadToAsync(out.Path, Parallel(ChunkSize{HalfBlobBytes}, AVEVA::AzureClient::Concurrency{2U})));
+    httpClient.CompleteAll();
+    httpClient.Poll();
+
+    ASSERT_TRUE(operation.Done());
+    ExpectStatus(operation.Result(), AVEVA::HttpStatus::PreconditionFailed, "ConditionNotMet");
+    ASSERT_EQ(httpClient.RequestCount(), 2U);
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(1).Request, "If-Match"), "\"etagA\"");
+}
+
+TEST(T118_DownloadVersionValidatorTests, FirstResponseWithoutETagRejectsFurtherChunks) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(12);
+    EnqueueForRange(httpClient, RangeHeader(0, HalfBlobBytes),
+                    RangeResponse(0, content.substr(0, HalfBlobBytes), content.size(), ""));
+    EnqueueForRange(httpClient, RangeHeader(HalfBlobBytes, HalfBlobBytes),
+                    RangeResponse(HalfBlobBytes, content.substr(HalfBlobBytes), content.size(), "\"other\""));
+    BlobClient client{httpClient, BuildOptions()};
+
+    TempFile out;
+    auto operation = StartAwaitable(
+        httpClient,
+        client.DownloadToAsync(out.Path, Parallel(ChunkSize{HalfBlobBytes}, AVEVA::AzureClient::Concurrency{2U})));
+    httpClient.CompleteAll();
+    httpClient.Poll();
+
+    ASSERT_TRUE(operation.Done());
+    ASSERT_FALSE(operation.Result().has_value());
+    EXPECT_EQ(operation.Result().error().Code, AVEVA::AzureClient::BlobStorageErrorCode::InvalidResponse);
+    EXPECT_EQ(httpClient.RequestCount(), 1U);
+}
+
+TEST(T118_DownloadVersionValidatorTests, CallerIfMatchPermitsChunksWhenTheResponseHasNoETag) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(12);
+    EnqueueForRange(httpClient, RangeHeader(0, HalfBlobBytes),
+                    RangeResponse(0, content.substr(0, HalfBlobBytes), content.size(), ""));
+    EnqueueForRange(httpClient, RangeHeader(HalfBlobBytes, HalfBlobBytes),
+                    RangeResponse(HalfBlobBytes, content.substr(HalfBlobBytes), content.size(), ""));
+    BlobClient client{httpClient, BuildOptions()};
+
+    TempFile out;
+    auto options = Parallel(ChunkSize{HalfBlobBytes}, AVEVA::AzureClient::Concurrency{2U});
+    options.Conditions.IfMatch = "\"caller\"";
+    auto operation = StartAwaitable(httpClient, client.DownloadToAsync(out.Path, options));
+    httpClient.CompleteAll();
+    httpClient.Poll();
+
+    ASSERT_TRUE(operation.Done());
+    ExpectSuccess(operation.Result(), content.size());
+    EXPECT_EQ(ReadFile(out.Path), content);
+    ASSERT_EQ(httpClient.RequestCount(), 2U);
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(1).Request, "If-Match"), "\"caller\"");
+}
+
+TEST(T118_DownloadVersionValidatorTests, WildcardIfMatchIsReplacedByTheResponseETagForLaterChunks) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(12);
+    EnqueueForRange(httpClient, RangeHeader(0, HalfBlobBytes),
+                    RangeResponse(0, content.substr(0, HalfBlobBytes), content.size(), "\"etagA\""));
+    EnqueueForRange(
+        httpClient, RangeHeader(HalfBlobBytes, HalfBlobBytes),
+        HttpResponse{::AVEVA::HttpStatus::PreconditionFailed,
+                     MakeCanonicalSuccessHeaders({{"x-ms-error-code", "ConditionNotMet"}, {"ETag", "\"etagB\""}}), ""});
+    BlobClient client{httpClient, BuildOptions()};
+
+    TempFile out;
+    auto options = Parallel(ChunkSize{HalfBlobBytes}, AVEVA::AzureClient::Concurrency{2U});
+    options.Conditions.IfMatch = "*";
+    auto operation = StartAwaitable(httpClient, client.DownloadToAsync(out.Path, options));
+    httpClient.CompleteAll();
+    httpClient.Poll();
+
+    ASSERT_TRUE(operation.Done());
+    ExpectStatus(operation.Result(), AVEVA::HttpStatus::PreconditionFailed, "ConditionNotMet");
+    ASSERT_EQ(httpClient.RequestCount(), 2U);
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(0).Request, "If-Match"), "*");
+    EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(1).Request, "If-Match"), "\"etagA\"");
+}
+
+TEST(T118_DownloadVersionValidatorTests, WildcardIfMatchWithoutResponseETagRejectsFurtherChunks) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(12);
+    EnqueueForRange(httpClient, RangeHeader(0, HalfBlobBytes),
+                    RangeResponse(0, content.substr(0, HalfBlobBytes), content.size(), ""));
+    EnqueueForRange(httpClient, RangeHeader(HalfBlobBytes, HalfBlobBytes),
+                    RangeResponse(HalfBlobBytes, content.substr(HalfBlobBytes), content.size(), ""));
+    BlobClient client{httpClient, BuildOptions()};
+
+    TempFile out;
+    auto options = Parallel(ChunkSize{HalfBlobBytes}, AVEVA::AzureClient::Concurrency{2U});
+    options.Conditions.IfMatch = "*";
+    auto operation = StartAwaitable(httpClient, client.DownloadToAsync(out.Path, options));
+    httpClient.CompleteAll();
+    httpClient.Poll();
+
+    ASSERT_TRUE(operation.Done());
+    ASSERT_FALSE(operation.Result().has_value());
+    EXPECT_EQ(operation.Result().error().Code, AVEVA::AzureClient::BlobStorageErrorCode::InvalidResponse);
+    EXPECT_EQ(httpClient.RequestCount(), 1U);
+}
+
+TEST(T118_DownloadVersionValidatorTests, SingleResponseWithoutETagStillSucceeds) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(6);
+    EnqueueForRange(httpClient, RangeHeader(0, HalfBlobBytes), RangeResponse(0, content, content.size(), ""));
+    BlobClient client{httpClient, BuildOptions()};
+
+    TempFile out;
+    auto operation = StartAwaitable(
+        httpClient,
+        client.DownloadToAsync(out.Path, Parallel(ChunkSize{HalfBlobBytes}, AVEVA::AzureClient::Concurrency{2U})));
+    httpClient.CompleteAll();
+    httpClient.Poll();
+
+    ASSERT_TRUE(operation.Done());
+    ExpectSuccess(operation.Result(), content.size());
+    EXPECT_EQ(ReadFile(out.Path), content);
+}
+
+TEST(T11_ParallelDownloadAcceptanceTests, ChunkFailureCancelsInFlightChunksAndReportsOnce) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(20);
+    EnqueueForRange(httpClient, RangeHeader(0, 4), RangeResponse(0, content.substr(0, 4), content.size()));
+    EnqueueForRange(httpClient, RangeHeader(4, 4), RangeResponse(4, content.substr(4, 4), content.size()));
+    EnqueueForRange(httpClient, RangeHeader(ThirdChunkOffset, QuarterChunkBytes),
+                    HttpResponse{AVEVA::HttpStatus::InternalServerError,
+                                 MakeCanonicalSuccessHeaders({{"x-ms-error-code", "InternalError"}}), ""});
+    EnqueueForRange(
+        httpClient, RangeHeader(FourthChunkOffset, QuarterChunkBytes),
+        RangeResponse(FourthChunkOffset, content.substr(FourthChunkOffset, QuarterChunkBytes), content.size()));
+    BlobClient client{httpClient, BuildOptions()};
+
+    TempFile out;
+    auto operation = StartAwaitable(
+        httpClient, client.DownloadToAsync(out.Path, Parallel(ChunkSize{4U}, AVEVA::AzureClient::Concurrency{3U})));
+
+    ASSERT_EQ(httpClient.CompleteRequest(0U), AVEVA::AzureClient::Tests::Settlement::Settled);
+    ASSERT_EQ(httpClient.PendingCount(), 3U);
+    ASSERT_EQ(
+        httpClient.CompleteRequest(FindRequestByRange(httpClient, RangeHeader(ThirdChunkOffset, QuarterChunkBytes))),
+        AVEVA::AzureClient::Tests::Settlement::Settled);
+    httpClient.Poll();
+
+    // The other in-flight chunks were cancelled through their cancellation slots and drained.
+    EXPECT_EQ(httpClient.PendingCount(), 0U);
+    ASSERT_TRUE(operation.Done());
+    ExpectStatus(operation.Result(), AVEVA::HttpStatus::InternalServerError);
+    EXPECT_EQ(httpClient.RequestCount(), 4U);
+}
+
+TEST(T11_ParallelDownloadAcceptanceTests, ParentCancellationCancelsAllInFlightChunks) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(40);
+    EnqueueChunks(httpClient, content, 4U);
+    BlobClient client{httpClient, BuildOptions()};
+
+    TempFile out;
+    auto operation = StartAwaitable(
+        httpClient, client.DownloadToAsync(out.Path, Parallel(ChunkSize{4U}, AVEVA::AzureClient::Concurrency{4U})));
+
+    ASSERT_EQ(httpClient.CompleteRequest(0U), AVEVA::AzureClient::Tests::Settlement::Settled);
+    ASSERT_EQ(httpClient.PendingCount(), 4U);
+    operation.Cancel(boost::asio::cancellation_type::all);
+    httpClient.Poll();
+
+    ASSERT_TRUE(operation.Done());
+    ExpectCancellation(operation.Result());
+    EXPECT_EQ(httpClient.PendingCount(), 0U);
+    EXPECT_EQ(httpClient.RequestCount(), 5U);
+}
+
+TEST(T11_ParallelDownloadAcceptanceTests, PartialCancellationDoesNotAbortTheDownload) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(18);
+    EnqueueChunks(httpClient, content, 3U);
+    BlobClient client{httpClient, BuildOptions()};
+
+    TempFile out;
+    auto operation = StartAwaitable(
+        httpClient, client.DownloadToAsync(out.Path, Parallel(ChunkSize{3U}, AVEVA::AzureClient::Concurrency{3U})));
+
+    ASSERT_EQ(httpClient.CompleteRequest(0U), AVEVA::AzureClient::Tests::Settlement::Settled);
+    ASSERT_EQ(httpClient.PendingCount(), 3U);
+    operation.Cancel(boost::asio::cancellation_type::partial);
+    httpClient.Poll();
+    ASSERT_FALSE(operation.Done());
+    ASSERT_EQ(httpClient.PendingCount(), 3U);
+
+    static_cast<void>(CompleteNewestUntilDone(httpClient, 3U, operation));
+
+    ASSERT_TRUE(operation.Done());
+    ExpectSuccess(operation.Result(), content.size());
+    EXPECT_EQ(ReadFile(out.Path), content);
+}
+
+TEST(T11_ParallelDownloadAcceptanceTests, TerminalCancellationAfterPartialStillAbortsTheDownload) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(40);
+    EnqueueChunks(httpClient, content, 4U);
+    BlobClient client{httpClient, BuildOptions()};
+
+    TempFile out;
+    auto operation = StartAwaitable(
+        httpClient, client.DownloadToAsync(out.Path, Parallel(ChunkSize{4U}, AVEVA::AzureClient::Concurrency{4U})));
+
+    ASSERT_EQ(httpClient.CompleteRequest(0U), AVEVA::AzureClient::Tests::Settlement::Settled);
+    ASSERT_EQ(httpClient.PendingCount(), 4U);
+    operation.Cancel(boost::asio::cancellation_type::partial);
+    httpClient.Poll();
+    ASSERT_FALSE(operation.Done());
+    operation.Cancel(boost::asio::cancellation_type::terminal);
+    httpClient.Poll();
+
+    ASSERT_TRUE(operation.Done());
+    ExpectCancellation(operation.Result());
+    EXPECT_EQ(httpClient.PendingCount(), 0U);
+}
+
+TEST(T11_ParallelDownloadAcceptanceTests, ParallelFileDownloadReplacesTheTargetOnSuccess) {
+    const TempFile file;
+    const auto& target = file.Path;
+    CreateFileWithContents(target, "old contents that are longer than the new blob");
+
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(25);
+    EnqueueChunks(httpClient, content, 4U);
+    PageBlobClient client{httpClient, BuildOptions()};
+
+    auto operation = StartAwaitable(
+        httpClient, client.DownloadToAsync(target, Parallel(ChunkSize{4U}, AVEVA::AzureClient::Concurrency{3U})));
+    const std::size_t peakPending = CompleteNewestUntilDone(httpClient, 3U, operation);
+
+    ASSERT_TRUE(operation.Done());
+    ExpectSuccess(operation.Result(), content.size());
+    EXPECT_EQ(peakPending, 3U);
+    EXPECT_EQ(ReadFile(target), content);
+    EXPECT_FALSE(HasPartialFiles(target));
+}
+
+TEST(T11_ParallelDownloadAcceptanceTests, ParallelFileDownloadFailureLeavesTheTargetUntouched) {
+    const TempFile file;
+    const auto& target = file.Path;
+    CreateFileWithContents(target, "previous");
+
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(16);
+    EnqueueForRange(httpClient, RangeHeader(0, 4), RangeResponse(0, content.substr(0, 4), content.size()));
+    EnqueueForRange(httpClient, RangeHeader(4, 4), RangeResponse(4, content.substr(4, 4), content.size()));
+    EnqueueForRange(httpClient, RangeHeader(ThirdChunkOffset, QuarterChunkBytes),
+                    HttpResponse{::AVEVA::HttpStatus::PreconditionFailed,
+                                 MakeCanonicalSuccessHeaders({{"x-ms-error-code", "ConditionNotMet"}}), ""});
+    EnqueueForRange(
+        httpClient, RangeHeader(FourthChunkOffset, QuarterChunkBytes),
+        RangeResponse(FourthChunkOffset, content.substr(FourthChunkOffset, QuarterChunkBytes), content.size()));
+    BlobClient client{httpClient, BuildOptions()};
+
+    auto operation = StartAwaitable(
+        httpClient, client.DownloadToAsync(target, Parallel(ChunkSize{4U}, AVEVA::AzureClient::Concurrency{2U})));
+    httpClient.CompleteAll();
+    httpClient.Poll();
+
+    ASSERT_TRUE(operation.Done());
+    ExpectStatus(operation.Result(), AVEVA::HttpStatus::PreconditionFailed);
+    EXPECT_EQ(httpClient.PendingCount(), 0U);
+    EXPECT_EQ(ReadFile(target), "previous");
+    EXPECT_FALSE(HasPartialFiles(target));
+}
+
+namespace {
+// Answers every request with a 206 whose Content-Range is `contentRange` (omitted when empty).
+[[nodiscard]] DownloadToResult DownloadAgainstFixed206(const std::string& body, const std::string& contentRange) {
+    FakeHttpClient httpClient;
+    auto headers = MakeCanonicalSuccessHeaders();
+    if (!contentRange.empty()) {
+        headers.emplace_back(AVEVA::HeaderName{"Content-Range"}, AVEVA::HeaderValue{contentRange});
+    }
+    httpClient.DefaultResponse() = HttpResponse{AVEVA::HttpStatus::PartialContent, std::move(headers), body};
+    BlobClient client{httpClient, BuildOptions()};
+
+    TempFile out;
+    auto result = RunAwaitable(httpClient, client.DownloadToAsync(out.Path, DownloadToOptions{}));
+    EXPECT_FALSE(std::filesystem::exists(out.Path));
+    return result;
+}
+} // namespace
+
+TEST(T08_DownloadContentRangeTests, PartialContentWithoutContentRangeIsInvalidResponse) {
+    const auto result = DownloadAgainstFixed206(MakeContent(10), "");
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, AVEVA::AzureClient::BlobStorageErrorCode::InvalidResponse);
+}
+
+TEST(T08_DownloadContentRangeTests, ContentRangeEndThatDisagreesWithTheBodyIsInvalidResponse) {
+    const auto result = DownloadAgainstFixed206(MakeContent(10), "bytes 0-4/10");
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, AVEVA::AzureClient::BlobStorageErrorCode::InvalidResponse);
+}
+
+TEST(AC_R01_DownloadRangeOverflowTests, OffsetWhoseProbeRangeWouldWrapIsRejectedWithoutSendingARequest) {
+    FakeHttpClient httpClient;
+    BlobClient client{httpClient, BuildOptions()};
+
+    DownloadToOptions options;
+    options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = std::numeric_limits<std::uint64_t>::max() - 1U};
+    TempFile out;
+    const auto result = RunAwaitable(httpClient, client.DownloadToAsync(out.Path, options));
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
+    EXPECT_EQ(httpClient.RequestCount(), 0U);
+    EXPECT_FALSE(std::filesystem::exists(out.Path));
+}
+
+TEST(AC_R01_DownloadRangeOverflowTests, LengthThatOverflowsTheRangeEndIsRejected) {
+    FakeHttpClient httpClient;
+    BlobClient client{httpClient, BuildOptions()};
+
+    DownloadToOptions options;
+    options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = RangeStartBytes,
+                                                              .Length = std::numeric_limits<std::uint64_t>::max()};
+    TempFile out;
+    const auto result = RunAwaitable(httpClient, client.DownloadToAsync(out.Path, options));
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
+    EXPECT_EQ(httpClient.RequestCount(), 0U);
+}
+namespace {
+struct NonStandardThrow {};
+
+// Throws a type that does not derive from std::exception, from Reserve or Write.
+template <AVEVA::AzureClient::WriteMode SinkMode> class ThrowingSink final {
+  public:
+    explicit ThrowingSink(bool throwOnReserve) : m_throwOnReserve(throwOnReserve) {}
+
+    void Reserve(std::uint64_t /*size*/) {
+        if (m_throwOnReserve) {
+            throw NonStandardThrow{};
+        }
+    }
+
+    static constexpr AVEVA::AzureClient::WriteMode Mode = SinkMode;
+
+    [[nodiscard]] AVEVA::AzureClient::WriteOutcome Write(std::string /*data*/) { throw NonStandardThrow{}; }
+
+  private:
+    bool m_throwOnReserve;
+};
+
+template <AVEVA::AzureClient::WriteMode SinkMode>
+[[nodiscard]] AVEVA::AzureClient::Private::DownloadDetail::SummaryResult DownloadIntoThrowingSink(bool throwOnReserve) {
+    using AVEVA::AzureClient::NoTokenCredential;
+    using AVEVA::AzureClient::Private::BasicBlobTarget;
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(10);
+    httpClient.DefaultResponse() = HttpResponse{
+        AVEVA::HttpStatus::PartialContent, MakeCanonicalSuccessHeaders({{"Content-Range", "bytes 0-9/10"}}), content};
+    const auto target = std::make_shared<const BasicBlobTarget<NoTokenCredential>>(BasicBlobTarget<NoTokenCredential>{
+        AVEVA::AzureClient::Private::MakeBlobTarget(BuildOptions(), AVEVA::AzureClient::CredentialPresence::Absent),
+        nullptr});
+
+    // The outcome carries the sink, which is not default constructible as co_spawn requires; hand out the summary.
+    const auto run = [&]() -> boost::asio::awaitable<AVEVA::AzureClient::Private::DownloadDetail::SummaryResult> {
+        auto outcome = co_await AVEVA::AzureClient::Private::DownloadDetail::RunDownload(
+            httpClient, target, DownloadToOptions{}, ThrowingSink<SinkMode>{throwOnReserve},
+            AVEVA::AzureClient::AzureRequestOptions{});
+        co_return std::move(outcome.Result);
+    };
+    return RunAwaitable(httpClient, run());
+}
+} // namespace
+
+class DiscardingSink final {
+  public:
+    static constexpr AVEVA::AzureClient::WriteMode Mode = AVEVA::AzureClient::WriteMode::Inline;
+
+    void Reserve(std::uint64_t /*size*/) {}
+
+    [[nodiscard]] AVEVA::AzureClient::WriteOutcome Write(std::string /*data*/) {
+        return AVEVA::AzureClient::WriteOutcome::Written;
+    }
+};
+
+TEST(AC_R15_DownloadBufferCapTests, ChunksInFlightAreCappedByBytesNotJustByCount) {
+    using AVEVA::AzureClient::NoTokenCredential;
+    using AVEVA::AzureClient::Private::BasicBlobTarget;
+    constexpr std::size_t chunkBytes = std::size_t{64} * 1024U * 1024U;
+
+    FakeHttpClient httpClient;
+    const auto target = std::make_shared<const BasicBlobTarget<NoTokenCredential>>(BasicBlobTarget<NoTokenCredential>{
+        AVEVA::AzureClient::Private::MakeBlobTarget(BuildOptions(), AVEVA::AzureClient::CredentialPresence::Absent),
+        nullptr});
+    DownloadToOptions options;
+    options.ChunkSize = ChunkSize{chunkBytes};
+    options.Concurrency = AVEVA::AzureClient::Concurrency{static_cast<std::size_t>(ConcurrentChunkRequests)};
+    httpClient.EnqueueResponse(
+        HttpResponse{AVEVA::HttpStatus::PartialContent,
+                     MakeCanonicalSuccessHeaders({{"Content-Range", "bytes 0-67108863/1073741824"}}),
+                     std::string(chunkBytes, 'x')},
+        {}, AVEVA::AzureClient::Tests::Delivery::Deferred);
+    for (int i = 0; i < ConcurrentChunkRequests; ++i) {
+        httpClient.EnqueueResponse(
+            HttpResponse{AVEVA::HttpStatus::PartialContent,
+                         MakeCanonicalSuccessHeaders({{"Content-Range", "bytes 0-0/1073741824"}}), "x"},
+            {}, AVEVA::AzureClient::Tests::Delivery::Deferred);
+    }
+    auto operation = StartAwaitable(
+        httpClient, AVEVA::AzureClient::Private::DownloadDetail::RunDownload(
+                        httpClient, target, options, DiscardingSink{}, AVEVA::AzureClient::AzureRequestOptions{}));
+    ASSERT_EQ(httpClient.RunUntil([&] { return httpClient.PendingCount() == 1U; }),
+              AVEVA::AzureClient::Tests::WaitOutcome::Done);
+    ASSERT_EQ(httpClient.CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
+    // 256 MiB of buffering at 64 MiB per chunk allows 4 chunk requests, not the 16 that Concurrency alone allows.
+    ASSERT_EQ(httpClient.RunUntil([&] { return httpClient.PendingCount() >= 4U; }),
+              AVEVA::AzureClient::Tests::WaitOutcome::Done);
+    EXPECT_EQ(httpClient.PendingCount(), 4U);
+
+    // Drain the abandoned download so no coroutine outlives the client it uses.
+    operation.Cancel();
+    httpClient.Poll();
+    EXPECT_TRUE(operation.Done());
+}
+
+TEST(AC_R05_DownloadSinkExceptionTests, NonStandardExceptionFromAnInlineWriteIsAnIoError) {
+    const auto result = DownloadIntoThrowingSink<AVEVA::AzureClient::WriteMode::Inline>(false);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::io_error));
+}
+
+TEST(AC_R05_DownloadSinkExceptionTests, NonStandardExceptionFromAScheduledWriteIsAnIoError) {
+    const auto result = DownloadIntoThrowingSink<AVEVA::AzureClient::WriteMode::Offloaded>(false);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::io_error));
+}
+
+TEST(AC_R05_DownloadSinkExceptionTests, NonStandardExceptionFromReserveIsAnIoError) {
+    const auto result = DownloadIntoThrowingSink<AVEVA::AzureClient::WriteMode::Inline>(true);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::io_error));
+}
+
+TEST(B05_DownloadIgnoredRangeTests, OffsetRangeAnswered200IsInvalidResponse) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(20);
+    httpClient.DefaultResponse() = HttpResponse{AVEVA::HttpStatus::Ok, MakeCanonicalSuccessHeaders(), content};
+    BlobClient client{httpClient, BuildOptions()};
+
+    DownloadToOptions options;
+    options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = RangeStartBytes};
+    TempFile out;
+    const auto result = RunAwaitable(httpClient, client.DownloadToAsync(out.Path, options));
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, AVEVA::AzureClient::BlobStorageErrorCode::InvalidResponse);
+    EXPECT_FALSE(std::filesystem::exists(out.Path));
+}
+
+TEST(B05_DownloadIgnoredRangeTests, LengthRangeAnswered200IsTruncatedToTheRequestedLength) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(20);
+    httpClient.DefaultResponse() = HttpResponse{AVEVA::HttpStatus::Ok, MakeCanonicalSuccessHeaders(), content};
+    BlobClient client{httpClient, BuildOptions()};
+
+    DownloadToOptions options;
+    options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = 0U, .Length = ShortRangeBytes};
+    TempFile out;
+    const auto result = RunAwaitable(httpClient, client.DownloadToAsync(out.Path, options));
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->Value().BytesWritten, 5U);
+    EXPECT_EQ(ReadFile(out.Path), content.substr(0, 5U));
+}
+
+TEST(B05_DownloadIgnoredRangeTests, FullBodyAnswered200IsRejectedWhenOverMaxSize) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(20);
+    httpClient.DefaultResponse() = HttpResponse{AVEVA::HttpStatus::Ok, MakeCanonicalSuccessHeaders(), content};
+    BlobClient client{httpClient, BuildOptions()};
+
+    DownloadToOptions options;
+    options.MaxSize = MaxSizeBelowBlob;
+    TempFile out;
+    const auto result = RunAwaitable(httpClient, client.DownloadToAsync(out.Path, options));
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::file_too_large));
+}
+
+TEST(A3_DownloadIntoSpanTests, FullAndPartialRangesAreWrittenByteForByte) {
+    const std::string content = MakeContent(18);
+    for (const auto& [offset, length] : {std::pair{0U, 18U}, std::pair{4U, 7U}}) {
+        FakeHttpClient httpClient;
+        httpClient.EnqueueResponse(RangeResponse(offset, content.substr(offset, length), content.size()));
+        PageBlobClient client{httpClient, BuildOptions()};
+
+        std::string destination(length, '\0');
+        AVEVA::AzureClient::DownloadBlobOptions options;
+        options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = offset, .Length = length};
+        const auto result = RunAwaitable(httpClient, client.DownloadToAsync(std::span<char>(destination), options));
+
+        ASSERT_TRUE(result.has_value());
+        EXPECT_EQ(result->Value().BytesWritten, length);
+        EXPECT_EQ(destination, content.substr(offset, length));
+    }
+}
+
+TEST(A3_DownloadIntoSpanTests, BlobShorterThanTheRequestedRangeReportsTheBytesWritten) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(18);
+    httpClient.EnqueueResponse(RangeResponse(0, content, content.size()));
+    PageBlobClient client{httpClient, BuildOptions()};
+
+    std::string destination(OversizedDestinationBytes, '#');
+    AVEVA::AzureClient::DownloadBlobOptions options;
+    options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = 0, .Length = OversizedDestinationBytes};
+    const auto result = RunAwaitable(httpClient, client.DownloadToAsync(std::span<char>(destination), options));
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->Value().BytesWritten, 18U);
+    EXPECT_EQ(destination.substr(0, 18), content);
+    EXPECT_EQ(destination.substr(18), "##");
+}
+
+TEST(A3_DownloadIntoSpanTests, ResponseLargerThanTheDestinationFailsWithoutWritingPastIt) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(18);
+    httpClient.EnqueueResponse(RangeResponse(0, content, content.size()));
+    PageBlobClient client{httpClient, BuildOptions()};
+
+    std::string storage(SpanBlobBytes, '#');
+    AVEVA::AzureClient::DownloadBlobOptions options;
+    options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = 0, .Length = SpanBlobBytes};
+    // Only the first 10 bytes are offered; the rest of `storage` acts as a guard region.
+    const auto result =
+        RunAwaitable(httpClient, client.DownloadToAsync(std::span<char>(storage).first(OfferedSpanBytes), options));
+
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(storage.substr(10), std::string(8, '#'));
+}
+
+TEST(T11_ParallelDownloadAcceptanceTests, DownloadLargerThanMaxSizeFailsBeforeFetchingAnyChunk) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(18);
+    EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
+    BlobClient client{httpClient, BuildOptions()};
+
+    TempFile out;
+    DownloadToOptions options = Parallel(ChunkSize{3U}, AVEVA::AzureClient::Concurrency{3U});
+    options.MaxSize = SpanBlobBytes - 1U;
+    auto operation = StartAwaitable(httpClient, client.DownloadToAsync(out.Path, options));
+    ASSERT_EQ(httpClient.CompleteRequest(0U), AVEVA::AzureClient::Tests::Settlement::Settled);
+    httpClient.Poll();
+
+    ASSERT_TRUE(operation.Done());
+    ASSERT_FALSE(operation.Result().has_value());
+    EXPECT_EQ(operation.Result().error().Code, std::make_error_code(std::errc::file_too_large));
+    EXPECT_EQ(httpClient.RequestCount(), 1U);
+    EXPECT_FALSE(std::filesystem::exists(out.Path));
+}
+
+TEST(T11_ParallelDownloadAcceptanceTests, DownloadExactlyAtMaxSizeSucceeds) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(18);
+    EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
+    BlobClient client{httpClient, BuildOptions()};
+
+    TempFile out;
+    DownloadToOptions options = Parallel(ChunkSize{3U}, AVEVA::AzureClient::Concurrency{3U});
+    options.MaxSize = SpanBlobBytes;
+    auto operation = StartAwaitable(httpClient, client.DownloadToAsync(out.Path, options));
+    ASSERT_EQ(httpClient.CompleteRequest(0U), AVEVA::AzureClient::Tests::Settlement::Settled);
+    static_cast<void>(CompleteNewestUntilDone(httpClient, 3U, operation));
+
+    ASSERT_TRUE(operation.Done());
+    ExpectSuccess(operation.Result(), content.size());
+    EXPECT_EQ(ReadFile(out.Path), content);
+}
+
+TEST(T11_ParallelDownloadAcceptanceTests, SequentialChunksShareOneAggregateDeadline) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(9);
+    EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
+    BlobClient client{httpClient, BuildOptions()};
+
+    AVEVA::AzureClient::AzureRequestOptions requestOptions;
+    // Wide margins keep the test stable on a loaded machine: each wait is far inside the budget on its own, and the
+    // two together still overrun it by a clear 200 ms.
+    constexpr std::chrono::milliseconds budget{2000};
+    constexpr std::chrono::milliseconds perRequestWait{1100};
+    requestOptions.SetTotalDeadline(budget);
+    TempFile out;
+    auto operation = StartAwaitable(
+        httpClient,
+        client.DownloadToAsync(out.Path, Parallel(ChunkSize{3U}, AVEVA::AzureClient::Concurrency{1U}), requestOptions));
+
+    ASSERT_EQ(httpClient.RequestCount(), 1U);
+    std::this_thread::sleep_for(perRequestWait);
+    ASSERT_EQ(httpClient.CompleteRequest(0U), AVEVA::AzureClient::Tests::Settlement::Settled);
+    std::this_thread::sleep_for(perRequestWait);
+    static_cast<void>(httpClient.CompleteRequest(1U));
+    ASSERT_EQ(httpClient.RunUntil([&] { return operation.Done() || httpClient.RequestCount() > 2U; }),
+              AVEVA::AzureClient::Tests::WaitOutcome::Done);
+
+    EXPECT_EQ(httpClient.RequestCount(), 2U);
+    ASSERT_TRUE(operation.Done());
+    ASSERT_FALSE(operation.Result().has_value());
+    EXPECT_EQ(operation.Result().error().Code, std::make_error_code(std::errc::timed_out));
+}
+
+TEST(T11_ParallelDownloadAcceptanceTests, FileDownloadDelayedBeforeTheFirstGetStartsNoRequestAfterTheDeadline) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(9);
+    EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
+    BlobClient client{httpClient, BuildOptions()};
+
+    boost::asio::thread_pool pool{1U};
+    std::promise<void> release;
+    boost::asio::post(pool, [gate = release.get_future()]() mutable { gate.wait(); });
+    auto options = Parallel(ChunkSize{3U}, AVEVA::AzureClient::Concurrency{1U});
+    options.WriteScheduler = pool.get_executor();
+    AVEVA::AzureClient::AzureRequestOptions requestOptions;
+    requestOptions.SetTotalDeadline(ShortBudget);
+
+    TempFile out;
+    auto operation = StartAwaitable(httpClient, client.DownloadToAsync(out.Path, options, requestOptions));
+    // The file open is queued behind the blocked writer, so the budget runs out before the first GET could start.
+    std::this_thread::sleep_for(PastShortBudget);
+    release.set_value();
+    ASSERT_EQ(httpClient.RunUntil([&] { return operation.Done() || httpClient.RequestCount() > 0U; }),
+              AVEVA::AzureClient::Tests::WaitOutcome::Done);
+    pool.join();
+
+    EXPECT_EQ(httpClient.RequestCount(), 0U);
+    ASSERT_TRUE(operation.Done());
+    ASSERT_FALSE(operation.Result().has_value());
+    EXPECT_EQ(operation.Result().error().Code, std::make_error_code(std::errc::timed_out));
+    EXPECT_FALSE(HasPartialFiles(out.Path));
+}
+
+namespace {
+// Starts a file download whose preparation is queued behind a blocked writer over an existing destination.
+struct GatedFileDownload {
+    FakeHttpClient HttpClient;
+    boost::asio::thread_pool Pool{1U};
+    std::promise<void> Release;
+    TempFile Out;
+    std::optional<Operation<DownloadToResult>> Download;
+
+    void Start(const std::string& content) {
+        EnqueueChunks(HttpClient, content, 3U, "\"etag-a\"");
+        BlobClient client{HttpClient, BuildOptions()};
+        boost::asio::post(Pool, [gate = Release.get_future()]() mutable { gate.wait(); });
+        auto options = Parallel(ChunkSize{3U}, AVEVA::AzureClient::Concurrency{1U});
+        options.WriteScheduler = Pool.get_executor();
+        CreateFileWithContents(Out.Path, "old");
+        Download.emplace(StartAwaitable(HttpClient, client.DownloadToAsync(Out.Path, options)));
+    }
+};
+} // namespace
+
+TEST(T11_ParallelDownloadAcceptanceTests, CancellationWhileFilePreparationIsQueuedCompletesCanceledWithoutAGet) {
+    GatedFileDownload download;
+    download.Start(MakeContent(ThreeChunkBlobBytes));
+    download.Download->Cancel();
+    download.Release.set_value();
+    ASSERT_EQ(download.HttpClient.RunUntil([&] { return download.Download->Done(); }),
+              AVEVA::AzureClient::Tests::WaitOutcome::Done);
+    download.Pool.join();
+
+    EXPECT_EQ(download.HttpClient.RequestCount(), 0U);
+    ExpectCancellation(download.Download->Result());
+    EXPECT_EQ(ReadFile(download.Out.Path), "old");
+    EXPECT_FALSE(HasPartialFiles(download.Out.Path));
+}
+
+TEST(T11_ParallelDownloadAcceptanceTests, CancellationAfterTheLastChunkBeforeFinalizationKeepsTheOriginalFile) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(3);
+    EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
+    BlobClient client{httpClient, BuildOptions()};
+
+    boost::asio::thread_pool pool{1U};
+    auto options = Parallel(ChunkSize{3U}, AVEVA::AzureClient::Concurrency{1U});
+    options.WriteScheduler = pool.get_executor();
+    TempFile out;
+    CreateFileWithContents(out.Path, "old");
+    auto operation = StartAwaitable(httpClient, client.DownloadToAsync(out.Path, options));
+    ASSERT_EQ(httpClient.WaitForRequest(1U), AVEVA::AzureClient::Tests::WaitOutcome::Done);
+    ASSERT_EQ(httpClient.CompleteRequest(0U), AVEVA::AzureClient::Tests::Settlement::Settled);
+
+    // The gate is queued behind the final write, so finalization (posted once that write is reported) waits behind it.
+    std::promise<void> started;
+    std::promise<void> release;
+    boost::asio::post(pool, [&started, gate = release.get_future()]() mutable {
+        started.set_value();
+        gate.wait();
+    });
+    started.get_future().wait();
+    static_cast<void>(httpClient.RunUntil([] { return false; }, IdlePumpTime));
+    operation.Cancel();
+    release.set_value();
+    ASSERT_EQ(httpClient.RunUntil([&] { return operation.Done(); }), AVEVA::AzureClient::Tests::WaitOutcome::Done);
+    pool.join();
+
+    ExpectCancellation(operation.Result());
+    EXPECT_EQ(ReadFile(out.Path), "old");
+    EXPECT_FALSE(HasPartialFiles(out.Path));
+}
+
+namespace {
+// A one-chunk file download over an existing destination with a 400 ms budget whose last write is held up past it.
+void ExpectDeadlinePassingInLastDiskWorkTimesOut() {
+    FakeHttpClient httpClient;
+    EnqueueChunks(httpClient, MakeContent(3), 3U, "\"etag-a\"");
+    BlobClient client{httpClient, BuildOptions()};
+
+    boost::asio::thread_pool pool{1U};
+    auto options = Parallel(ChunkSize{3U}, AVEVA::AzureClient::Concurrency{1U});
+    options.WriteScheduler = pool.get_executor();
+    AVEVA::AzureClient::AzureRequestOptions requestOptions;
+    requestOptions.SetTotalDeadline(DiskWorkBudget);
+    TempFile out;
+    CreateFileWithContents(out.Path, "old");
+    auto operation = StartAwaitable(httpClient, client.DownloadToAsync(out.Path, options, requestOptions));
+    ASSERT_EQ(httpClient.WaitForRequest(1U), AVEVA::AzureClient::Tests::WaitOutcome::Done);
+
+    std::promise<void> started;
+    std::promise<void> release;
+    const auto block = [&] {
+        boost::asio::post(pool, [&started, gate = release.get_future()]() mutable {
+            started.set_value();
+            gate.wait();
+        });
+        started.get_future().wait();
+    };
+    block();
+    ASSERT_EQ(httpClient.CompleteRequest(0U), AVEVA::AzureClient::Tests::Settlement::Settled);
+    // The last response arrived within budget; the paused disk work is what outlasts it.
+    std::this_thread::sleep_for(PastDiskWorkBudget);
+    release.set_value();
+    ASSERT_EQ(httpClient.RunUntil([&] { return operation.Done(); }), AVEVA::AzureClient::Tests::WaitOutcome::Done);
+    pool.join();
+
+    ASSERT_FALSE(operation.Result().has_value());
+    EXPECT_EQ(operation.Result().error().Code, std::make_error_code(std::errc::timed_out));
+    EXPECT_EQ(ReadFile(out.Path), "old");
+    EXPECT_FALSE(HasPartialFiles(out.Path));
+}
+} // namespace
+
+TEST(T11_ParallelDownloadAcceptanceTests, DeadlinePassingDuringTheLastWriteTimesOutAndKeepsTheDestination) {
+    ExpectDeadlinePassingInLastDiskWorkTimesOut();
+}

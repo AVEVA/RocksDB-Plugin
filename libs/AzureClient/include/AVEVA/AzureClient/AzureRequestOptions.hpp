@@ -1,0 +1,75 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
+#pragma once
+
+#include <AVEVA/AzureClient/Types.hpp>
+#include <AVEVA/HttpClient/HttpRequestOptions.hpp>
+
+#include <algorithm>
+#include <chrono>
+#include <optional>
+#include <type_traits>
+#include <utility>
+
+namespace AVEVA::AzureClient {
+/// <summary>
+/// Per-request options for the Azure clients: everything <see cref="HttpRequestOptions"/> offers, plus the
+/// retry budget and retry count that only the retrying request pipeline honours. An HttpRequestOptions is
+/// adopted explicitly, so the conversion is always visible at the call site.
+/// </summary>
+class AzureRequestOptions : public HttpRequestOptions {
+  public:
+    /// <summary>
+    /// Creates options with nothing set, so the client's own deadline and retry policy apply.
+    /// </summary>
+    AzureRequestOptions() = default;
+
+    /// <summary>
+    /// Adopts the plain HTTP options, leaving the retry budget and count unset.
+    /// </summary>
+    /// <param name="options">The HTTP-level options.</param>
+    explicit AzureRequestOptions(HttpRequestOptions options) noexcept(
+        std::is_nothrow_move_constructible_v<HttpRequestOptions>)
+        : HttpRequestOptions(std::move(options)) {}
+
+    /// <summary>
+    /// The retry budget for this request, retries and backoff included.
+    /// </summary>
+    /// <returns>The deadline measured from the start of the operation; empty when none was set.</returns>
+    std::optional<std::chrono::milliseconds> GetTotalDeadline() const noexcept { return m_totalDeadline; }
+
+    /// <summary>
+    /// The number of retries after the first attempt that replaces the client's retry policy for this request; it
+    /// takes precedence over the count in <c>GetRetryOptions()</c>.
+    /// </summary>
+    /// <returns>The override; empty when the client's policy applies.</returns>
+    std::optional<RetryCount> GetMaxRetries() const noexcept { return m_maxRetries; }
+
+    /// <summary>
+    /// Bounds the whole operation, retries and backoff included. When it elapses the in-flight attempt is
+    /// cancelled and the operation completes with <c>std::errc::timed_out</c>. Each attempt's own timeout is
+    /// additionally clamped to the time that remains.
+    /// </summary>
+    /// <param name="totalDeadline">The deadline; a non-positive value expires immediately. Magnitudes beyond
+    /// <c>MaxTotalDeadline</c> are saturated so that adding them to a clock reading cannot overflow.</param>
+    void SetTotalDeadline(std::chrono::milliseconds totalDeadline) noexcept {
+        m_totalDeadline = std::clamp(totalDeadline, -MaxTotalDeadline, MaxTotalDeadline);
+    }
+
+    /// <summary>
+    /// The longest total deadline that is honoured; longer budgets are treated as this long.
+    /// </summary>
+    static constexpr std::chrono::milliseconds MaxTotalDeadline{std::chrono::hours{24 * 365 * 10}};
+
+    /// <summary>
+    /// Replaces the client's retry count for this request (0 disables retries).
+    /// </summary>
+    /// <param name="maxRetries">Retries after the first attempt.</param>
+    void SetMaxRetries(RetryCount maxRetries) noexcept { m_maxRetries = maxRetries; }
+
+  private:
+    std::optional<std::chrono::milliseconds> m_totalDeadline;
+    std::optional<RetryCount> m_maxRetries;
+};
+} // namespace AVEVA::AzureClient

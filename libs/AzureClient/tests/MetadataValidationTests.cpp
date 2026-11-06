@@ -1,0 +1,105 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
+#include "AVEVA/AzureClient/BlobStorageError.hpp"
+#include "AVEVA/AzureClient/Models/BlobModels.hpp"
+#include "FakeHttpClient.hpp"
+#include "TestSupport.hpp"
+#include "ValueOrFail.hpp"
+
+#include <AVEVA/AzureClient/BlobClient.hpp>
+#include <AVEVA/AzureClient/BlobContainerClient.hpp>
+#include <AVEVA/AzureClient/BlobOperationOptions.hpp>
+#include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
+
+#include <gtest/gtest.h>
+
+#include <optional>
+#include <string>
+#include <system_error>
+#include <utility>
+
+using AVEVA::AzureClient::Tests::ValueOrFail;
+
+namespace {
+using AVEVA::AzureClient::BlobStorageError;
+using AVEVA::AzureClient::BlobStorageErrorCode;
+using AVEVA::AzureClient::CreateBlobContainerOptions;
+using AVEVA::AzureClient::CreatePageBlobOptions;
+using AVEVA::AzureClient::SetBlobMetadataOptions;
+using AVEVA::AzureClient::Models::MetadataMap;
+using AVEVA::AzureClient::Tests::BlobClient;
+using AVEVA::AzureClient::Tests::BlobContainerClient;
+using AVEVA::AzureClient::Tests::FakeHttpClient;
+using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
+using AVEVA::AzureClient::Tests::MakeBlobContainerClientOptions;
+using AVEVA::AzureClient::Tests::PageBlobClient;
+using AVEVA::AzureClient::Tests::RunAwaitable;
+
+// Calls SetMetadataAsync with a single `name` entry; returns the error, or nullopt on success.
+[[nodiscard]] std::optional<BlobStorageError> SetMetadataWithName(FakeHttpClient& httpClient, const std::string& name) {
+    BlobClient client{httpClient, MakeBlobClientOptions()};
+    SetBlobMetadataOptions options;
+    options.Metadata.emplace(name, "value");
+    std::optional<BlobStorageError> error;
+    const auto result = RunAwaitable(httpClient, client.SetMetadataAsync(std::move(options)));
+    if (!result.has_value()) {
+        error = result.error();
+    }
+    return error;
+}
+} // namespace
+
+TEST(MetadataValidationTests, InvalidNamesAreRejectedBeforeSending) {
+    for (const std::string name : {"", "1leading", "has-dash", "has space", "dot.ted", "caf\xC3\xA9"}) {
+        SCOPED_TRACE(name);
+        FakeHttpClient httpClient;
+        const std::optional<BlobStorageError> error = SetMetadataWithName(httpClient, name);
+        ASSERT_TRUE(error.has_value());
+        EXPECT_EQ(ValueOrFail(error).Code, std::error_code{BlobStorageErrorCode::InvalidMetadata});
+        EXPECT_EQ(ValueOrFail(error).Code, std::errc::invalid_argument);
+        EXPECT_TRUE(httpClient.Requests().empty());
+    }
+}
+
+TEST(MetadataValidationTests, IdentifierNamesAreSent) {
+    for (const std::string name : {"a", "_", "_private", "Name_42", "ALLCAPS"}) {
+        SCOPED_TRACE(name);
+        FakeHttpClient httpClient;
+        httpClient.EnqueueResponse(AVEVA::HttpResponse{AVEVA::HttpStatus::Ok, {}, {}});
+        EXPECT_FALSE(SetMetadataWithName(httpClient, name).has_value());
+        ASSERT_EQ(httpClient.Requests().size(), 1U);
+        EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.LastRequest(), "x-ms-meta-" + name), "value");
+    }
+}
+
+TEST(MetadataValidationTests, CaseInsensitiveDuplicateKeysCollapseToOneEntry) {
+    MetadataMap metadata;
+    metadata.emplace("Owner", "first");
+    const bool inserted = metadata.emplace("OWNER", "second").second;
+
+    EXPECT_FALSE(inserted);
+    ASSERT_EQ(metadata.size(), 1U);
+    EXPECT_EQ(metadata.begin()->second, "first");
+}
+
+TEST(MetadataValidationTests, ValidationAppliesToPageBlobAndContainerCreate) {
+    FakeHttpClient httpClient;
+    PageBlobClient pageBlob{httpClient, MakeBlobClientOptions()};
+    BlobContainerClient container{httpClient, MakeBlobContainerClientOptions()};
+
+    CreatePageBlobOptions uploadOptions;
+    uploadOptions.Metadata.emplace("bad-name", "v");
+    const auto uploadResult = RunAwaitable(
+        httpClient, pageBlob.CreateAsync(AVEVA::AzureClient::PageBlobSize{512U}, std::move(uploadOptions)));
+    const std::error_code uploadError = uploadResult.has_value() ? std::error_code{} : uploadResult.error().Code;
+
+    CreateBlobContainerOptions createOptions;
+    createOptions.Metadata.emplace("9lives", "v");
+    const auto createResult = RunAwaitable(httpClient, container.CreateIfNotExistsAsync(std::move(createOptions)));
+    const std::error_code createError = createResult.has_value() ? std::error_code{} : createResult.error().Code;
+
+    EXPECT_EQ(uploadError, std::error_code{BlobStorageErrorCode::InvalidMetadata});
+    EXPECT_EQ(createError, std::error_code{BlobStorageErrorCode::InvalidMetadata});
+    EXPECT_TRUE(httpClient.Requests().empty());
+}
