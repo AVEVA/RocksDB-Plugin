@@ -140,7 +140,9 @@ class BlobServer {
 
     void Accept() {
         m_acceptor.async_accept([this](const boost::system::error_code& error, tcp::socket socket) {
-            if (error) {
+            // An accept that completed as Stop ran must not start a session: Stop has already closed the others, and a
+            // read left pending here would keep the context running forever.
+            if (error || m_stopping) {
                 return;
             }
             ++m_connections;
