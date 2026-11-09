@@ -34,11 +34,12 @@ struct AzureErrorTranslator {
     /// Logs a captured exception (including the Azure request id for RequestFailedException) and converts it to a
     /// status, so no exception escapes into RocksDB. `operation` names what was being attempted and is used in the
     /// log and in the fallback message. Never throws: if logging or building the message fails, a fixed IOError is
-    /// returned instead.
+    /// returned instead. `severity` lets callers log expected failures (such as a cancelled prefetch) below error.
     /// </summary>
     static rocksdb::IOStatus
     FromException(boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>& logger,
-                  const std::exception_ptr& error, std::string_view operation) noexcept;
+                  const std::exception_ptr& error, std::string_view operation,
+                  boost::log::trivial::severity_level severity = boost::log::trivial::error) noexcept;
 
     /// <summary>
     /// Runs `f` (which returns an IOStatus) and converts any exception it throws to a logged status, so file wrappers

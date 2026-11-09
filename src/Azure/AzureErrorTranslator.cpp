@@ -188,7 +188,8 @@ LeaseLoss AzureErrorTranslator::LeaseLossOf(const std::error_code& code) {
 
 rocksdb::IOStatus AzureErrorTranslator::FromException(
     boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>& logger,
-    const std::exception_ptr& error, std::string_view operation) noexcept {
+    const std::exception_ptr& error, std::string_view operation,
+    boost::log::trivial::severity_level severity) noexcept {
     if (!error) {
         return rocksdb::IOStatus::IOError();
     }
@@ -201,9 +202,9 @@ rocksdb::IOStatus AzureErrorTranslator::FromException(
             return ClassifyCurrentException(
                 [&](std::string_view kind, std::string_view detail) {
                     if (detail.empty()) {
-                        BOOST_LOG_SEV(logger, boost::log::trivial::error) << operation << ' ' << kind;
+                        BOOST_LOG_SEV(logger, severity) << operation << ' ' << kind;
                     } else {
-                        BOOST_LOG_SEV(logger, boost::log::trivial::error) << operation << ' ' << kind << ": " << detail;
+                        BOOST_LOG_SEV(logger, severity) << operation << ' ' << kind << ": " << detail;
                     }
                 },
                 operation);
