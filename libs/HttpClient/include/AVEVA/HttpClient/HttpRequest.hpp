@@ -9,10 +9,31 @@
 #include <AVEVA/HttpClient/HttpMethod.hpp>
 #include <AVEVA/HttpClient/Units.hpp>
 
+#include <boost/unordered/unordered_flat_set.hpp>
+
+#include <cstddef>
 #include <string>
-#include <vector>
 
 namespace AVEVA {
+/// <summary>
+/// Hashes and compares headers by field name only, case-insensitively as HTTP field names are, so a set of headers
+/// holds at most one header per name.
+/// </summary>
+struct HttpHeaderNameHash {
+    [[nodiscard]] std::size_t operator()(const HttpHeader& header) const noexcept;
+};
+
+/// <summary>
+/// Equality by field name only, case-insensitively; see <see cref="HttpHeaderNameHash"/>.
+/// </summary>
+struct HttpHeaderNameEqual {
+    [[nodiscard]] bool operator()(const HttpHeader& left, const HttpHeader& right) const noexcept;
+};
+
+/// <summary>
+/// An open-addressing set of headers, unique by name. Iteration order is unspecified.
+/// </summary>
+using HttpHeaderSet = boost::unordered_flat_set<HttpHeader, HttpHeaderNameHash, HttpHeaderNameEqual>;
 /// <summary>
 /// An outbound HTTP request: method, absolute http(s) URL, headers, and an optional body. Copying a request shares
 /// its body (see <see cref="HttpBody"/>) rather than copying the bytes.
@@ -40,9 +61,9 @@ class HttpRequest {
     /// <summary>
     /// The request headers.
     /// </summary>
-    /// <returns>The headers, in the order they were added; valid for as long as the request is.</returns>
-    [[nodiscard]] const std::vector<HttpHeader>& GetHeaders() const& noexcept AVEVA_LIFETIMEBOUND;
-    [[nodiscard]] std::vector<HttpHeader> GetHeaders() && noexcept;
+    /// <returns>The headers, unique by name, in unspecified order; valid for as long as the request is.</returns>
+    [[nodiscard]] const HttpHeaderSet& GetHeaders() const& noexcept AVEVA_LIFETIMEBOUND;
+    [[nodiscard]] HttpHeaderSet GetHeaders() && noexcept;
 
     /// <summary>
     /// The request body.
@@ -63,10 +84,11 @@ class HttpRequest {
     void SetUrl(HttpUrl url) noexcept;
 
     /// <summary>
-    /// Appends a header. Duplicate names are kept as separate entries rather than merged. Headers the client
-    /// manages itself (Connection, Transfer-Encoding, Host and Content-Length) are silently dropped when sent.
+    /// Adds a header. Names are unique, compared case-insensitively: adding a name that is already present replaces
+    /// the earlier header (last wins). Headers the client manages itself (Connection, Transfer-Encoding,
+    /// Host and Content-Length) are silently dropped when sent.
     /// </summary>
-    /// <param name="header">The header to append.</param>
+    /// <param name="header">The header to add.</param>
     void AddHeader(HttpHeader header);
 
     /// <summary>
@@ -85,7 +107,7 @@ class HttpRequest {
   private:
     HttpMethod m_method = HttpMethod::Get;
     std::string m_url;
-    std::vector<HttpHeader> m_headers;
+    HttpHeaderSet m_headers;
     HttpBody m_body;
 };
 } // namespace AVEVA
