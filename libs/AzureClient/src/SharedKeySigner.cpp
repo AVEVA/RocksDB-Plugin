@@ -261,7 +261,12 @@ std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpR
     std::array<std::string_view, 11> fields{};
     enum class FieldState : std::uint8_t { Unseen, Seen };
     std::array<FieldState, 11> fieldState{};
-    const std::vector<HttpHeader>& headers = request.GetHeaders();
+    // The request's headers are an unordered set, so index them through a vector of pointers.
+    std::vector<const HttpHeader*> headers;
+    headers.reserve(request.GetHeaders().size());
+    for (const HttpHeader& header : request.GetHeaders()) {
+        headers.push_back(&header);
+    }
     // Names are lowercased before comparing because the culture-aware tables only rank lowercase letters.
     // All lowercase names share one buffer (one allocation instead of one per header); entries index into it.
     struct CanonicalizedHeader {
@@ -274,7 +279,7 @@ std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpR
     std::vector<CanonicalizedHeader> entries;
     entries.reserve(headers.size());
     for (std::size_t index = 0; index < headers.size(); ++index) {
-        const HttpHeader& header = headers.at(index);
+        const HttpHeader& header = *headers.at(index);
         if (IStartsWith(header.GetName(), "x-ms-") == StringMatch::Match) {
             // Sign only what will be sent: a CR, LF or NUL here could make the signed text differ from the wire form.
             if (WireValidityOf(header) == Validity::Invalid) {
@@ -348,7 +353,7 @@ std::string BuildSharedKeyStringToSign(std::string_view accountName, const HttpR
         } else {
             stringToSign.push_back(',');
         }
-        AppendCollapsedWhitespace(stringToSign, headers.at(entry.Index).GetValue());
+        AppendCollapsedWhitespace(stringToSign, headers.at(entry.Index)->GetValue());
     }
     if (!entries.empty()) {
         stringToSign.push_back('\n');

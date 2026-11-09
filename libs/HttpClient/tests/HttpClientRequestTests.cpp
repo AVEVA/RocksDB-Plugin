@@ -207,7 +207,21 @@ TEST(HttpClientRequest, HttpErrorPreservesRequestFraming) {
     EXPECT_EQ(result.received[http::field::host], result.authority);
     EXPECT_EQ(result.received[http::field::content_length], "7");
     EXPECT_FALSE(result.received.chunked());
-    EXPECT_EQ(result.received.count("X-Test"), 2u);
+    EXPECT_EQ(result.received.count("X-Test"), 1u);
+    EXPECT_EQ(result.received["X-Test"], "two");
+}
+
+TEST(HttpClientRequest, AddHeaderReplacesSameNameCaseInsensitively) {
+    AVEVA::HttpRequest request;
+    request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{"X-A"}, AVEVA::HeaderValue{"1"}));
+    request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{"X-B"}, AVEVA::HeaderValue{"2"}));
+    request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{"x-a"}, AVEVA::HeaderValue{"3"}));
+
+    ASSERT_EQ(request.GetHeaders().size(), 2u);
+    const auto replaced = request.GetHeaders().find(
+        AVEVA::HttpHeader(AVEVA::HeaderName{"X-A"}, AVEVA::HeaderValue{""}));
+    ASSERT_NE(replaced, request.GetHeaders().end());
+    EXPECT_EQ(replaced->GetValue(), "3");
 }
 
 TEST(HttpClientRequest, ContentLengthIsSentOnlyWhenAppropriate) {

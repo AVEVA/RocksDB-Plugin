@@ -55,7 +55,7 @@ if(MSVC)
     target_compile_options(aveva-http-client PRIVATE /bigobj)
 endif()
 target_link_libraries(aveva-http-client
-    PUBLIC Boost::asio Microsoft.GSL::GSL
-    PRIVATE Boost::beast Boost::intrusive Boost::scope Boost::unordered Boost::url OpenSSL::SSL OpenSSL::Crypto
+    PUBLIC Boost::asio Boost::unordered Microsoft.GSL::GSL
+    PRIVATE Boost::beast Boost::intrusive Boost::scope Boost::url OpenSSL::SSL OpenSSL::Crypto
 )
 aveva_install_library(aveva-http-client)
