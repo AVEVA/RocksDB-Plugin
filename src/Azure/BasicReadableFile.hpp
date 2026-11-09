@@ -183,7 +183,13 @@ BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& req, std::function<v
                         file, TImpl::ReadAsync(file, offset, length, TImpl::kMaxStaleReadRetries, request->StopToken()),
                         request->StopToken(),
                         [request, logger, deadlineGuard](std::exception_ptr error, typename TImpl::ReadResult result) {
-                            request->Complete(error ? AzureErrorTranslator::FromException(*logger, error, "ReadAsync")
+                            // A stop request means RocksDB abandoned the read (e.g. a discarded speculative prefetch),
+                            // so the resulting cancellation is expected and is not logged as an error.
+                            const auto severity = request->StopToken().stop_requested()
+                                                      ? boost::log::trivial::debug
+                                                      : boost::log::trivial::error;
+                            request->Complete(error ? AzureErrorTranslator::FromException(*logger, error, "ReadAsync",
+                                                                                          severity)
                                                     : rocksdb::IOStatus::OK(),
                                               result.Data);
                         });
