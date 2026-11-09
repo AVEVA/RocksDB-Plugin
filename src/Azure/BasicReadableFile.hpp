@@ -159,20 +159,24 @@ BasicReadableFile<TImpl>::StartRead(rocksdb::FSReadRequest& req, std::function<v
             // whatever the read is waiting on (a prefetch, a metadata refresh or the transfer). The prefetch and
             // metadata refresh are shared and keep going for their other waiters. Every continuation below holds the
             // guard, so the timer is disarmed as soon as the last of them is released.
-            const auto expiredStatus = AzureErrorTranslator::FromException(
-                *m_logger, Impl::ReadableFileDetail::ReadTimedOutError(), "ReadAsync");
+            // Built (and logged) only if the deadline actually passes; building it per read flooded the log with
+            // "deadline exceeded" errors for reads that were never late.
+            const auto makeExpiredStatus = [logger = m_logger] {
+                return AzureErrorTranslator::FromException(*logger, Impl::ReadableFileDetail::ReadTimedOutError(),
+                                                           "ReadAsync");
+            };
             const auto deadlineGuard = std::make_shared<const Impl::RequestDeadline>(m_file->ClientExecutor(), deadline,
-                                                                                     request, expiredStatus);
+                                                                                     request, makeExpiredStatus);
 
             auto makeDownload = [&] {
                 return [file = m_file, offset, length, deadline, request, logger = m_logger, deadlineGuard,
-                        expiredStatus] {
+                        makeExpiredStatus] {
                     if (request->Finished() == Impl::Completion::Done) {
                         return;
                     }
                     if (Impl::ReadableFileDetail::StatusOf(deadline) ==
                         Impl::ReadableFileDetail::DeadlineStatus::Expired) {
-                        request->Complete(expiredStatus, {});
+                        request->Complete(makeExpiredStatus(), {});
                         return;
                     }
                     TImpl::StartTracked(

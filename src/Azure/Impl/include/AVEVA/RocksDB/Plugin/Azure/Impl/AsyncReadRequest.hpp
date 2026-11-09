@@ -173,7 +173,9 @@ struct AsyncReadHandle {
 };
 
 /// <summary>
-/// Fails a request with `expiredStatus` and cancels its download once `deadline` passes; no deadline arms nothing.
+/// Fails a request with the status built by `makeExpiredStatus` and cancels its download once `deadline` passes; no
+/// deadline arms nothing. The status is built only when the deadline fires: building it logs, and most reads finish
+/// well before their deadline.
 /// Destroying it disarms the timer, so the deadline lives exactly as long as whoever holds this object, and it never
 /// keeps the request alive or acts on one that has been released.
 /// </summary>
@@ -181,7 +183,8 @@ class RequestDeadline {
   public:
     RequestDeadline(const AsyncReadRequest::Executor& executor,
                     const std::optional<std::chrono::steady_clock::time_point>& deadline,
-                    const std::shared_ptr<AsyncReadRequest>& request, const rocksdb::IOStatus& expiredStatus);
+                    const std::shared_ptr<AsyncReadRequest>& request,
+                    std::function<rocksdb::IOStatus()> makeExpiredStatus);
     RequestDeadline(const RequestDeadline&) = delete;
     RequestDeadline& operator=(const RequestDeadline&) = delete;
     RequestDeadline(RequestDeadline&&) = delete;

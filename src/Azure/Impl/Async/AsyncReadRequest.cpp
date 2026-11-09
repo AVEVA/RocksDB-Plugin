@@ -76,21 +76,21 @@ void AsyncReadRequest::Wait() { m_state.wait(State::InFlight, std::memory_order_
 RequestDeadline::RequestDeadline(const AsyncReadRequest::Executor& executor,
                                  const std::optional<std::chrono::steady_clock::time_point>& deadline,
                                  const std::shared_ptr<AsyncReadRequest>& request,
-                                 const rocksdb::IOStatus& expiredStatus)
+                                 std::function<rocksdb::IOStatus()> makeExpiredStatus)
     : m_timer(executor) {
     if (!deadline) {
         return;
     }
     m_timer.expires_at(*deadline);
-    m_timer.async_wait(
-        [weak = std::weak_ptr<AsyncReadRequest>(request), expiredStatus](const boost::system::error_code& cancelled) {
-            if (cancelled) {
-                return;
-            }
-            if (const auto live = weak.lock()) {
-                live->Expire(expiredStatus);
-            }
-        });
+    m_timer.async_wait([weak = std::weak_ptr<AsyncReadRequest>(request), makeExpiredStatus = std::move(makeExpiredStatus)](
+                           const boost::system::error_code& cancelled) {
+        if (cancelled) {
+            return;
+        }
+        if (const auto live = weak.lock()) {
+            live->Expire(makeExpiredStatus());
+        }
+    });
 }
 
 void AsyncReadRequest::Abort() {
