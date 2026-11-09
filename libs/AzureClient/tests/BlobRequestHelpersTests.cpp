@@ -792,7 +792,7 @@ TEST(BlobRequestHelpersTests, SharedKeyStringToSign_SupportsEveryHttpMethod) {
     }
 }
 
-TEST(SharedKeyCanonicalizationTests, RepeatedHeadersAndQueryParametersAreGrouped) {
+TEST(SharedKeyCanonicalizationTests, ReplacedHeadersAndRepeatedQueryParametersAreCanonicalized) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Get);
     request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/container/blob?b=2&a=z&a=y&comp=list"});
@@ -801,11 +801,11 @@ TEST(SharedKeyCanonicalizationTests, RepeatedHeadersAndQueryParametersAreGrouped
     request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{"X-MS-Meta-K"}, AVEVA::HeaderValue{" v2 "}));
 
     const std::string toSign = AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request);
-    EXPECT_NE(toSign.find("x-ms-a:first\nx-ms-meta-k:v1,v2\n"), std::string::npos) << toSign;
+    EXPECT_NE(toSign.find("x-ms-a:first\nx-ms-meta-k:v2\n"), std::string::npos) << toSign;
     EXPECT_NE(toSign.find("/account/container/blob\na:y,z\nb:2\ncomp:list"), std::string::npos) << toSign;
 }
 
-TEST(AS_R12_SharedKeyGoldenTests, EncodedPathPutWithEmptyBodyAndRepeatedHeaders) {
+TEST(AS_R12_SharedKeyGoldenTests, EncodedPathPutWithEmptyBodyAndReplacedHeader) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Put);
     request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/cont/my%20dir%2Fblob?comp=metadata&Z=2&z=1"});
@@ -818,7 +818,7 @@ TEST(AS_R12_SharedKeyGoldenTests, EncodedPathPutWithEmptyBodyAndRepeatedHeaders)
     // The path is signed in its encoded form; an empty body yields an empty Content-Length field.
     EXPECT_EQ(AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request),
               "PUT\n\n\n\n\n\n\n\n\n\n\n\n"
-              "x-ms-date:Sun, 06 Nov 1994 08:49:37 GMT\nx-ms-meta-a:1,2\nx-ms-version:2024-11-04\n"
+              "x-ms-date:Sun, 06 Nov 1994 08:49:37 GMT\nx-ms-meta-a:2\nx-ms-version:2024-11-04\n"
               "/account/cont/my%20dir%2Fblob\ncomp:metadata\nz:1,2");
 }
 
@@ -853,7 +853,7 @@ TEST(SharedKeyCanonicalizationTests, InternalWhitespaceRunsInHeaderValuesAreColl
     EXPECT_NE(toSign.find("x-ms-meta-k:a b c\n"), std::string::npos) << toSign;
 }
 
-TEST(SharedKeyCanonicalizationTests, StandardHeadersFillTheirSlotsCaseInsensitivelyAndFirstOneWins) {
+TEST(SharedKeyCanonicalizationTests, StandardHeadersFillTheirSlotsCaseInsensitivelyAndLastOneWins) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Put);
     request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/container/blob"});
@@ -865,7 +865,7 @@ TEST(SharedKeyCanonicalizationTests, StandardHeadersFillTheirSlotsCaseInsensitiv
     request.AddHeader(AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-a"}, AVEVA::HeaderValue{"1"}));
 
     const std::string toSign = AVEVA::AzureClient::Private::BuildSharedKeyStringToSign("account", request);
-    EXPECT_TRUE(toSign.starts_with("PUT\n\n\n\n\ntext/plain\n\n\n\"etag\"\n\nyesterday\nbytes=0-1\nx-ms-a:1\n"))
+    EXPECT_TRUE(toSign.starts_with("PUT\n\n\n\n\nignored\n\n\n\"etag\"\n\nyesterday\nbytes=0-1\nx-ms-a:1\n"))
         << toSign;
 }
 
