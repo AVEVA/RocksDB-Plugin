@@ -65,8 +65,10 @@ class HttpClientCore : public std::enable_shared_from_this<HttpClientCore> {
     /// Runs the request with the deadline attached. Throws operation_aborted when the deadline passes or the
     /// awaiting coroutine is cancelled before the request has started.
     /// </summary>
+    /// <param name="expired">Set to true once the deadline has passed, so a caller can tell a timeout from a cancel.</param>
     asio::awaitable<Outcome> RunWithDeadline(Route route, HttpRequest request, HttpRequestOptions options,
-                                             std::chrono::steady_clock::time_point deadline);
+                                             std::chrono::steady_clock::time_point deadline,
+                                             std::shared_ptr<bool> expired);
 
     /// <summary>
     /// Runs the request, and again after a transient failure when the options carry a retry policy. The
