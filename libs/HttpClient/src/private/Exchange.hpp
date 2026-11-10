@@ -9,13 +9,13 @@
 #include "Route.hpp"
 #include "StreamTypes.hpp"
 
+#include "AVEVA/HttpClient/Detail/Mailbox.hpp"
 #include "AVEVA/HttpClient/HttpClient.hpp"
 #include "AVEVA/HttpClient/HttpRequest.hpp"
 #include "AVEVA/HttpClient/HttpRequestOptions.hpp"
 #include "AVEVA/HttpClient/HttpResponse.hpp"
 
 #include <boost/asio/awaitable.hpp>
-#include <boost/asio/experimental/concurrent_channel.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ssl/context.hpp>
 #include <boost/beast/http/span_body.hpp>
@@ -37,10 +37,18 @@ using RequestMessage = boost::beast::http::message<true, RequestBody, ArenaField
 using ResolveResults = Tcp::resolver::results_type;
 
 /// <summary>
-/// Carries the outcome of a request's DNS lookup back to the request. The channel holds one value, so the lookup can
+/// What a DNS lookup produced: its own error code (distinct from the mailbox's receive status) and the endpoints.
+/// </summary>
+struct ResolveOutcome {
+    boost::system::error_code Error;
+    ResolveResults Results;
+};
+
+/// <summary>
+/// Carries the outcome of a request's DNS lookup back to the request. The mailbox keeps the value, so the lookup can
 /// publish from any thread without waiting for the request to be listening.
 /// </summary>
-using ResolveChannel = boost::asio::experimental::concurrent_channel<void(boost::system::error_code, ResolveResults)>;
+using ResolveChannel = Detail::Mailbox<ResolveOutcome>;
 
 /// <summary>
 /// Forwards a lookup's outcome into the waiting request's channel.
@@ -52,17 +60,23 @@ class ResolveWaiter {
 
     /// <summary>
     /// Delivers the outcome. If that fails (out of memory), the failure is reported and the channel is closed, which
-    /// wakes the request with an error instead of leaving it to its deadline.
+    /// wakes the request with an error instead of leaving it to its deadline. If even closing fails, the request is
+    /// left to its deadline.
     /// </summary>
     void operator()(boost::system::error_code error, const ResolveResults& results) const noexcept {
         try {
-            m_channel->try_send(error, results);
+            m_channel->Send(ResolveOutcome{error, results});
             return;
         } catch (const std::exception& failure) {
             DiagnosticsSink::Report(m_diagnostics, HttpDiagnosticKind::SwallowedException, HttpRequestPhase::Resolve,
                                     {}, {}, {}, failure.what());
         }
-        m_channel->close();
+        try {
+            m_channel->Close();
+        } catch (const std::exception& failure) {
+            DiagnosticsSink::Report(m_diagnostics, HttpDiagnosticKind::SwallowedException, HttpRequestPhase::Resolve,
+                                    {}, {}, {}, failure.what());
+        }
     }
 
   private:
