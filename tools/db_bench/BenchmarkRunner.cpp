@@ -11,6 +11,9 @@
 //   AVEVA_DB_BENCH_CLIENT_ID            (Service Principal auth)
 //   AVEVA_DB_BENCH_CLIENT_SECRET        (Service Principal auth)
 //
+// Optional: AVEVA_DB_BENCH_IO_THREADS sets how many threads run the io_context (default: the hardware thread count,
+// at least 2).
+//
 // All five variables are required; the tool exits with status 2 when one is missing.
 //
 // Pass RocksDB db_bench flags on the command line as usual. To route I/O
@@ -122,8 +125,20 @@ int Run(int argc, char** argv) {
 
     auto logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
 
+    // AVEVA_DB_BENCH_IO_THREADS overrides the io_context thread count, to test whether the shared pool limits throughput.
+    unsigned ioThreadCount = std::max(2U, std::thread::hardware_concurrency());
+    if (const auto requested = Env("AVEVA_DB_BENCH_IO_THREADS")) {
+        const auto parsed = std::strtoul(requested->c_str(), nullptr, 10);
+        if (parsed == 0 || parsed > 1024) {
+            std::cerr << "aveva_db_bench: AVEVA_DB_BENCH_IO_THREADS must be between 1 and 1024\n";
+            return 2;
+        }
+        ioThreadCount = static_cast<unsigned>(parsed);
+    }
+    std::cerr << "aveva_db_bench: running the io_context on " << ioThreadCount << " thread(s)\n";
+
     // Declared before the plugin objects so it is destroyed after them.
-    IoThreadPool ioThreads{std::max(2U, std::thread::hardware_concurrency())};
+    IoThreadPool ioThreads{ioThreadCount};
 
     rocksdb::ConfigOptions configOptions;
     rocksdb::Env* env = nullptr;
