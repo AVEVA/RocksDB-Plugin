@@ -39,6 +39,32 @@ this mode to check the build before you point the tool at Azure.
     --num=100000
 ```
 
+## Experimental scan followed by MultiGet
+
+Set `AVEVA_DB_BENCH_SCAN_BEFORE_MULTIREAD=2000` with
+`--benchmarks=multireadrandom --batch_size=2000 --multiread_batched=0 --async_io=0`
+to perform a fresh iterator scan before each vector-overload MultiGet.
+Only normal single-column-family Open is wrapped. The tool fails if the hook
+was enabled but never exercised. The default, with the variable unset, is unchanged.
+
+The scan starts at the batch's first random key and visits up to 2000 records,
+stopping at the end of the database. The iterator is released before fetching
+the original random batch. This models GraphDB's scan-then-fetch sequencing;
+it does not reproduce separate index/node records, ID mapping, authorization,
+filtering, or production request frequencies. One of the fetched keys also
+starts the scan. Use it as a synthetic sensitivity workload, not GraphDB parity.
+
+`SCAN_THEN_MULTIGET` reports actual query, scanned-record and fetched-key counts.
+Stock db_bench reports the fetched keys as operations; their elapsed time includes
+the scans. Divide the query count by benchmark seconds for query throughput.
+Do not compare this combined rate directly to point-only `multireadrandom`.
+
+The db-bench build enables LZ4 support. Use `--block_size=16384
+--compression_type=lz4` to match GraphDB's block and compression settings.
+These options do not rewrite existing SST files when reusing a database.
+Plugin log verbosity is controlled by `AVEVA_DB_BENCH_LOG_LEVEL`
+(`trace|debug|info|warning|error|fatal`, default `info`).
+
 ## Prerequisites for an Azure-backed run
 
 Gather these items before you start.
