@@ -25,6 +25,11 @@
 
 #include "ScanThenMultiGet.hpp"
 
+#if defined(AVEVA_ROCKSDB_WITH_CACHELIB)
+#include <AVEVA/RocksDB/Plugin/Core/CacheLibSecondaryCache.hpp>
+#include <rocksdb/utilities/object_registry.h>
+#endif
+
 #include <boost/log/core.hpp>
 #include <boost/log/expressions.hpp>
 #include <boost/log/sources/severity_logger.hpp>
@@ -74,6 +79,105 @@ bool ConfigureLogLevel(std::string* error) {
     return true;
 }
 
+#if defined(AVEVA_ROCKSDB_WITH_CACHELIB)
+template <typename T> T EnvOr(const char* name, T defaultValue) {
+    if (const auto value = Env(name)) {
+        size_t consumed = 0;
+        const auto parsed = std::stoull(*value, &consumed);
+        if (value->find_first_not_of("0123456789") != std::string::npos || consumed != value->size() ||
+            parsed > std::numeric_limits<T>::max()) {
+            throw std::invalid_argument(std::string(name) + " requires an unsigned integer in range");
+        }
+        return static_cast<T>(parsed);
+    }
+    return defaultValue;
+}
+
+bool EnvFlagOr(const char* name, bool defaultValue) {
+    if (const auto value = Env(name)) {
+        if (*value == "0" || *value == "false") {
+            return false;
+        }
+        if (*value == "1" || *value == "true") {
+            return true;
+        }
+        throw std::invalid_argument(std::string(name) + " requires 0|1|false|true");
+    }
+    return defaultValue;
+}
+
+// ObjectLibrary matches the full URI, including the scheme separator.
+constexpr const char* kCacheLibSecondaryCacheName = "aveva-cachelib-secondary-cache://";
+
+// Registering is safe without cache settings; the factory reads them on demand.
+void RegisterCacheLibSecondaryCache() {
+    using namespace AVEVA::RocksDB::Plugin::Core;
+    if (rocksdb::ObjectLibrary::Default()->FindFactory<rocksdb::SecondaryCache>(kCacheLibSecondaryCacheName)) {
+        return;
+    }
+    rocksdb::ObjectLibrary::Default()->AddFactory<rocksdb::SecondaryCache>(
+        kCacheLibSecondaryCacheName,
+        [](const std::string&, std::unique_ptr<rocksdb::SecondaryCache>* guard,
+           std::string* errmsg) -> rocksdb::SecondaryCache* {
+            try {
+                const auto cacheDir = Env("AVEVA_DB_BENCH_SECONDARY_CACHE_DIR");
+                if (!cacheDir) {
+                    throw std::invalid_argument("AVEVA_DB_BENCH_SECONDARY_CACHE_DIR must be set to use CacheLib");
+                }
+                SecondaryCacheOptions options;
+                options.backend = SecondaryCacheBackend::CacheLib;
+                options.cacheDir = *cacheDir;
+                const auto capacityMB = EnvOr<size_t>("AVEVA_DB_BENCH_SECONDARY_CACHE_CAPACITY_MB",
+                                                      SecondaryCacheOptions::kDefaultCapacity / (1024 * 1024));
+                if (capacityMB > std::numeric_limits<size_t>::max() / (1024 * 1024)) {
+                    throw std::invalid_argument("AVEVA_DB_BENCH_SECONDARY_CACHE_CAPACITY_MB is too large");
+                }
+                options.capacity = capacityMB * 1024 * 1024;
+                options.logger = std::make_shared<SecondaryCacheOptions::Logger>();
+                auto& cachelib = options.cachelib;
+                cachelib.regionSizeBytes =
+                    EnvOr<uint32_t>("AVEVA_DB_BENCH_CACHELIB_REGION_SIZE_BYTES", cachelib.regionSizeBytes);
+                cachelib.cleanRegions = EnvOr<uint32_t>("AVEVA_DB_BENCH_CACHELIB_CLEAN_REGIONS", cachelib.cleanRegions);
+                cachelib.blockSize = EnvOr<uint32_t>("AVEVA_DB_BENCH_CACHELIB_BLOCK_SIZE", cachelib.blockSize);
+                cachelib.readerThreads =
+                    EnvOr<uint32_t>("AVEVA_DB_BENCH_CACHELIB_READER_THREADS", cachelib.readerThreads);
+                cachelib.writerThreads =
+                    EnvOr<uint32_t>("AVEVA_DB_BENCH_CACHELIB_WRITER_THREADS", cachelib.writerThreads);
+                cachelib.requestOrderingShardsPower = EnvOr<uint32_t>(
+                    "AVEVA_DB_BENCH_CACHELIB_REQUEST_ORDERING_SHARDS_POWER", cachelib.requestOrderingShardsPower);
+                cachelib.maxParcelMemoryMB =
+                    EnvOr<uint64_t>("AVEVA_DB_BENCH_CACHELIB_MAX_PARCEL_MEMORY_MB", cachelib.maxParcelMemoryMB);
+                cachelib.dataChecksum = EnvFlagOr("AVEVA_DB_BENCH_CACHELIB_DATA_CHECKSUM", cachelib.dataChecksum);
+                cachelib.logCountersOnShutdown = EnvFlagOr("AVEVA_DB_BENCH_CACHELIB_LOG_COUNTERS", true);
+                if (const auto policy = Env("AVEVA_DB_BENCH_CACHELIB_EVICTION_POLICY")) {
+                    if (*policy == "lru") {
+                        cachelib.evictionPolicy = CacheLibSecondaryCacheOptions::EvictionPolicy::Lru;
+                    } else if (*policy == "fifo") {
+                        cachelib.evictionPolicy = CacheLibSecondaryCacheOptions::EvictionPolicy::Fifo;
+                    } else {
+                        throw std::invalid_argument("AVEVA_DB_BENCH_CACHELIB_EVICTION_POLICY must be fifo|lru");
+                    }
+                }
+                if (Env("AVEVA_DB_BENCH_CACHELIB_ADMISSION_WRITE_RATE_BYTES_PER_SEC")) {
+                    cachelib.admissionWriteRateBytesPerSec =
+                        EnvOr<uint64_t>("AVEVA_DB_BENCH_CACHELIB_ADMISSION_WRITE_RATE_BYTES_PER_SEC", 0);
+                }
+                if (const auto level = Env("AVEVA_DB_BENCH_CACHELIB_LOG_LEVEL")) {
+                    cachelib.cachelibLogLevel = *level;
+                }
+                if (const auto file = Env("AVEVA_DB_BENCH_CACHELIB_FILE_NAME")) {
+                    cachelib.fileName = *file;
+                }
+                *guard = std::make_unique<CacheLibSecondaryCache>(options);
+                return guard->get();
+            } catch (const std::exception& error) {
+                *errmsg = std::string("Failed to create CacheLib secondary cache: ") + error.what();
+                return nullptr;
+            }
+        });
+}
+#endif
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -113,10 +217,17 @@ int main(int argc, char** argv) {
     const auto fsUri = std::string{Plugin::Name} + container;
     const auto dbPath = StorageAccount::UniquePrefix(storageAccountUrl, container);
 
+#if defined(AVEVA_ROCKSDB_WITH_CACHELIB)
+    RegisterCacheLibSecondaryCache();
+#endif
     std::cerr << "aveva_db_bench: Azure plugin registered.\n"
               << "  Suggested flags:\n"
               << "    --fs_uri=" << fsUri << "\n"
               << "    --db=" << dbPath << "/<your-db-name>\n";
+#if defined(AVEVA_ROCKSDB_WITH_CACHELIB)
+    std::cerr << "  Optional secondary cache: --secondary_cache_uri=" << kCacheLibSecondaryCacheName
+              << "\n  Set AVEVA_DB_BENCH_SECONDARY_CACHE_DIR; see tools/db_bench/README.md for tuning.\n";
+#endif
 
     std::fflush(nullptr);
     std::cout.flush();

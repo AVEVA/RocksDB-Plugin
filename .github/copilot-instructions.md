@@ -18,7 +18,7 @@ Azure Blob Storage as a local filesystem.
 | Path | Purpose |
 |------|---------|
 | `src/AVEVA/RocksDB/Plugin/Azure/` | Azure Page Blob Filesystem plugin (blob storage integration, file read/write, directory ops, error translation) |
-| `src/AVEVA/RocksDB/Plugin/Core/` | Filesystem abstractions: local filesystem, file cache with LRU index, utilities |
+| `src/AVEVA/RocksDB/Plugin/Core/` | Filesystem abstractions: local filesystem, CacheLib secondary cache (Linux x64), file cache with LRU index, utilities |
 | `include/AVEVA/RocksDB/Plugin/` | Public C++ headers |
 | `tests/` | C++ test suites |
 | `infrastructure/` | Build and CI infrastructure |

@@ -188,6 +188,46 @@ keys only if it downloads them back from Azure.
 ```
 Check the `readrandom` result line for `(10000 of 10000 found)`.
 
+## Attaching CacheLib
+
+Linux x64 builds with `AVEVA_ROCKSDB_WITH_CACHELIB=ON` register
+`aveva-cachelib-secondary-cache://` with RocksDB's ObjectLibrary. The URI must
+include `://`. Builds without CacheLib do not register the URI.
+
+Set `AVEVA_DB_BENCH_SECONDARY_CACHE_DIR` to a local SSD directory and optionally
+`AVEVA_DB_BENCH_SECONDARY_CACHE_CAPACITY_MB` (default 512), then add
+`--secondary_cache_uri=aveva-cachelib-secondary-cache://` to your benchmark.
+The cache starts empty for each process; `[X5]` repeats within the same process
+retain it between rounds. Use a primary cache smaller than the read working set
+to exercise secondary lookups.
+
+The following environment variables use the defaults shown:
+
+| Variable (`AVEVA_DB_BENCH_CACHELIB_` prefix) | Default |
+|---|---|
+| `REGION_SIZE_BYTES` | 4194304 |
+| `CLEAN_REGIONS` | 1 |
+| `BLOCK_SIZE` | 4096 (Navy device alignment, not RocksDB SST block size) |
+| `READER_THREADS` / `WRITER_THREADS` | 4 / 4 |
+| `MAX_PARCEL_MEMORY_MB` | 32 |
+| `REQUEST_ORDERING_SHARDS_POWER` | 16 |
+| `EVICTION_POLICY` | fifo (`fifo` or `lru`) |
+| `DATA_CHECKSUM` | 1 |
+| `ADMISSION_WRITE_RATE_BYTES_PER_SEC` | unset (admit all inserts) |
+| `LOG_LEVEL` | WARN |
+| `FILE_NAME` | navy.cache |
+| `LOG_COUNTERS` | 1 |
+
+Ordering power 16 creates 65,536 slots, about 4.5 MiB on Linux x64; power 20
+restores Navy's upstream 72 MiB setting. Slots preserve same-key request ordering,
+not cache contents. Fewer slots can serialize unrelated requests.
+
+`CACHELIB_COUNTER name=value` lines expose Navy counters. Shutdown totals can be
+skipped by db_bench's early exit; cumulative progress samples every 4096 scheduled
+inserts are lower bounds, not final totals. Prefer RocksDB's final
+`rocksdb.secondary.cache.hits` for hit counts. A hit may come from a Navy region
+buffer or SSD; it is not proof of a physical disk read.
+
 ## Stats and histograms
 
 Add these flags to get latency percentiles and RocksDB's internal counters.

@@ -1,0 +1,69 @@
+diff --git a/cachelib/common/Utils.cpp b/cachelib/common/Utils.cpp
+index 12c1e4a..1073526 100644
+--- a/cachelib/common/Utils.cpp
++++ b/cachelib/common/Utils.cpp
+@@ -15,7 +15,6 @@
+  */
+ 
+ #include <dirent.h>
+-#include <folly/debugging/exception_tracer/ExceptionTracer.h>
+ #include <sys/mman.h>
+ #include <sys/resource.h>
+ #include <sys/stat.h>
+@@ -442,10 +441,8 @@ void setCgroupMemoryAdvising(CgroupMemAvailableFn provider) {
+ }
+ 
+ void printExceptionStackTraces() {
+-  auto exceptions = folly::exception_tracer::getCurrentExceptions();
+-  for (auto& exc : exceptions) {
+-    std::cerr << exc << std::endl;
+-  }
++  // folly's exception tracer is not part of the vcpkg folly build.
++  std::cerr << "exception stack traces are not available" << std::endl;
+ }
+ 
+ } // namespace util
+diff --git a/cachelib/navy/block_cache/CombinedEntryBlock.h b/cachelib/navy/block_cache/CombinedEntryBlock.h
+index 719dc78..d66b415 100644
+--- a/cachelib/navy/block_cache/CombinedEntryBlock.h
++++ b/cachelib/navy/block_cache/CombinedEntryBlock.h
+@@ -32,6 +32,11 @@ enum class CombinedEntryStatus : uint8_t {
+   kNotFound,
+ };
+ 
++// Lets fmt/XLOGF format the status (fmt >= 11 no longer formats enums implicitly).
++inline uint8_t format_as(CombinedEntryStatus status) {
++  return static_cast<uint8_t>(status);
++}
++
+ using EntryPos = uint16_t;
+ using EntryIdx = uint16_t;
+ using EntryRecord = Index::PackedItemRecord;
+diff --git a/cachelib/navy/common/Device.cpp b/cachelib/navy/common/Device.cpp
+index 20324ab..50739ea 100644
+--- a/cachelib/navy/common/Device.cpp
++++ b/cachelib/navy/common/Device.cpp
+@@ -917,7 +917,11 @@ std::unique_ptr<folly::AsyncBaseOp> AsyncIoContext::prepAsyncIo(IOOp& op) {
+     asyncOp = std::make_unique<folly::IoUringOp>();
+ #endif
+   } else {
++#if FOLLY_HAS_LIBAIO
+     asyncOp = std::make_unique<folly::AsyncIOOp>();
++#else
++    throw std::runtime_error("libaio support is not available");
++#endif
+   }
+ 
+   if (req.opType_ == OpType::READ) {
+@@ -1089,7 +1093,11 @@ IoContext* FileDevice::getIoContext() {
+ #endif
+     } else {
+       XDCHECK_EQ(ioEngine_, IoEngine::LibAio);
++#if FOLLY_HAS_LIBAIO
+       asyncBase = std::make_unique<folly::AsyncIO>(qDepthPerContext_, pollMode);
++#else
++      throw std::runtime_error("libaio support is not available");
++#endif
+     }
+ 
+     auto idx = incrementalIdx_++;

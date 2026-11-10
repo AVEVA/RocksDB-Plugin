@@ -1,5 +1,6 @@
 {
   "overlay-ports": [
+    "./infrastructure/vcpkg/ports",
     "./infrastructure/vcpkg-overlays/rocksdb"
   ],
   "registries": [
