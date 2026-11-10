@@ -23,6 +23,10 @@
 #include <AVEVA/RocksDB/Plugin/Azure/Models/ServicePrincipalStorageInfo.hpp>
 #include <AVEVA/RocksDB/Plugin/Azure/Plugin.hpp>
 
+#include "ScanThenMultiGet.hpp"
+
+#include <boost/log/core.hpp>
+#include <boost/log/expressions.hpp>
 #include <boost/log/sources/severity_logger.hpp>
 #include <boost/log/trivial.hpp>
 #include <rocksdb/convenience.h>
@@ -31,8 +35,10 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 
 namespace {
@@ -53,6 +59,21 @@ std::string Require(const char* name, const std::optional<std::string>& value) {
     return *value;
 }
 
+// Debug logging adds synchronous I/O overhead to write-heavy benchmarks.
+bool ConfigureLogLevel(std::string* error) {
+    namespace trivial = boost::log::trivial;
+    trivial::severity_level level = trivial::info;
+    if (const auto value = Env("AVEVA_DB_BENCH_LOG_LEVEL")) {
+        if (!trivial::from_string(value->c_str(), value->size(), level)) {
+            *error =
+                "AVEVA_DB_BENCH_LOG_LEVEL must be one of trace|debug|info|warning|error|fatal, got '" + *value + "'";
+            return false;
+        }
+    }
+    boost::log::core::get()->set_filter(trivial::severity >= level);
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -60,22 +81,23 @@ int main(int argc, char** argv) {
     using AVEVA::RocksDB::Plugin::Azure::Impl::StorageAccount;
     using AVEVA::RocksDB::Plugin::Azure::Models::ServicePrincipalStorageInfo;
 
-    const auto storageAccountUrl = Require("AVEVA_DB_BENCH_STORAGE_ACCOUNT_URL", Env("AVEVA_DB_BENCH_STORAGE_ACCOUNT_URL"));
-    const auto container    = Require("AVEVA_DB_BENCH_CONTAINER",     Env("AVEVA_DB_BENCH_CONTAINER"));
-    const auto tenantId     = Require("AVEVA_DB_BENCH_TENANT_ID",     Env("AVEVA_DB_BENCH_TENANT_ID"));
-    const auto clientId     = Require("AVEVA_DB_BENCH_CLIENT_ID",     Env("AVEVA_DB_BENCH_CLIENT_ID"));
+    const auto storageAccountUrl =
+        Require("AVEVA_DB_BENCH_STORAGE_ACCOUNT_URL", Env("AVEVA_DB_BENCH_STORAGE_ACCOUNT_URL"));
+    const auto container = Require("AVEVA_DB_BENCH_CONTAINER", Env("AVEVA_DB_BENCH_CONTAINER"));
+    const auto tenantId = Require("AVEVA_DB_BENCH_TENANT_ID", Env("AVEVA_DB_BENCH_TENANT_ID"));
+    const auto clientId = Require("AVEVA_DB_BENCH_CLIENT_ID", Env("AVEVA_DB_BENCH_CLIENT_ID"));
     const auto clientSecret = Require("AVEVA_DB_BENCH_CLIENT_SECRET", Env("AVEVA_DB_BENCH_CLIENT_SECRET"));
 
+    if (std::string error; !ConfigureLogLevel(&error)) {
+        std::cerr << "aveva_db_bench: " << error << "\n";
+        return 2;
+    }
+
     ServicePrincipalStorageInfo primary{
-        container,
-        storageAccountUrl,
-        clientId,
-        clientSecret,
-        tenantId,
+        container, storageAccountUrl, clientId, clientSecret, tenantId,
     };
 
-    auto logger = std::make_shared<
-        boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
+    auto logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
 
     rocksdb::ConfigOptions configOptions;
     rocksdb::Env* env = nullptr;
@@ -88,7 +110,7 @@ int main(int argc, char** argv) {
         return 3;
     }
 
-    const auto fsUri  = std::string{Plugin::Name} + container;
+    const auto fsUri = std::string{Plugin::Name} + container;
     const auto dbPath = StorageAccount::UniquePrefix(storageAccountUrl, container);
 
     std::cerr << "aveva_db_bench: Azure plugin registered.\n"
@@ -98,11 +120,45 @@ int main(int argc, char** argv) {
 
     std::fflush(nullptr);
     std::cout.flush();
-    const auto rc = rocksdb::db_bench_tool(argc, argv);
+    int rc;
+    if (const auto scanLength = Env("AVEVA_DB_BENCH_SCAN_BEFORE_MULTIREAD")) {
+        size_t length = 0;
+        try {
+            size_t consumed = 0;
+            const auto parsed = std::stoull(*scanLength, &consumed);
+            if (scanLength->find_first_not_of("0123456789") != std::string::npos || consumed != scanLength->size() ||
+                parsed > std::numeric_limits<size_t>::max()) {
+                throw std::invalid_argument("expected a non-negative integer");
+            }
+            length = static_cast<size_t>(parsed);
+        } catch (const std::exception& error) {
+            std::cerr << "aveva_db_bench: invalid AVEVA_DB_BENCH_SCAN_BEFORE_MULTIREAD: " << error.what() << "\n";
+            return 2;
+        }
+        if (length > 0) {
+            AVEVA::RocksDB::Plugin::Bench::ScanThenMultiGetHooks hooks(length);
+            rc = rocksdb::db_bench_tool(argc, argv, hooks);
+            std::cout << "SCAN_THEN_MULTIGET queries=" << hooks.counters.queries.load()
+                      << " scanned_records=" << hooks.counters.scannedRecords.load()
+                      << " scanned_bytes=" << hooks.counters.scannedBytes.load()
+                      << " fetched_keys=" << hooks.counters.fetchedKeys.load()
+                      << " found_keys=" << hooks.counters.foundKeys.load() << "\n";
+            if (rc == 0 && hooks.counters.queries == 0) {
+                std::cerr << "aveva_db_bench: scan-before-MultiGet hook was not exercised; use normal Open and "
+                             "--benchmarks=multireadrandom --multiread_batched=0\n";
+                rc = 2;
+            }
+        } else {
+            rc = rocksdb::db_bench_tool(argc, argv);
+        }
+    } else {
+        rc = rocksdb::db_bench_tool(argc, argv);
+    }
 
     // Skip C++ static destructors: boost.log tears down thread-local storage
     // before the plugin's background threads exit, which triggers SIGABRT
     // (exit 134) after the benchmark has already finished.
+    boost::log::core::get()->flush();
     std::fflush(nullptr);
     std::cout.flush();
     std::_Exit(rc);

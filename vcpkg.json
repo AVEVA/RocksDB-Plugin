@@ -47,7 +47,8 @@
         {
           "name": "rocksdb",
           "features": [
-            "db-bench"
+            "db-bench",
+            "lz4"
           ]
         }
       ]
