@@ -16,6 +16,7 @@
 #include <boost/asio/dispatch.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>
+#include <boost/asio/strand.hpp>
 
 #include <cassert>
 #include <cstdint>
@@ -46,15 +47,23 @@ class CancelState {
   public:
     [[nodiscard]] boost::asio::cancellation_slot Slot() noexcept { return m_signal.slot(); }
 
-    void Arm(std::stop_token token, const std::shared_ptr<CancelState>& self) {
+    /// <summary>
+    /// A cancellation_signal is not thread-safe: emitting races with the coroutine clearing its slot when it finishes,
+    /// which frees the handler the emission is calling. The stop callback runs on whatever thread requests the stop,
+    /// so it only posts the emission to `strand`, the strand the operation itself runs on.
+    /// </summary>
+    template <class Strand>
+    void Arm(std::stop_token token, const std::shared_ptr<CancelState>& self, Strand strand) {
         const std::lock_guard lock(m_mutex);
         if (m_lifecycle == Lifecycle::Live) {
             // Weak: the completion handler owns the state, so a registration that outlives it (an io_context stopped
             // before the operation completed) must not keep it alive through a cycle.
-            m_registration.emplace(std::move(token), [weak = std::weak_ptr<CancelState>(self)] {
-                if (const auto state = weak.lock()) {
-                    state->m_signal.emit(boost::asio::cancellation_type::terminal);
-                }
+            m_registration.emplace(std::move(token), [weak = std::weak_ptr<CancelState>(self), strand] {
+                boost::asio::post(strand, [weak] {
+                    if (const auto state = weak.lock()) {
+                        state->m_signal.emit(boost::asio::cancellation_type::terminal);
+                    }
+                });
             });
         }
     }
@@ -161,9 +170,11 @@ template <class Executor> void ThrowIfRunningOn(const Executor& executor) {
 template <class Executor, class Awaitable, class Done>
 void StartOperation(const Executor& executor, Awaitable operation, std::stop_token stopToken, Done done) {
     auto state = std::make_shared<Detail::CancelState>();
-    // Binding the executor makes the co_spawn cancellation handler dispatch the emission onto it, so a stop request
-    // never runs the coroutine's cancellation handlers on the stopping thread.
-    boost::asio::co_spawn(executor, std::move(operation),
+    // The operation runs on its own strand so a stop request, which arrives on an arbitrary thread, can emit on the
+    // coroutine's cancellation slot without racing the coroutine finishing on an io thread. The cancellation handler
+    // co_spawn installs then dispatches onto the strand too, so it never runs on the stopping thread.
+    const auto strand = boost::asio::make_strand(executor);
+    boost::asio::co_spawn(strand, std::move(operation),
                           boost::asio::bind_cancellation_slot(
                               state->Slot(), boost::asio::bind_executor(
                                                  executor, [state, executor, done = std::move(done)](
@@ -176,7 +187,7 @@ void StartOperation(const Executor& executor, Awaitable operation, std::stop_tok
                                                      done(std::move(error), std::move(result)...);
                                                  })));
     if (stopToken.stop_possible()) {
-        state->Arm(std::move(stopToken), state);
+        state->Arm(std::move(stopToken), state, strand);
     }
 }
 
