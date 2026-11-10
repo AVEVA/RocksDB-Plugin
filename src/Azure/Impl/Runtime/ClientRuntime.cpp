@@ -32,7 +32,7 @@
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 namespace {
-constexpr ::AVEVA::ConnectionCount MaxIdleConnectionsPerHost{64};
+constexpr ::AVEVA::ConnectionCount MaxIdleConnectionsPerHost{128};
 
 #ifdef _WIN32
 enum class EnvironmentVariable : std::uint8_t { Unset, Set };
