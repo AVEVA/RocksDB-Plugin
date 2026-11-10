@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 #pragma once
+#include "AVEVA/HttpClient/Detail/Mailbox.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/Units.hpp"
 
 #include <boost/asio/any_io_executor.hpp>
@@ -9,7 +10,6 @@
 #include <boost/asio/cancellation_type.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <boost/asio/experimental/concurrent_channel.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/system/error_code.hpp>
@@ -19,6 +19,7 @@
 #include <memory>
 #include <mutex>
 #include <utility>
+#include <variant>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
 struct ConcurrencyLimitTag;
@@ -43,13 +44,13 @@ using ConcurrencyLimit = Core::StrongInteger<ConcurrencyLimitTag, size_t>;
 /// </code>
 /// </summary>
 class TaskGroup {
-    using Channel = boost::asio::experimental::concurrent_channel<void(boost::system::error_code)>;
+    using Channel = ::AVEVA::Detail::Mailbox<std::monostate>;
 
-    // Shared with the children: the last child may still be inside try_send when the parent resumes and leaves.
+    // Shared with the children: the last child may still be inside Send when the parent resumes and leaves.
     struct State {
-        State(const boost::asio::any_io_executor& executor, const size_t limit) : Done(executor, limit) {}
+        explicit State(const boost::asio::any_io_executor& executor) : Done(executor) {}
 
-        Channel Done; // one message per finished child; capacity is the limit, so a child never waits to report
+        Channel Done; // one message per finished child; a child never waits to report
         std::mutex Mutex;
         std::exception_ptr Failure; // the first failure of any child
 
@@ -77,18 +78,20 @@ class TaskGroup {
         } catch (...) {
             state->Fail(std::current_exception());
         }
-        state->Done.try_send(boost::system::error_code{});
+        // Allocation failure here escapes the detached child and ends the process: the parent would otherwise wait
+        // forever for a signal that can no longer arrive, with children still using its frame.
+        state->Done.Send({});
     }
 
     boost::asio::awaitable<void> WaitForOne() {
-        co_await m_state->Done.async_receive(boost::asio::use_awaitable);
+        co_await m_state->Done.AsyncReceive(boost::asio::use_awaitable);
         --m_running;
     }
 
   public:
     TaskGroup(boost::asio::any_io_executor executor, const ConcurrencyLimit limit)
         : m_executor(std::move(executor)), m_limit(limit.Value() == 0 ? 1 : limit.Value()),
-          m_state(std::make_shared<State>(m_executor, m_limit)) {}
+          m_state(std::make_shared<State>(m_executor)) {}
     TaskGroup(const TaskGroup&) = delete;
     TaskGroup& operator=(const TaskGroup&) = delete;
 

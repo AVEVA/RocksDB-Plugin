@@ -14,9 +14,9 @@
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 
 #include <AVEVA/AzureClient/AzureRequestOptions.hpp>
+#include <AVEVA/HttpClient/Detail/Mailbox.hpp>
 
 #include <boost/asio/experimental/awaitable_operators.hpp>
-#include <boost/asio/experimental/concurrent_channel.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/container/static_vector.hpp>
@@ -40,6 +40,7 @@
 #include <system_error>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Azure::Impl {
@@ -179,9 +180,12 @@ class BasicReadableFileImpl : public std::enable_shared_from_this<BasicReadableF
         std::string ETag;
         uint64_t Epoch = 0;
     };
-    // Each waiter owns a one-slot channel the shared refresh completes, so a waiter that timed out never blocks it.
-    using MetadataChannel = boost::asio::experimental::concurrent_channel<void(boost::system::error_code,
-                                                                               std::exception_ptr, FetchedMetadata)>;
+    // Each waiter owns a mailbox the shared refresh completes, so a waiter that timed out never blocks it.
+    struct MetadataOutcome {
+        std::exception_ptr Error;
+        FetchedMetadata Fetched;
+    };
+    using MetadataChannel = ::AVEVA::Detail::Mailbox<MetadataOutcome>;
     struct MetadataRefreshState {
         std::mutex Mutex;
         ReadableFileDetail::MetadataRefreshProgress Progress = ReadableFileDetail::MetadataRefreshProgress::Idle;
@@ -204,7 +208,7 @@ class BasicReadableFileImpl : public std::enable_shared_from_this<BasicReadableF
     TryReadFromPrefetch(int64_t offset, int64_t bytesToRead, char* buffer, ReadableFileDetail::PartialRead partial,
                         ReadableFileDetail::SlotRetirement retirement) const;
     // One-shot signal a read waits on until the prefetch it needs settles.
-    using PrefetchSettledChannel = boost::asio::experimental::concurrent_channel<void(boost::system::error_code)>;
+    using PrefetchSettledChannel = ::AVEVA::Detail::Mailbox<std::monostate>;
     // Waits (bounded by PrefetchWaitTimeout) for the pending prefetch covering `offset`, if there is one.
     [[nodiscard]] BlobOperations::Task<void> WaitForPrefetchAsync(int64_t offset) const;
     void ClearPrefetch() const;
@@ -468,7 +472,7 @@ BasicReadableFileImpl<TBlob>::RandomReadFrom(const std::shared_ptr<const BasicRe
 template <typename TBlob>
 BlobOperations::Task<void> BasicReadableFileImpl<TBlob>::WaitForPrefetchAsync(const int64_t offset) const {
     const auto executor = co_await boost::asio::this_coro::executor;
-    auto settled = std::make_shared<PrefetchSettledChannel>(executor, 1);
+    auto settled = std::make_shared<PrefetchSettledChannel>(executor);
     auto registration = ReadableFileDetail::WaiterRegistration::None;
     try {
         std::scoped_lock lock(m_prefetch.Mutex);
@@ -477,7 +481,7 @@ BlobOperations::Task<void> BasicReadableFileImpl<TBlob>::WaitForPrefetchAsync(co
                    offset >= candidate.Offset && offset < candidate.Offset + candidate.Length;
         });
         if (slot != m_prefetch.Slots.end()) {
-            std::move_only_function<void()> wake = [settled] { settled->try_send(boost::system::error_code{}); };
+            std::move_only_function<void()> wake = [settled] { settled->Send({}); };
             m_prefetch.AddWaiter(slot->Id, wake);
             registration = ReadableFileDetail::WaiterRegistration::Registered;
         }
@@ -491,7 +495,7 @@ BlobOperations::Task<void> BasicReadableFileImpl<TBlob>::WaitForPrefetchAsync(co
     using namespace boost::asio::experimental::awaitable_operators;
     boost::asio::steady_timer timer(executor, Configuration::PrefetchWaitTimeout);
     const auto outcome =
-        co_await (settled->async_receive(boost::asio::use_awaitable) || timer.async_wait(boost::asio::use_awaitable));
+        co_await (settled->AsyncReceive(boost::asio::use_awaitable) || timer.async_wait(boost::asio::use_awaitable));
     if (outcome.index() != 0) {
         BOOST_LOG_SEV(*m_h.Logger, boost::log::trivial::debug)
             << "Timed out waiting for a prefetch of '" << m_h.Name << "'; falling back to a download";
@@ -959,14 +963,14 @@ template <typename TBlob>
 BlobOperations::Task<typename BasicReadableFileImpl<TBlob>::FetchedMetadata>
 BasicReadableFileImpl<TBlob>::FetchMetadataAsync(std::shared_ptr<const BasicReadableFileImpl<TBlob>> file) {
     const auto executor = co_await boost::asio::this_coro::executor;
-    auto waiter = std::make_shared<MetadataChannel>(executor, 1);
+    auto waiter = std::make_shared<MetadataChannel>(executor);
     JoinMetadataRefresh(file, waiter);
 
-    auto [error, fetched] = co_await waiter->async_receive(boost::asio::use_awaitable);
+    auto [error, fetched] = co_await waiter->AsyncReceive(boost::asio::use_awaitable);
     if (error) {
         std::rethrow_exception(std::move(error));
     }
-    co_return fetched;
+    co_return std::move(fetched);
 }
 
 // A joiner may receive metadata fetched slightly before it asked; if that is already stale its read fails the ETag
@@ -1016,8 +1020,12 @@ void BasicReadableFileImpl<TBlob>::CompleteMetadataRefresh(std::shared_ptr<const
     const auto logger = file->m_h.Logger;
     file.reset();
     for (const auto& waiter : waiters) {
-        if (!waiter->try_send(boost::system::error_code{}, error, fetched) && logger) {
-            BOOST_LOG_SEV(*logger, boost::log::trivial::error) << "Metadata refresh waiter failed";
+        try {
+            waiter->Send(MetadataOutcome{error, fetched});
+        } catch (...) {
+            if (logger) {
+                BOOST_LOG_SEV(*logger, boost::log::trivial::error) << "Metadata refresh waiter failed";
+            }
         }
     }
 }

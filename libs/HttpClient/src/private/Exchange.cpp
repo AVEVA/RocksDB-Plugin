@@ -211,7 +211,7 @@ template <typename Stream> asio::awaitable<std::expected<ResolveResults, HttpFai
     m_phase = HttpRequestPhase::Resolve;
     const auto executor = m_env.context.get_executor();
 
-    const auto outcome = std::make_shared<ResolveChannel>(executor, 1);
+    const auto outcome = std::make_shared<ResolveChannel>(executor);
     auto resolver = std::make_shared<Tcp::resolver>(executor);
     auto& lookup = *resolver;
     lookup.async_resolve(m_key.host, m_key.service,
@@ -220,19 +220,19 @@ template <typename Stream> asio::awaitable<std::expected<ResolveResults, HttpFai
                              waiter(error, results);
                          });
 
-    const auto [error, results] = co_await outcome->async_receive(Await);
-    if (error == asio::experimental::error::channel_cancelled) {
+    const auto [receiveError, resolved] = co_await outcome->AsyncReceive(Await);
+    if (receiveError == asio::error::operation_aborted) {
         // This request's own deadline or cancellation fired while it waited for the lookup, not a failure of the
         // lookup itself; let it unwind as cancellation instead of being reported as ResolveFailed.
         ThrowIfAborted(asio::error::operation_aborted);
     }
-    if (error == asio::experimental::error::channel_closed) {
+    if (receiveError == asio::error::shut_down) {
         co_return std::unexpected(HttpFailure{std::make_error_code(std::errc::not_enough_memory)});
     }
-    if (error) {
-        co_return std::unexpected(HttpFailure{HttpClientError::ResolveFailed, TransportCause{error}});
+    if (resolved.Error) {
+        co_return std::unexpected(HttpFailure{HttpClientError::ResolveFailed, TransportCause{resolved.Error}});
     }
-    co_return results;
+    co_return resolved.Results;
 }
 template <typename Stream> asio::awaitable<std::optional<HttpFailure>> Exchange<Stream>::Connect() {
     const auto resolved = co_await Resolve();

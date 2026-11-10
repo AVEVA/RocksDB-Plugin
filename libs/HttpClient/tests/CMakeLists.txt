@@ -22,6 +22,7 @@ add_executable(aveva-http-client-tests
 	HttpClientTestHelpers.cpp
 	HttpClientTlsTests.cpp
 	IdleSweeperTests.cpp
+	MailboxTests.cpp
 	OptionValidationTests.cpp
 )
 # ConnectionPoolTests.cpp exercises the internal pool directly, so the tests need the private

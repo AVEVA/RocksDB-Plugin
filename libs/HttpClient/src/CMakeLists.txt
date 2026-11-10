@@ -27,6 +27,7 @@ target_sources(aveva-http-client
         "${base-include-dir}/AVEVA/HttpClient/HttpBody.hpp"
         "${base-include-dir}/AVEVA/HttpClient/HttpHeader.hpp"
         "${base-include-dir}/AVEVA/HttpClient/Detail/Lifetime.hpp"
+        "${base-include-dir}/AVEVA/HttpClient/Detail/Mailbox.hpp"
         "${base-include-dir}/AVEVA/HttpClient/HttpClient.hpp"
         "${base-include-dir}/AVEVA/HttpClient/HttpClientError.hpp"
         "${base-include-dir}/AVEVA/HttpClient/HttpClientOptions.hpp"
