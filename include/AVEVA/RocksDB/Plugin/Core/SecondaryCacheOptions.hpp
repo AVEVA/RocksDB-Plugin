@@ -1,0 +1,117 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
+#pragma once
+
+#include <boost/log/sources/severity_logger.hpp>
+#include <boost/log/trivial.hpp>
+
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <memory>
+#include <optional>
+#include <string>
+
+namespace AVEVA::RocksDB::Plugin::Core {
+/// <summary>
+/// Selects the secondary cache implementation created by <c>CreateSecondaryCache</c>.
+/// </summary>
+enum class SecondaryCacheBackend {
+    /// <summary>CacheLib when available; construction fails when the build excludes it.</summary>
+    Default,
+    /// <summary><c>CacheLibSecondaryCache</c>: CacheLib Navy BlockCache on a single cache file.</summary>
+    CacheLib,
+};
+
+/// <summary>
+/// Tuning knobs for the CacheLib (Navy) secondary cache. The defaults minimize DRAM
+/// because RocksDB's block cache already provides the in-memory tier.
+/// Region buffers reserve <c>2 * cleanRegions * regionSizeBytes</c> bytes.
+/// Request-ordering bookkeeping uses about <c>72 * 2^requestOrderingShardsPower</c>
+/// bytes on Linux x64 (4.5 MiB by default). Indexes, thread stacks and queued
+/// inserts consume additional RAM; maxParcelMemoryMB limits pending insert bytes,
+/// not total RAM, and is not an upfront reservation.
+/// I/O is synchronous (pread/pwrite) on Navy's reader and writer thread pools.
+/// </summary>
+struct CacheLibSecondaryCacheOptions {
+    enum class EvictionPolicy {
+        /// <summary>Region FIFO; no per-access DRAM bookkeeping.</summary>
+        Fifo,
+        /// <summary>Region LRU; tracks region access recency.</summary>
+        Lru,
+    };
+
+    /// <summary>Size of a Navy region; also the upper bound for a single entry.</summary>
+    uint32_t regionSizeBytes = 4U * 1024 * 1024;
+
+    /// <summary>Number of clean regions kept ready for writes.</summary>
+    uint32_t cleanRegions = 1;
+
+    /// <summary>Device I/O alignment/block size.</summary>
+    uint32_t blockSize = 4096;
+
+    /// <summary>Threads serving lookups; bounds concurrent SSD reads.</summary>
+    uint32_t readerThreads = 4;
+
+    /// <summary>Threads applying inserts and removes.</summary>
+    uint32_t writerThreads = 4;
+
+    /// <summary>Upper bound for bytes of pending (not yet written) inserts; excess inserts are dropped.</summary>
+    uint64_t maxParcelMemoryMB = 32;
+
+    EvictionPolicy evictionPolicy = EvictionPolicy::Fifo;
+
+    /// <summary>Store and verify a checksum for each entry.</summary>
+    bool dataChecksum = true;
+
+    /// <summary>
+    /// When set, enables Navy's dynamic random admission policy with this target
+    /// write rate (bytes/second) to bound SSD wear. When unset every insert is admitted.
+    /// </summary>
+    std::optional<uint64_t> admissionWriteRateBytesPerSec;
+
+    /// <summary>Minimum folly log level for CacheLib internals (e.g. "WARN", "INFO", "ERR").</summary>
+    std::string cachelibLogLevel = "WARN";
+
+    /// <summary>Name of the cache file created inside the cache directory.</summary>
+    std::string fileName = "navy.cache";
+
+    /// <summary>
+    /// When true, every Navy counter (hits, inserts, bytes written to the device, ...) is logged at info
+    /// level as <c>CACHELIB_COUNTER name=value</c> when the cache is destroyed. Intended for benchmarks,
+    /// since the cache is reset on every open and the totals therefore cover one DB session.
+    /// </summary>
+    bool logCountersOnShutdown = false;
+
+    /// <summary>
+    /// Log2 of the request-ordering slot count (1-20). Fewer slots save fixed RAM
+    /// but can serialize unrelated requests. 16 uses 65,536 slots; 20 restores
+    /// Navy's upstream default of 1,048,576 slots (about 72 MiB of bookkeeping).
+    /// </summary>
+    uint32_t requestOrderingShardsPower = 16;
+};
+
+/// <summary>
+/// Options for <c>CreateSecondaryCache</c>. Common fields apply to every backend; the
+/// nested <c>cachelib</c> block applies only to the CacheLib backend.
+/// </summary>
+struct SecondaryCacheOptions {
+    using Logger = boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>;
+
+    static constexpr size_t kDefaultCapacity = 512ULL * 1024 * 1024; // 512 MiB
+
+    SecondaryCacheBackend backend = SecondaryCacheBackend::Default;
+
+    /// <summary>Directory owned by the cache. Previous cache contents are discarded on open.</summary>
+    std::filesystem::path cacheDir;
+
+    /// <summary>Maximum number of bytes stored on disk.</summary>
+    size_t capacity = kDefaultCapacity;
+
+    /// <summary>Required logger.</summary>
+    std::shared_ptr<Logger> logger;
+
+    CacheLibSecondaryCacheOptions cachelib;
+};
+} // namespace AVEVA::RocksDB::Plugin::Core

@@ -1,0 +1,224 @@
+diff --git a/cachelib/shm/NumaShim.h b/cachelib/shm/NumaShim.h
+new file mode 100644
+index 0000000..c2d73ec
+--- /dev/null
++++ b/cachelib/shm/NumaShim.h
+@@ -0,0 +1,176 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++// Header-only replacement for the libnuma subset used by cachelib/shm.
++// Avoids linking the LGPL libnuma. Memory policy calls go straight to the
++// kernel via syscall(2), which is what libnuma does as well.
++
++#include <linux/mempolicy.h>
++#include <sys/syscall.h>
++#include <unistd.h>
++
++#include <cstdlib>
++#include <cstring>
++#include <string>
++
++struct bitmask {
++  unsigned long size; // number of bits
++  unsigned long* maskp;
++};
++
++namespace facebook::cachelib::numa_shim {
++inline constexpr unsigned long kMaxNodes = 1024;
++inline constexpr unsigned long kBitsPerLong = 8 * sizeof(unsigned long);
++
++inline bitmask* allocate(unsigned long nbits) {
++  auto* bmp = static_cast<bitmask*>(std::calloc(1, sizeof(bitmask)));
++  if (bmp == nullptr) {
++    return nullptr;
++  }
++  bmp->size = nbits;
++  bmp->maskp = static_cast<unsigned long*>(
++      std::calloc((nbits + kBitsPerLong - 1) / kBitsPerLong,
++                  sizeof(unsigned long)));
++  if (bmp->maskp == nullptr) {
++    std::free(bmp);
++    return nullptr;
++  }
++  return bmp;
++}
++
++inline bitmask* noNodes() {
++  static bitmask* const empty = allocate(kMaxNodes);
++  return empty;
++}
++} // namespace facebook::cachelib::numa_shim
++
++#define numa_no_nodes_ptr (::facebook::cachelib::numa_shim::noNodes())
++
++inline bitmask* numa_allocate_nodemask() {
++  return ::facebook::cachelib::numa_shim::allocate(
++      ::facebook::cachelib::numa_shim::kMaxNodes);
++}
++
++inline void numa_bitmask_free(bitmask* bmp) {
++  if (bmp != nullptr) {
++    std::free(bmp->maskp);
++    std::free(bmp);
++  }
++}
++
++inline bitmask* numa_bitmask_setbit(bitmask* bmp, unsigned int n) {
++  constexpr auto bits = ::facebook::cachelib::numa_shim::kBitsPerLong;
++  if (n < bmp->size) {
++    bmp->maskp[n / bits] |= 1UL << (n % bits);
++  }
++  return bmp;
++}
++
++inline int numa_bitmask_equal(const bitmask* a, const bitmask* b) {
++  constexpr auto bits = ::facebook::cachelib::numa_shim::kBitsPerLong;
++  const unsigned long n = a->size > b->size ? a->size : b->size;
++  for (unsigned long i = 0; i < n; ++i) {
++    const bool x = i < a->size && ((a->maskp[i / bits] >> (i % bits)) & 1UL);
++    const bool y = i < b->size && ((b->maskp[i / bits] >> (i % bits)) & 1UL);
++    if (x != y) {
++      return 0;
++    }
++  }
++  return 1;
++}
++
++// Accepts "all" or a comma separated list of node numbers and ranges (a-b).
++inline void copy_bitmask_to_bitmask(const bitmask* from, bitmask* to) {
++  constexpr auto bits = ::facebook::cachelib::numa_shim::kBitsPerLong;
++  const unsigned long fromLongs = (from->size + bits - 1) / bits;
++  const unsigned long toLongs = (to->size + bits - 1) / bits;
++  for (unsigned long i = 0; i < toLongs; ++i) {
++    to->maskp[i] = i < fromLongs ? from->maskp[i] : 0UL;
++  }
++}
++
++inline bitmask* numa_parse_nodestring_all(const char* str) {
++  bitmask* mask = numa_allocate_nodemask();
++  if (mask == nullptr || str == nullptr) {
++    numa_bitmask_free(mask);
++    return nullptr;
++  }
++  if (std::strcmp(str, "all") == 0) {
++    for (unsigned int i = 0; i < mask->size; ++i) {
++      numa_bitmask_setbit(mask, i);
++    }
++    return mask;
++  }
++  const char* p = str;
++  while (*p != '\0') {
++    char* end = nullptr;
++    const unsigned long lo = std::strtoul(p, &end, 10);
++    if (end == p) {
++      numa_bitmask_free(mask);
++      return nullptr;
++    }
++    unsigned long hi = lo;
++    p = end;
++    if (*p == '-') {
++      ++p;
++      hi = std::strtoul(p, &end, 10);
++      if (end == p || hi < lo) {
++        numa_bitmask_free(mask);
++        return nullptr;
++      }
++      p = end;
++    }
++    if (hi >= mask->size) {
++      numa_bitmask_free(mask);
++      return nullptr;
++    }
++    for (unsigned long i = lo; i <= hi; ++i) {
++      numa_bitmask_setbit(mask, static_cast<unsigned int>(i));
++    }
++    if (*p == ',') {
++      ++p;
++    } else if (*p != '\0') {
++      numa_bitmask_free(mask);
++      return nullptr;
++    }
++  }
++  return mask;
++}
++
++inline long mbind(void* addr,
++                  unsigned long len,
++                  int mode,
++                  const unsigned long* nodemask,
++                  unsigned long maxnode,
++                  unsigned flags) {
++  return ::syscall(SYS_mbind, addr, len, mode, nodemask, maxnode, flags);
++}
++
++inline long set_mempolicy(int mode,
++                          const unsigned long* nodemask,
++                          unsigned long maxnode) {
++  return ::syscall(SYS_set_mempolicy, mode, nodemask, maxnode);
++}
++
++inline long get_mempolicy(int* mode,
++                          unsigned long* nodemask,
++                          unsigned long maxnode,
++                          void* addr,
++                          unsigned long flags) {
++  return ::syscall(SYS_get_mempolicy, mode, nodemask, maxnode, addr, flags);
++}
+diff --git a/cachelib/shm/PosixShmSegment.cpp b/cachelib/shm/PosixShmSegment.cpp
+index d78be96..1bf1bc0 100644
+--- a/cachelib/shm/PosixShmSegment.cpp
++++ b/cachelib/shm/PosixShmSegment.cpp
+@@ -18,8 +18,7 @@
+ 
+ #include <fcntl.h>
+ #include <folly/logging/xlog.h>
+-#include <numa.h>
+-#include <numaif.h>
++#include "cachelib/shm/NumaShim.h"
+ #include <sys/mman.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
+diff --git a/cachelib/shm/ShmCommon.h b/cachelib/shm/ShmCommon.h
+index 8db8707..328b16f 100644
+--- a/cachelib/shm/ShmCommon.h
++++ b/cachelib/shm/ShmCommon.h
+@@ -15,8 +15,7 @@
+  */
+ 
+ #pragma once
+-#include <numa.h>
+-#include <numaif.h>
++#include "cachelib/shm/NumaShim.h"
+ #include <sys/ipc.h>
+ #include <sys/mman.h>
+ #include <sys/shm.h>
+diff --git a/cachelib/shm/SysVShmSegment.cpp b/cachelib/shm/SysVShmSegment.cpp
+index 9777e20..71325a2 100644
+--- a/cachelib/shm/SysVShmSegment.cpp
++++ b/cachelib/shm/SysVShmSegment.cpp
+@@ -17,8 +17,7 @@
+ #include "cachelib/shm/SysVShmSegment.h"
+ 
+ #include <folly/logging/xlog.h>
+-#include <numa.h>
+-#include <numaif.h>
++#include "cachelib/shm/NumaShim.h"
+ #include <sys/mman.h>
+ #include <sys/shm.h>
+ 
