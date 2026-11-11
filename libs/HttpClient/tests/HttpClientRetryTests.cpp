@@ -153,6 +153,24 @@ TEST(HttpClientRetry, RetryAfterOverridesTheBackoff) {
     EXPECT_EQ(server.TotalRequests(), 2);
 }
 
+TEST(HttpClientRetry, RetryAfterIsCappedByTheCallersMaxDelay) {
+    asio::io_context context;
+    int requests = 0;
+    ScriptedServer server(context, [&](int, const http::request<http::string_body>&) {
+        return ServerAction{++requests == 1 ? "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 30\r\n"
+                                              "Content-Length: 0\r\n\r\n"
+                                            : Ok};
+    });
+    AVEVA::HttpRequestOptions options;
+    options.SetRetryOptions(FastRetries(1));
+    options.SetTimeout(AVEVA::Timeout{std::chrono::seconds{2}});
+
+    const auto outcome = Send(context, server, AVEVA::HttpMethod::Get, options);
+
+    EXPECT_FALSE(outcome.error) << outcome.error.message();
+    EXPECT_EQ(outcome.status, AVEVA::HttpStatusCode{200});
+}
+
 TEST(HttpClientRetry, TheRequestTimeoutCapsTheRetries) {
     asio::io_context context;
     ScriptedServer server(context,

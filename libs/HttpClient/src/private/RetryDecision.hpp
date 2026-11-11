@@ -91,7 +91,7 @@ namespace AVEVA::Private {
                                                           const HttpResponse* response) {
     if (response != nullptr) {
         if (const auto hint = RetryAfterHint(*response); hint.has_value()) {
-            return std::min(*hint, std::max(retry.MaxDelay, DefaultRetryMaxDelay));
+            return std::min(*hint, retry.MaxDelay);
         }
     }
     return ComputeBackoff(retry, retryNumber);
