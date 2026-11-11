@@ -14,6 +14,7 @@
 #include <boost/asio/strand.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <gsl/util>
@@ -32,7 +33,7 @@ std::chrono::steady_clock::time_point DeadlineFor(const HttpRequestOptions& opti
 HttpClientCore::HttpClientCore(asio::io_context& runtime, const HttpClientOptions& options)
     : m_context(runtime), m_diagnostics(DiagnosticsSink::For(options)),
       m_tlsContext(MakeTlsContext(options, m_diagnostics)),
-      m_sweeper(IdleSweeper::Create(options.GetMaxIdleConnectionsPerHost(), options.GetIdleConnectionTimeout(),
+      m_sweeper(IdleSweeper::Create(runtime, options.GetMaxIdleConnectionsPerHost(), options.GetIdleConnectionTimeout(),
                                     options.GetIdleProbeThreshold(), m_diagnostics)),
       m_plainPool(m_sweeper->PlainPool()), m_tlsPool(m_sweeper->TlsPool()) {}
 
@@ -51,7 +52,7 @@ asio::awaitable<HttpResult> HttpClientCore::Send(HttpRequest request, HttpReques
 
         const auto deadline = DeadlineFor(options);
         Outcome outcome = Interrupted{HttpRequestPhase::Queued};
-        const auto expired = std::make_shared<bool>(false);
+        const auto expired = std::make_shared<std::atomic<bool>>(false);
         try {
             // The strand serializes the deadline timer with the request's completion, which cancel_at requires.
             outcome = co_await asio::co_spawn(
@@ -68,7 +69,7 @@ asio::awaitable<HttpResult> HttpClientCore::Send(HttpRequest request, HttpReques
             co_return std::move(*result);
         }
         // Either the caller cancelled or the deadline fired; the watch timer records whether the deadline passed.
-        if (!*expired) {
+        if (!expired->load()) {
             co_return std::unexpected(HttpFailure{std::make_error_code(std::errc::operation_canceled)});
         }
         DiagnosticsSink::Report(m_diagnostics, HttpDiagnosticKind::Timeout, std::get<Interrupted>(outcome).phase,
@@ -82,14 +83,14 @@ asio::awaitable<HttpResult> HttpClientCore::Send(HttpRequest request, HttpReques
 
 asio::awaitable<HttpClientCore::Outcome>
 HttpClientCore::RunWithDeadline(Route route, HttpRequest request, HttpRequestOptions options,
-                                std::chrono::steady_clock::time_point deadline, std::shared_ptr<bool> expired) {
+                                std::chrono::steady_clock::time_point deadline, std::shared_ptr<std::atomic<bool>> expired) {
     // cancel_at only reports operation_aborted, which a caller's cancel also produces. This timer fires on the same
     // strand and only completes successfully once the deadline has really passed, so it tells the two apart without
     // reading the clock. It is cancelled on every exit so a caller's cancel before the deadline never sets the flag.
     auto watch = std::make_shared<asio::steady_timer>(co_await asio::this_coro::executor, deadline);
     watch->async_wait([watch, expired = std::move(expired)](const boost::system::error_code& error) {
         if (!error) {
-            *expired = true;
+            expired->store(true);
         }
     });
     const auto stopWatch = gsl::finally([&watch] { watch->cancel(); });
@@ -141,7 +142,7 @@ asio::awaitable<HttpClientCore::Outcome> HttpClientCore::Attempt(Route route, Ht
                                      std::move(request), std::move(options));
         co_return co_await RunExchange(exchange, phase);
     }
-    Exchange<PlainStream> exchange({m_context, m_tlsContext, m_plainPool, m_diagnostics}, std::move(route),
+    Exchange<PlainStream> exchange({m_context, {}, m_plainPool, m_diagnostics}, std::move(route),
                                    std::move(request), std::move(options));
     co_return co_await RunExchange(exchange, phase);
 }

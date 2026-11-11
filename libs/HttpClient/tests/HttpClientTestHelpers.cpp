@@ -3,6 +3,8 @@
 
 #include "HttpClientTestHelpers.hpp"
 
+#include "private/IdleSweeper.hpp"
+
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/write.hpp>
@@ -24,6 +26,16 @@
 namespace HttpClientTests {
 namespace asio = boost::asio;
 namespace beast = boost::beast;
+
+namespace {
+// Tests run an io_context until it drains, which the idle sweeper's timer would prevent; IdleSweeperTests turns
+// sweeping back on for itself.
+class NoIdleSweeping : public ::testing::Environment {
+  public:
+    void SetUp() override { AVEVA::Private::IdleSweeper::SetSweeping(AVEVA::Private::IdleSweeper::Sweeping::Disabled); }
+};
+const auto* const registerNoIdleSweeping = ::testing::AddGlobalTestEnvironment(new NoIdleSweeping);
+} // namespace
 
 void RunBounded(asio::io_context& context, std::chrono::milliseconds limit) {
     context.run_for(limit);

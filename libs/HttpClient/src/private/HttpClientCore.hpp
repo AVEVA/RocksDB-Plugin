@@ -15,6 +15,7 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ssl/context.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <variant>
@@ -68,7 +69,7 @@ class HttpClientCore : public std::enable_shared_from_this<HttpClientCore> {
     /// <param name="expired">Set to true once the deadline has passed, so a caller can tell a timeout from a cancel.</param>
     asio::awaitable<Outcome> RunWithDeadline(Route route, HttpRequest request, HttpRequestOptions options,
                                              std::chrono::steady_clock::time_point deadline,
-                                             std::shared_ptr<bool> expired);
+                                             std::shared_ptr<std::atomic<bool>> expired);
 
     /// <summary>
     /// Runs the request, and again after a transient failure when the options carry a retry policy. The

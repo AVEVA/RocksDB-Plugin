@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
 
 #include <chrono>
@@ -29,9 +30,24 @@ template <typename Predicate> bool WaitUntil(Predicate done) {
     return done();
 }
 
+// Runs an io_context on its own thread the way a server would, until the runner is destroyed.
+struct ContextRunner {
+    ContextRunner() : guard(asio::make_work_guard(context)), thread([this] { context.run(); }) {}
+    ~ContextRunner() {
+        guard.reset();
+        thread.join();
+    }
+    ContextRunner(const ContextRunner&) = delete;
+    ContextRunner& operator=(const ContextRunner&) = delete;
+
+    asio::io_context context;
+    asio::executor_work_guard<asio::io_context::executor_type> guard;
+    std::thread thread;
+};
+
 struct SweeperFixture {
     SweeperFixture(asio::io_context& ioContext, std::chrono::milliseconds interval)
-        : sweeper(IdleSweeper::Create(AVEVA::ConnectionCount{4}, AVEVA::Timeout{interval},
+        : sweeper(IdleSweeper::Create(ioContext, AVEVA::ConnectionCount{4}, AVEVA::Timeout{interval},
                                       PlainConnectionPool::DefaultProbeThreshold, nullptr, MinInterval)),
           plain(sweeper->PlainPool()), tls(sweeper->TlsPool()), context(ioContext) {}
 
@@ -46,102 +62,81 @@ struct SweeperFixture {
 };
 } // namespace
 
-// The scheduler thread is already sleeping towards a far-away deadline when a sweeper with a nearer one is
-// scheduled; the nearer sweep must still run on time.
-TEST(IdleSweeper, EarlierDeadlineWakesTheSchedulerThread) {
-    asio::io_context context;
-    SweeperFixture slow(context, std::chrono::hours(1));
-    const auto waitsBefore = IdleSweeper::SchedulerWaitCount();
-    slow.AddIdleConnection();
-    // Let the thread start waiting on the slow deadline.
-    ASSERT_TRUE(WaitUntil([&] { return IdleSweeper::SchedulerWaitCount() > waitsBefore; }));
+// The suite-wide environment disables sweeping; these tests are about sweeping.
+class IdleSweeperSuite : public ::testing::Test {
+  protected:
+    void SetUp() override {
+        AVEVA::Private::IdleSweeper::SetSweeping(AVEVA::Private::IdleSweeper::Sweeping::Enabled);
+    }
+    void TearDown() override {
+        AVEVA::Private::IdleSweeper::SetSweeping(AVEVA::Private::IdleSweeper::Sweeping::Disabled);
+    }
+};
 
-    SweeperFixture fast(context, std::chrono::milliseconds(50));
+// Releasing a connection is enough to get it closed once it expires, with no request and no thread of the sweeper's own.
+TEST_F(IdleSweeperSuite, ClosesAnExpiredIdleConnectionOnTheIoContext) {
+    ContextRunner runner;
+    SweeperFixture fixture(runner.context, std::chrono::milliseconds(20));
+    fixture.AddIdleConnection();
+    EXPECT_EQ(fixture.plain->IdleCount(), 1U);
+
+    EXPECT_TRUE(WaitUntil([&] { return fixture.plain->IdleCount() == 0; }));
+    fixture.sweeper->Stop();
+}
+
+// Once the pools have emptied, the sweeper goes quiet; the next release has to arm it again.
+TEST_F(IdleSweeperSuite, SweepsAgainWhenALaterReleaseFollowsAnEmptyPool) {
+    ContextRunner runner;
+    SweeperFixture fixture(runner.context, std::chrono::milliseconds(20));
+    fixture.AddIdleConnection();
+    ASSERT_TRUE(WaitUntil([&] { return fixture.plain->IdleCount() == 0; }));
+
+    fixture.AddIdleConnection();
+    EXPECT_TRUE(WaitUntil([&] { return fixture.plain->IdleCount() == 0; }));
+    fixture.sweeper->Stop();
+}
+
+// A sweeper with a far deadline must not delay one with a near deadline: each has its own timer.
+TEST_F(IdleSweeperSuite, SweepersOnOneIoContextRunIndependently) {
+    ContextRunner runner;
+    SweeperFixture slow(runner.context, std::chrono::hours(1));
+    slow.AddIdleConnection();
+    SweeperFixture fast(runner.context, std::chrono::milliseconds(30));
     fast.AddIdleConnection();
 
     EXPECT_TRUE(WaitUntil([&] { return fast.plain->IdleCount() == 0; }));
     EXPECT_EQ(slow.plain->IdleCount(), 1U);
+    slow.sweeper->Stop();
+    fast.sweeper->Stop();
 }
 
-// A sweeper scheduled later with a nearer deadline runs first, and the earlier-scheduled one still gets its
-// own sweep afterwards.
-TEST(IdleSweeper, SweepersRunInDeadlineOrderNotSchedulingOrder) {
+// Stop cancels the pending timer, so nothing of the sweeper is left on the io_context to wait for.
+TEST_F(IdleSweeperSuite, StopCancelsThePendingSweep) {
     asio::io_context context;
-    // The 30x gap keeps later pending even if this thread is descheduled for a few hundred milliseconds.
-    SweeperFixture later(context, std::chrono::milliseconds(1000));
-    later.AddIdleConnection();
-    SweeperFixture sooner(context, std::chrono::milliseconds(30));
-    sooner.AddIdleConnection();
-
-    ASSERT_TRUE(WaitUntil([&] { return sooner.plain->IdleCount() == 0; }));
-    EXPECT_EQ(later.plain->IdleCount(), 1U);
-
-    EXPECT_TRUE(WaitUntil([&] { return later.plain->IdleCount() == 0; }));
-}
-
-// A failed Schedule must not leave the pending flag set: a later release has to schedule a sweep again.
-TEST(IdleSweeper, ReleaseSchedulesAgainAfterAFailedSchedule) {
-    asio::io_context context;
-    SweeperFixture fixture(context, std::chrono::milliseconds(20));
-
-    IdleSweeper::FailNextSchedules(1);
+    SweeperFixture fixture(context, std::chrono::hours(1));
     fixture.AddIdleConnection();
-    EXPECT_EQ(fixture.plain->IdleCount(), 1U);
 
-    // The pool is still non-empty, so this release must be the one that recovers the unscheduled sweep.
-    fixture.plain->Release({"127.0.0.2", "80"},
-                           PooledConnection<PlainStream>{std::make_unique<PlainStream>(context), {}});
-    EXPECT_EQ(fixture.plain->IdleCount(), 2U);
+    fixture.sweeper->Stop();
+    EXPECT_EQ(fixture.plain->IdleCount(), 0U);
 
-    EXPECT_TRUE(WaitUntil([&] { return fixture.plain->IdleCount() == 0; }));
+    const auto start = std::chrono::steady_clock::now();
+    context.run_for(Deadline);
+    EXPECT_LT(std::chrono::steady_clock::now() - start, Deadline / 2);
 }
 
-// The shared scheduler thread belongs to the live sweepers: it is stopped and joined when the last one goes,
-// and started afresh for the next.
-TEST(IdleSweeper, SchedulerStopsWhenTheLastSweeperIsDestroyed) {
+// A sweeper dropped without Stop leaves a timer whose handler must find the sweeper gone and do nothing.
+TEST_F(IdleSweeperSuite, ADestroyedSweeperIsNotSweptLater) {
     asio::io_context context;
-    EXPECT_EQ(IdleSweeper::SchedulerState(), IdleSweeper::SchedulerPresence::Gone);
     {
-        auto first = std::make_unique<SweeperFixture>(context, std::chrono::hours(1));
-        first->AddIdleConnection();
-        EXPECT_EQ(IdleSweeper::SchedulerState(), IdleSweeper::SchedulerPresence::Alive);
-        {
-            SweeperFixture second(context, std::chrono::hours(1));
-            second.AddIdleConnection();
-        }
-        EXPECT_EQ(IdleSweeper::SchedulerState(), IdleSweeper::SchedulerPresence::Alive);
+        SweeperFixture fixture(context, std::chrono::milliseconds(1));
+        fixture.AddIdleConnection();
     }
-    EXPECT_EQ(IdleSweeper::SchedulerState(), IdleSweeper::SchedulerPresence::Gone);
-
-    SweeperFixture again(context, std::chrono::milliseconds(50));
-    again.AddIdleConnection();
-    EXPECT_EQ(IdleSweeper::SchedulerState(), IdleSweeper::SchedulerPresence::Alive);
-    EXPECT_TRUE(WaitUntil([&] { return again.plain->IdleCount() == 0; }));
+    EXPECT_NO_THROW(context.run_for(std::chrono::milliseconds(50)));
 }
 
-// Short-lived sweepers with a year-long timeout must not accumulate in a scheduler a persistent sweeper keeps alive.
-TEST(IdleSweeper, DestroyedAndStoppedSweepersLeaveNoRegistrations) {
-    asio::io_context context;
-    SweeperFixture persistent(context, std::chrono::hours(24 * 365));
-    persistent.AddIdleConnection();
-    const auto baseline = IdleSweeper::SchedulerQueueSize();
-    ASSERT_GE(baseline, 1U);
-
-    for (int i = 0; i < 100; ++i) {
-        SweeperFixture shortLived(context, std::chrono::hours(24 * 365));
-        shortLived.AddIdleConnection();
-        if (i % 2 == 0) {
-            shortLived.sweeper->Stop();
-            EXPECT_EQ(IdleSweeper::SchedulerQueueSize(), baseline);
-        }
-    }
-    EXPECT_EQ(IdleSweeper::SchedulerQueueSize(), baseline);
-    EXPECT_EQ(persistent.plain->IdleCount(), 1U);
-}
-
-// The scheduler thread may hold the last reference to the sweeper; Stop must have drained the pools on the caller's
-// thread by then, so no disposal is posted to an io_context that has already been destroyed.
-TEST(IdleSweeper, StopDrainsThePoolsBeforeTheIoContextGoesAway) {
+// Stop must have drained the pools on the caller's thread, so no disposal is posted to an io_context that has
+// already been destroyed.
+TEST_F(IdleSweeperSuite, StopDrainsThePoolsBeforeTheIoContextGoesAway) {
     for (int i = 0; i < 50; ++i) {
         auto context = std::make_unique<asio::io_context>();
         auto fixture = std::make_unique<SweeperFixture>(*context, std::chrono::milliseconds(1));

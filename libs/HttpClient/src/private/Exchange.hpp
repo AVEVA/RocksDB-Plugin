@@ -28,6 +28,8 @@
 #include <optional>
 #include <string_view>
 #include <system_error>
+#include <type_traits>
+#include <variant>
 
 namespace AVEVA::Private {
 using ArenaFields = boost::beast::http::basic_fields<ArenaAllocator<char>>;
@@ -101,7 +103,9 @@ template <typename Stream> class Exchange {
     /// </summary>
     struct Environment {
         boost::asio::io_context& context;
-        std::shared_ptr<boost::asio::ssl::context> tlsContext;
+        // Only a TLS exchange carries a context; a plain one leaves this empty.
+        std::conditional_t<std::is_same_v<Stream, TlsStream>, std::shared_ptr<boost::asio::ssl::context>, std::monostate>
+            tlsContext;
         std::shared_ptr<ConnectionPool<Stream>> pool;
         std::shared_ptr<const DiagnosticsSink> diagnostics;
     };
@@ -148,7 +152,7 @@ template <typename Stream> class Exchange {
     };
 
     void Report(HttpDiagnosticKind kind, std::error_code error, std::string_view message) const noexcept {
-        DiagnosticsSink::Report(m_env.diagnostics, kind, m_phase, m_key.host, m_key.service, error, message);
+        DiagnosticsSink::Report(m_env.diagnostics, kind, m_phase, m_connectionKey.host, m_connectionKey.service, error, message);
     }
 
     /// <summary>
@@ -197,7 +201,7 @@ template <typename Stream> class Exchange {
 
     Environment m_env;
     Route m_route;
-    ConnectionKey<Stream> m_key;
+    ConnectionKey<Stream> m_connectionKey;
     HttpRequest m_stagedRequest;
     HttpRequestOptions m_options;
     HttpRequestPhase m_phase = HttpRequestPhase::Queued;

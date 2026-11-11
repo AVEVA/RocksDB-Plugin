@@ -30,6 +30,8 @@
 namespace AVEVA::Private {
 namespace {
 constexpr auto Await = asio::as_tuple(asio::use_awaitable);
+// HTTP/1.1 in Beast's encoding (major * 10 + minor).
+constexpr unsigned Http11 = 11;
 
 /// <summary>
 /// Turns an aborted operation into the exception a cancelled await throws, so cancellation unwinds to the boundary in
@@ -57,12 +59,12 @@ asio::awaitable<void> ShutdownTls(std::unique_ptr<TlsStream> stream) {
 
 template <typename Stream>
 Exchange<Stream>::Exchange(Environment environment, Route route, HttpRequest request, HttpRequestOptions options)
-    : m_env(std::move(environment)), m_route(std::move(route)), m_key{m_route.Host, m_route.Port},
+    : m_env(std::move(environment)), m_route(std::move(route)), m_connectionKey{m_route.Host, m_route.Port},
       m_stagedRequest(std::move(request)), m_options(std::move(options)) {}
 
 template <typename Stream> asio::awaitable<HttpResult> Exchange<Stream>::Run() {
     BuildRequest();
-    if (auto pooled = m_env.pool->Acquire(m_key)) {
+    if (auto pooled = m_env.pool->Acquire(m_connectionKey)) {
         m_stream = std::move(pooled->stream);
         m_buffer = std::move(pooled->buffer);
         m_connection = Connection::Reused;
@@ -127,7 +129,7 @@ template <typename Stream> void Exchange<Stream>::BuildRequest() {
     m_requestArena.Reset();
     auto& req = m_request.emplace(std::piecewise_construct, std::forward_as_tuple(),
                                   std::forward_as_tuple(ArenaAllocator<char>(m_requestArena)));
-    req.version(11);
+    req.version(Http11);
     req.method(verb);
     req.target(m_route.Target);
     for (const auto& header : m_stagedRequest.GetHeaders()) {
@@ -176,15 +178,15 @@ template <typename Stream> void Exchange<Stream>::ResetParser() {
 template <typename Stream> std::error_code Exchange<Stream>::ConfigureTlsForHost() {
     if constexpr (std::is_same_v<Stream, TlsStream>) {
         SSL* const ssl = m_stream->native_handle();
-        PrepareTlsSessionResumption(ssl, m_key);
+        PrepareTlsSessionResumption(ssl, m_connectionKey);
         if (SSL_get_verify_mode(ssl) != SSL_VERIFY_NONE) {
             // Native OpenSSL host/IP checks run inside the built-in verifier, avoiding a type-erased callback.
             int verifyHostResult = 0;
             if (m_route.Kind == HostKind::Name) {
                 SSL_set_hostflags(ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
-                verifyHostResult = SSL_set1_host(ssl, m_key.host.c_str());
+                verifyHostResult = SSL_set1_host(ssl, m_connectionKey.host.c_str());
             } else {
-                verifyHostResult = X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(ssl), m_key.host.c_str());
+                verifyHostResult = X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(ssl), m_connectionKey.host.c_str());
             }
             if (verifyHostResult != 1) {
                 return HttpClientError::TlsFailed;
@@ -193,7 +195,7 @@ template <typename Stream> std::error_code Exchange<Stream>::ConfigureTlsForHost
         if (m_route.Kind == HostKind::Name) {
             // SSL_set_tlsext_host_name is a macro with an old-style cast, so call SSL_ctrl directly. It takes the name
             // as a mutable void* (it only copies it), so hand it a copy rather than casting away const.
-            std::string hostName = m_key.host;
+            std::string hostName = m_connectionKey.host;
             if (SSL_ctrl(ssl, SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_host_name, hostName.data()) == 0) {
                 return HttpClientError::TlsFailed;
             }
@@ -214,7 +216,7 @@ template <typename Stream> asio::awaitable<std::expected<ResolveResults, HttpFai
     const auto outcome = std::make_shared<ResolveChannel>(executor);
     auto resolver = std::make_shared<Tcp::resolver>(executor);
     auto& lookup = *resolver;
-    lookup.async_resolve(m_key.host, m_key.service,
+    lookup.async_resolve(m_connectionKey.host, m_connectionKey.service,
                          [resolver = std::move(resolver), waiter = ResolveWaiter(outcome, m_env.diagnostics)](
                              const boost::system::error_code& error, const ResolveResults& results) {
                              waiter(error, results);
@@ -386,7 +388,7 @@ template <typename Stream> void Exchange<Stream>::ReleaseOrClose(KeepAlive keepA
             // A pooled connection is idle for a long time; don't let it pin the last response's buffer.
             TrimIdleBuffer(m_buffer);
             PooledConnection<Stream> connection{std::move(m_stream), std::move(m_buffer)};
-            admission = m_env.pool->Release(m_key, std::move(connection));
+            admission = m_env.pool->Release(m_connectionKey, std::move(connection));
             if (admission == PoolAdmission::Declined) {
                 // Release only takes the connection when it returns Retained.
                 m_stream = std::move(connection.stream);
