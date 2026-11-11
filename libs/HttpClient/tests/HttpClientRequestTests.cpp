@@ -26,6 +26,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -418,6 +419,42 @@ TEST(HttpClientRequest, CancellationRightAfterStartCompletesWithOperationCancele
     cancellation.emit(asio::cancellation_type::terminal);
     RunBounded(context);
     EXPECT_EQ(completions, 1);
+}
+
+TEST(HttpClientRequest, CancellationJustBeforeTheDeadlineIsNotReportedAsTimeout) {
+    asio::io_context context;
+    ScriptedServer server(context, [](int, const http::request<http::string_body>&) {
+        ServerAction action;
+        action.Reply = ServerReply::Hold;
+        return action;
+    });
+    auto client = std::make_unique<AVEVA::HttpClient>(context);
+    asio::cancellation_signal cancellation;
+    AVEVA::HttpRequestOptions options;
+    options.SetTimeout(AVEVA::Timeout{std::chrono::milliseconds{300}});
+    AVEVA::HttpRequest request;
+    request.SetUrl(AVEVA::HttpUrl{server.Url()});
+
+    std::error_code observed;
+    int completions = 0;
+    HttpClientTests::SendWith(
+        *client, request, options,
+        [&](std::error_code error, AVEVA::HttpResponse) {
+            ++completions;
+            observed = error;
+            server.Stop();
+        },
+        cancellation.slot());
+
+    asio::steady_timer cancelAt(context, std::chrono::milliseconds{200});
+    cancelAt.async_wait([&](boost::system::error_code) {
+        cancellation.emit(asio::cancellation_type::terminal);
+        // Keep the io_context busy so the deadline passes before the cancel has finished unwinding.
+        std::this_thread::sleep_for(std::chrono::milliseconds{200});
+    });
+    RunBounded(context);
+    EXPECT_EQ(completions, 1);
+    EXPECT_EQ(observed, std::make_error_code(std::errc::operation_canceled));
 }
 
 TEST(HttpClientRequest, CancellationMidFlightCompletesWithOperationCanceled) {

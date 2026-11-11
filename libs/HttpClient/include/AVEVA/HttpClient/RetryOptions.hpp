@@ -25,10 +25,10 @@ inline constexpr std::chrono::milliseconds DefaultRetryMaxDelay{std::chrono::min
 
 /// <summary>
 /// Automatic retry of transient failures (HTTP 408/429/500/502/503/504 and transport errors such as
-/// resolve/connect/read/write failures and timeouts), as honoured by retrying layers such as the Azure clients. Each
-/// retry waits an exponential backoff with jitter (<c>InitialDelay * 2^n</c>, capped at <c>MaxDelay</c>); a server
-/// Retry-After hint takes precedence and is honoured up to the larger of <c>MaxDelay</c> and one minute (a bogus hint
-/// cannot stall a request for hours). Cancellation stops retrying immediately.
+/// resolve/connect/read/write failures), as honoured by retrying layers such as the Azure clients. A request that
+/// times out is not retried: the timeout covers every attempt. Each retry waits an exponential backoff with jitter
+/// (<c>InitialDelay * 2^n</c>, capped at <c>MaxDelay</c>); a server Retry-After hint takes precedence and is honoured
+/// up to <c>MaxDelay</c> (a bogus hint cannot stall a request for hours). Cancellation stops retrying immediately.
 /// </summary>
 struct RetryOptions {
     /// <summary>

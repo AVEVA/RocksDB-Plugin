@@ -9,9 +9,11 @@
 #include "TlsContextConfigurator.hpp"
 
 #include <boost/asio/cancel_at.hpp>
+#include <boost/asio/cancellation_state.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
+#include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
 #include <atomic>
@@ -86,14 +88,27 @@ HttpClientCore::RunWithDeadline(Route route, HttpRequest request, HttpRequestOpt
                                 std::chrono::steady_clock::time_point deadline, std::shared_ptr<std::atomic<bool>> expired) {
     // cancel_at only reports operation_aborted, which a caller's cancel also produces. This timer fires on the same
     // strand and only completes successfully once the deadline has really passed, so it tells the two apart without
-    // reading the clock. It is cancelled on every exit so a caller's cancel before the deadline never sets the flag.
-    auto watch = std::make_shared<asio::steady_timer>(co_await asio::this_coro::executor, deadline);
-    watch->async_wait([watch, expired = std::move(expired)](const boost::system::error_code& error) {
-        if (!error) {
+    // reading the clock. A caller's cancel also lands on this strand, so if it arrived first the deadline does not
+    // count even when unwinding runs past it. `live` stops the handler reading this frame's state once it has exited.
+    struct Watch {
+        Watch(const asio::any_io_executor& executor, std::chrono::steady_clock::time_point at,
+              asio::cancellation_state callerState)
+            : Timer(executor, at), CallerState(callerState) {}
+        asio::steady_timer Timer;
+        asio::cancellation_state CallerState;
+        bool Live = true;
+    };
+    auto watch = std::make_shared<Watch>(co_await asio::this_coro::executor, deadline,
+                                         co_await asio::this_coro::cancellation_state);
+    watch->Timer.async_wait([watch, expired = std::move(expired)](const boost::system::error_code& error) {
+        if (!error && watch->Live && watch->CallerState.cancelled() == asio::cancellation_type::none) {
             expired->store(true);
         }
     });
-    const auto stopWatch = gsl::finally([&watch] { watch->cancel(); });
+    const auto stopWatch = gsl::finally([&watch] {
+        watch->Live = false;
+        watch->Timer.cancel();
+    });
     co_return co_await asio::co_spawn(co_await asio::this_coro::executor,
                                       Dispatch(std::move(route), std::move(request), std::move(options)),
                                       asio::cancel_at(deadline, asio::use_awaitable));
