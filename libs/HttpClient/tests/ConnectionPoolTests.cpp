@@ -49,9 +49,21 @@ void* operator new(std::size_t size) {
     throw std::bad_alloc();
 }
 
+// The nothrow form must be replaced too: otherwise it stays with the runtime's (or a sanitizer's) allocator while the
+// replaced operator delete below frees its memory with std::free, which AddressSanitizer reports as a mismatch.
+void* operator new(std::size_t size, const std::nothrow_t&) noexcept {
+    try {
+        return ::operator new(size);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
 void operator delete(void* memory) noexcept { std::free(memory); }
 
 void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
+
+void operator delete(void* memory, const std::nothrow_t&) noexcept { std::free(memory); }
 
 namespace {
 using AVEVA::Private::BasicConnectionKey;
