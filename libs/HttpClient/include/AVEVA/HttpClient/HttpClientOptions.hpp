@@ -59,8 +59,6 @@ enum class HttpDiagnosticKind {
     ConnectionNotPooled,
     /// <summary>An exception was caught and deliberately not propagated; the message says where.</summary>
     SwallowedException,
-    /// <summary>Obsolete: the client no longer caches DNS answers, so this is never reported.</summary>
-    DnsInvalidated,
     /// <summary>A request timed out; Phase tells in which stage.</summary>
     Timeout
 };
