@@ -7,8 +7,9 @@
 // When an entry is evicted, its file is deleted from disk
 // --------------------------------------------------------------------------
 TEST_F(FileBasedCompressedSecondaryCacheTests, EvictedEntryFileIsDeletedFromDisk) {
-    const size_t capacity = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, MakeNullLogger());
+    const size_t capacity = FileBasedCompressedSecondaryCache::kFileHeaderSize.Value() + 10;
+    m_cache =
+        std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, ByteCount{capacity}, MakeNullLogger());
 
     const std::string key1 = "evict_disk_k1";
     const std::string key2 = "evict_disk_k2";
@@ -32,8 +33,9 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, EvictedEntryFileIsDeletedFromDisk
 // After eviction-driven removal, no .del graveyard files must remain on disk
 // --------------------------------------------------------------------------
 TEST_F(FileBasedCompressedSecondaryCacheTests, EvictedEntryLeavesNoGraveyardFile) {
-    const size_t capacity = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
-    m_cache = std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, capacity, MakeNullLogger());
+    const size_t capacity = FileBasedCompressedSecondaryCache::kFileHeaderSize.Value() + 10;
+    m_cache =
+        std::make_unique<FileBasedCompressedSecondaryCache>(m_cacheDir, m_fs, ByteCount{capacity}, MakeNullLogger());
 
     TestPayload p1{"0123456789"}; // fills capacity exactly
     TestPayload p2{"abcdefghij"}; // evicts p1 via RemoveEntryLocked → rename → delete
@@ -76,7 +78,7 @@ TEST_F(FileBasedCompressedSecondaryCacheTests, AdviseEraseLeavesNoGraveyardFile)
 // After SetCapacity triggers eviction, no .del graveyard files must remain
 // --------------------------------------------------------------------------
 TEST_F(FileBasedCompressedSecondaryCacheTests, SetCapacityLeavesNoGraveyardFiles) {
-    constexpr size_t kEntryStoredSize = FileBasedCompressedSecondaryCache::kFileHeaderSize + 10;
+    constexpr size_t kEntryStoredSize = FileBasedCompressedSecondaryCache::kFileHeaderSize.Value() + 10;
     TestPayload p1{"0123456789"};
     TestPayload p2{"abcdefghij"};
     ASSERT_TRUE(m_cache->Insert(MakeKey("grv_setcap_k1"), &p1, &m_helper, true).ok());

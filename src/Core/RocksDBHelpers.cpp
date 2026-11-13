@@ -3,37 +3,15 @@
 
 #include "AVEVA/RocksDB/Plugin/Core/RocksDBHelpers.hpp"
 namespace AVEVA::RocksDB::Plugin::Core {
-static bool IsFile(const std::string_view pathname, const std::string_view file) {
+namespace {
+std::string_view LastPathComponent(const std::string_view pathname) {
     static const constexpr std::string_view pathsep{"/"};
-
-    // extract last component of the path
-    std::string fname;
-    size_t offset = pathname.find_last_of(pathsep);
-    if (offset != std::string::npos) {
-        fname = pathname.substr(offset + 1, pathname.size());
-    } else {
-        fname = pathname;
+    if (const size_t offset = pathname.find_last_of(pathsep); offset != std::string_view::npos) {
+        return pathname.substr(offset + 1);
     }
-    if (fname.find(file) == 0) {
-        return true;
-    }
-    return false;
+    return pathname;
 }
-
-bool RocksDBHelpers::IsManifestFile(const std::string_view pathname) { return IsFile(pathname, "MANIFEST"); }
-
-bool RocksDBHelpers::IsIdentityFile(const std::string_view pathname) { return IsFile(pathname, "IDENTITY"); }
-
-bool RocksDBHelpers::IsLogFile(const RocksDBHelpers::FileClass fileType) {
-    // A log file has ".log" suffix or starts with 'MANIFEST"
-    switch (fileType) {
-    case FileClass::WAL:
-    case FileClass::Manifest:
-        return true;
-    default:
-        return false;
-    }
-}
+} // namespace
 
 RocksDBHelpers::FileClass RocksDBHelpers::GetFileType(const std::string_view pathname) {
     // Is this a sst file, i.e. ends in ".sst" or ".ldb"
@@ -46,11 +24,11 @@ RocksDBHelpers::FileClass RocksDBHelpers::GetFileType(const std::string_view pat
         return FileClass::WAL;
     }
 
-    if (IsManifestFile(pathname)) {
+    if (LastPathComponent(pathname).starts_with("MANIFEST")) {
         return FileClass::Manifest;
     }
 
-    if (IsIdentityFile(pathname)) {
+    if (LastPathComponent(pathname).starts_with("IDENTITY")) {
         return FileClass::Identity;
     }
 
