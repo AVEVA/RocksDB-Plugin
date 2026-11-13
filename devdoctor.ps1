@@ -263,6 +263,23 @@ if (-not $CLANG_FORMAT_PATH)
 else
 {
     Write-Host("✅ Found clang-format: '${CLANG_FORMAT_PATH}'") -ForegroundColor Green
+
+    # Keep in sync with CLANG_FORMAT_VERSION in .github/workflows/build-and-test.yml.
+    $PINNED_CLANG_FORMAT_MAJOR = 22
+    $clangFormatVersionText = (& $CLANG_FORMAT_PATH --version 2>&1 | Out-String)
+    if ($clangFormatVersionText -match 'version (\d+)\.')
+    {
+        if ([int]$Matches[1] -ne $PINNED_CLANG_FORMAT_MAJOR)
+        {
+            $hasWarnings = $true
+            Write-Host("⚠️ clang-format major version $($Matches[1]) differs from the CI-pinned $PINNED_CLANG_FORMAT_MAJOR; formatting may disagree with the CI format check.") -ForegroundColor Yellow
+        }
+    }
+    else
+    {
+        $hasWarnings = $true
+        Write-Host("⚠️ Unable to determine the clang-format version.") -ForegroundColor Yellow
+    }
 }
 
 # Check clang-tidy (used for static analysis)
