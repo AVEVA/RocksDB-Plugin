@@ -1,0 +1,79 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
+#pragma once
+
+#include "AVEVA/HttpClient/HttpRequest.hpp"
+#include "AVEVA/HttpClient/HttpRequestOptions.hpp"
+
+#include <boost/beast/http/error.hpp>
+#include <boost/system/error_code.hpp>
+#include <boost/url/url_view.hpp>
+
+#include <cstdint>
+#include <exception>
+#include <string>
+#include <system_error>
+
+namespace AVEVA::Private {
+/// <summary>The verdict of a validation check.</summary>
+enum class Validity : std::uint8_t { Invalid, Valid };
+
+/// <summary>Whether an error code came from Beast's HTTP parser or from somewhere else.</summary>
+enum class ErrorSource : std::uint8_t { Other, BeastParser };
+
+/// <summary>
+/// Any error raised by Beast's HTTP parser (bad status line, bad header, bad chunk, ...) means the peer sent
+/// something that is not valid HTTP, as opposed to a transport failure.
+/// </summary>
+/// <param name="error">The error to classify.</param>
+/// <returns>BeastParser if it came from the HTTP parser.</returns>
+inline ErrorSource SourceOf(const boost::system::error_code& error) noexcept {
+    return error.category() == boost::beast::http::make_error_code(boost::beast::http::error{}).category()
+               ? ErrorSource::BeastParser
+               : ErrorSource::Other;
+}
+
+/// <summary>
+/// Checks whether a value is a valid HTTP token (RFC 7230 section 3.2.6), as required for header names.
+/// </summary>
+/// <param name="value">The candidate token.</param>
+/// <returns>Valid if it is a non-empty token.</returns>
+Validity CheckToken(const std::string& value);
+
+/// <summary>
+/// Checks that a header can be sent: a token name, a value without control characters, and sizes within
+/// what Beast accepts (longer fields make fields::insert throw).
+/// </summary>
+/// <param name="header">The header to check.</param>
+/// <returns>Valid if the header can be sent.</returns>
+Validity CheckHeader(const HttpHeader& header);
+
+/// <summary>
+/// Checks that a parsed URL is one a request may be sent to: http(s), a non-empty host without control,
+/// space or non-ASCII characters, no userinfo and no port 0.
+/// </summary>
+/// <param name="url">The parsed URL.</param>
+/// <returns>Valid if a request may be sent to it.</returns>
+Validity CheckRequestUrl(const boost::urls::url_view& url);
+
+/// <summary>
+/// The single definition of what may be sent: the URL, method and every header. Used both to
+/// decide pool eligibility and to build the wire request, so the two can never disagree. Called from Route::Of, which
+/// is where validation actually happens.
+/// </summary>
+/// <param name="request">The request to check.</param>
+/// <param name="url">The request's URL, already parsed by the caller (which needs it afterwards).</param>
+/// <returns>An empty error code if the request may be sent; otherwise InvalidUrl or InvalidRequest.</returns>
+std::error_code ValidateRequest(const HttpRequest& request, const boost::urls::url_view& url);
+
+/// <summary>
+/// Maps an exception thrown while building the wire request to the error reported to the caller. Only the
+/// errors Beast and the validation layer raise for input that cannot be represented are the request's fault;
+/// running out of memory or any other failure is not, and must not be reported as an invalid request.
+/// </summary>
+/// <param name="failure">The exception that was caught.</param>
+/// <returns>InvalidRequest for rejected input, not_enough_memory for bad_alloc, otherwise
+/// state_not_recoverable.</returns>
+std::error_code ClassifyBuildFailure(std::exception_ptr failure) noexcept;
+} // namespace AVEVA::Private
