@@ -655,6 +655,17 @@ TEST(TokenCredentialTests, CachingTokenCredential_FailedCachePublicationStillDel
     }
 }
 
+TEST(TokenCredentialTests, CachingTokenCredential_FailedRefreshResultCopyStillCompletesEveryCaller) {
+    // Allocation 1 copies the completed refresh into the result shared by its waiters.
+    const auto outcome = RunFanOutWithFailingTokenCopy(1);
+    EXPECT_EQ(outcome.Invocations, std::vector<int>(3, 1));
+    EXPECT_FALSE(outcome.Errors.at(0));
+    EXPECT_EQ(outcome.TokenSizes.at(0), 4096U);
+    for (std::size_t i = 1; i < 3; ++i) {
+        EXPECT_EQ(outcome.Errors.at(i), std::make_error_code(std::errc::not_enough_memory));
+    }
+}
+
 TEST(TokenCredentialTests, CachingTokenCredential_OutstandingRequestKeepsTheCredentialAliveUntilItCompletes) {
     boost::asio::io_context context;
     auto inner = std::make_shared<ScriptedTokenCredential>();

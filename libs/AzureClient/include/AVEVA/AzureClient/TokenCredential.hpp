@@ -444,7 +444,7 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
     /// </summary>
     /// <param name="state">The refresh that completed.</param>
     /// <param name="result">Its outcome.</param>
-    void Finish(const std::shared_ptr<RefreshState>& state, TokenResult result) {
+    void Finish(const std::shared_ptr<RefreshState>& state, const TokenResult& result) {
         {
             std::scoped_lock const lock(m_mutex);
             if (m_inFlightRefresh == state) {
@@ -454,7 +454,12 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         std::vector<std::pair<WaiterId, Waiter>> waiters;
         {
             std::scoped_lock const lock(state->Mutex);
-            state->Result = std::move(result);
+            try {
+                state->Result = result;
+            } catch (const std::bad_alloc&) {
+                // A failed token copy must still release every waiter on this refresh.
+                state->Result = std::unexpected(std::make_error_code(std::errc::not_enough_memory));
+            }
             state->Progress = RefreshProgress::Done;
             waiters = std::move(state->Waiters);
         }
