@@ -14,7 +14,8 @@ ReadableFileImpl::ReadableFileImpl(
     std::string_view name, std::shared_ptr<Core::BlobClient> blobClient, std::shared_ptr<Core::FileCache> fileCache,
     std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> logger)
     : m_name(name), m_blobClient(std::move(blobClient)), m_fileCache(std::move(fileCache)), m_offset(0),
-      m_size(m_blobClient ? m_blobClient->GetSize() : 0LL), m_logger(std::move(logger)) {
+      m_size(m_blobClient ? m_blobClient->GetSize() : 0LL), m_logger(std::move(logger)),
+      m_appendOnly(Core::RocksDBHelpers::GetFileType(name) == Core::RocksDBHelpers::FileClass::WAL) {
     m_etag = m_blobClient->GetEtag();
 }
 
@@ -75,6 +76,16 @@ int64_t ReadableFileImpl::DownloadWithRetry(const int64_t offset, const int64_t 
     do {
         auto remaining = std::max<int64_t>(0, m_size - offset);
         if (remaining == 0) {
+            if (m_appendOnly) {
+                // An append moves the ETag without invalidating bytes already read, so it is not a conflict; read
+                // on only if the blob grew past the offset, otherwise this is the current end of the WAL.
+                RefreshBlobMetadata();
+                if (m_size <= offset) {
+                    return 0;
+                }
+                continue;
+            }
+
             auto latestEtag = m_blobClient->GetEtag();
             if (latestEtag != m_etag) {
                 RefreshBlobMetadata();
@@ -86,8 +97,9 @@ int64_t ReadableFileImpl::DownloadWithRetry(const int64_t offset, const int64_t 
 
         auto toRead = std::min(bytesToRead, remaining);
         try {
-            bytesRead =
-                m_blobClient->Download(std::span<char>(buffer, static_cast<size_t>(toRead)), offset, toRead, m_etag);
+            // An empty ETag sends no If-Match, so a WAL read cannot lose a race with the writer.
+            bytesRead = m_blobClient->Download(std::span<char>(buffer, static_cast<size_t>(toRead)), offset, toRead,
+                                               m_appendOnly ? ::Azure::ETag{} : m_etag);
             bytesRead = std::min(bytesRead, remaining);
             success = true;
         } catch (const ::Azure::Core::RequestFailedException& ex) {
