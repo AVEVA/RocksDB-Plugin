@@ -101,7 +101,9 @@ HostLocality LocalityOf(const boost::urls::url_view_base& url) noexcept {
     case boost::urls::host_type::ipv6:
         return url.host_ipv6_address().is_loopback() ? HostLocality::Loopback : HostLocality::Remote;
     case boost::urls::host_type::name:
-        return url.encoded_host_name() == "localhost" ? HostLocality::Loopback : HostLocality::Remote;
+        // Host names are case-insensitive (RFC 3986 section 3.2.2), so "LocalHost" is loopback too.
+        return IEquals(url.encoded_host_name(), "localhost") == StringMatch::Match ? HostLocality::Loopback
+                                                                                   : HostLocality::Remote;
     default:
         return HostLocality::Remote;
     }

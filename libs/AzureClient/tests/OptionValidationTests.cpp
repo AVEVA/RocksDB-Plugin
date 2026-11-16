@@ -102,6 +102,8 @@ std::vector<TokenTransportCase> MakeTokenTransportCases() {
         {"UpperCaseHttpsTokenOk", "HTTPS://account.blob.core.windows.net", true, false, false, false},
         {"LoopbackIpv4TokenOk", "http://127.0.0.1:10000/devstoreaccount1", true, false, false, false},
         {"LocalhostTokenOk", "http://localhost:10000/devstoreaccount1", true, false, false, false},
+        {"MixedCaseLocalhostTokenOk", "http://LocalHost:10000/devstoreaccount1", true, false, false, false},
+        {"UpperCaseLocalhostSharedKeyOk", "http://LOCALHOST:10000/devstoreaccount1", false, true, false, false},
         {"LoopbackIpv6TokenOk", "http://[::1]:10000/devstoreaccount1", true, false, false, false},
         {"HttpsTokenCredentialOk", "https://account.blob.core.windows.net", true, false, false, false},
         {"HttpsTokenOk", "https://account.blob.core.windows.net", true, false, false, false},
