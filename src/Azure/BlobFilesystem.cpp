@@ -203,7 +203,7 @@ rocksdb::IOStatus BlobFilesystem::FileExists(const std::string& f, const rocksdb
         if (m_filesystem->FileExists(f)) {
             return rocksdb::IOStatus::OK();
         } else {
-            return rocksdb::IOStatus::NotFound();
+            return AzureErrorTranslator::PathNotFound(f);
         }
     } catch (const ::Azure::Core::RequestFailedException& ex) {
         LogRequestFailed(ex, f);
@@ -262,7 +262,7 @@ rocksdb::IOStatus BlobFilesystem::DeleteFile(const std::string& f, const rocksdb
         if (m_filesystem->DeleteFile(f)) {
             return rocksdb::IOStatus::OK();
         } else {
-            return rocksdb::IOStatus::NotFound();
+            return AzureErrorTranslator::PathNotFound(f);
         }
     } catch (const ::Azure::Core::RequestFailedException& ex) {
         LogRequestFailed(ex, f);

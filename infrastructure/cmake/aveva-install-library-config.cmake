@@ -34,11 +34,11 @@ function(aveva_install_library name)
   string(LENGTH "aveva-" prefix_length)
   string(SUBSTRING "${name}" ${prefix_length} -1 component_name)
 
-  message(STATUS "Target name: ${target_name}")
-  message(STATUS "Export name: ${export_name}")
-  message(STATUS "Package name: ${package_name}")
-  message(STATUS "Install component name: ${install_component_name}")
-  message(STATUS "Component name: ${component_name}")
+  message(VERBOSE "Target name: ${target_name}")
+  message(VERBOSE "Export name: ${export_name}")
+  message(VERBOSE "Package name: ${package_name}")
+  message(VERBOSE "Install component name: ${install_component_name}")
+  message(VERBOSE "Component name: ${component_name}")
 
   install(
     TARGETS "${target_name}" COMPONENT "${install_component_name}"
@@ -60,32 +60,12 @@ function(aveva_install_library name)
 
   option(
     ${project_prefix}_INSTALL_CONFIG_FILE_PACKAGE
-    "Enable building examples. Default: ${PROJECT_IS_TOP_LEVEL}. Values: { ON, OFF }."
+    "Install the CMake config package. Default: ${PROJECT_IS_TOP_LEVEL}. Values: { ON, OFF }."
     ${PROJECT_IS_TOP_LEVEL}
   )
 
-  # By default, install the config package
-  set(install_config_package ON)
-
-  # Turn OFF installation of config package by default if,
-  # in order of precedence:
-  # 1. The specific package variable is set to OFF
-  # 2. The package name is not in the list of packages to install config files
-  if(DEFINED aveva_INSTALL_CONFIG_FILE_PACKAGES)
-    if(
-      NOT "${install_component_name}"
-          IN_LIST
-          aveva_INSTALL_CONFIG_FILE_PACKAGES
-    )
-        set(install_config_package OFF)
-    endif()
-  endif()
-
-  if(DEFINED ${project_prefix}_INSTALL_CONFIG_FILE_PACKAGE)
-    set(install_config_package
-      ${${project_prefix}_INSTALL_CONFIG_FILE_PACKAGE}
-    )
-  endif()
+  # The per-package option is the only switch; it always exists after option() above.
+  set(install_config_package ${${project_prefix}_INSTALL_CONFIG_FILE_PACKAGE})
 
   if(install_config_package)
     message(
@@ -107,22 +87,26 @@ function(aveva_install_library name)
       "${CMAKE_CURRENT_BINARY_DIR}/${package_name}-config.cmake"
     )
 
-    set(package_install_dir "${name}")
-    set(package_install_dir "${CMAKE_INSTALL_PREFIX}/share/${package_install_dir}")
+    set(package_install_dir "${CMAKE_INSTALL_DATADIR}/${name}")
     configure_package_config_file(
       "${config_file_template}"
       "${config_package_file}"
       INSTALL_DESTINATION "${package_install_dir}"
-      PATH_VARS PROJECT_NAME PROJECT_VERSION
     )
 
     set(config_version_file
       "${CMAKE_CURRENT_BINARY_DIR}/${package_name}-config-version.cmake"
     )
+    # Pre-1.0 releases may break API between minors; from 1.0 on only a major bump is breaking.
+    if(PROJECT_VERSION_MAJOR EQUAL 0)
+      set(_aveva_version_compatibility SameMinorVersion)
+    else()
+      set(_aveva_version_compatibility SameMajorVersion)
+    endif()
     write_basic_package_version_file(
       "${config_version_file}"
       VERSION "${PROJECT_VERSION}"
-      COMPATIBILITY ExactVersion
+      COMPATIBILITY ${_aveva_version_compatibility}
     )
 
     install(
