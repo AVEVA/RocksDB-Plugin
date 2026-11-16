@@ -39,32 +39,6 @@ this mode to check the build before you point the tool at Azure.
     --num=100000
 ```
 
-## Experimental scan followed by MultiGet
-
-Set `AVEVA_DB_BENCH_SCAN_BEFORE_MULTIREAD=2000` with
-`--benchmarks=multireadrandom --batch_size=2000 --multiread_batched=0 --async_io=0`
-to perform a fresh iterator scan before each vector-overload MultiGet.
-Only normal single-column-family Open is wrapped. The tool fails if the hook
-was enabled but never exercised. The default, with the variable unset, is unchanged.
-
-The scan starts at the batch's first random key and visits up to 2000 records,
-stopping at the end of the database. The iterator is released before fetching
-the original random batch. This models GraphDB's scan-then-fetch sequencing;
-it does not reproduce separate index/node records, ID mapping, authorization,
-filtering, or production request frequencies. One of the fetched keys also
-starts the scan. Use it as a synthetic sensitivity workload, not GraphDB parity.
-
-`SCAN_THEN_MULTIGET` reports actual query, scanned-record and fetched-key counts.
-Stock db_bench reports the fetched keys as operations; their elapsed time includes
-the scans. Divide the query count by benchmark seconds for query throughput.
-Do not compare this combined rate directly to point-only `multireadrandom`.
-
-The db-bench build enables LZ4 support. Use `--block_size=16384
---compression_type=lz4` to match GraphDB's block and compression settings.
-These options do not rewrite existing SST files when reusing a database.
-Plugin log verbosity is controlled by `AVEVA_DB_BENCH_LOG_LEVEL`
-(`trace|debug|info|warning|error|fatal`, default `info`).
-
 ## Prerequisites for an Azure-backed run
 
 Gather these items before you start.
@@ -244,6 +218,44 @@ Check these `--statistics=1` counters:
 - A counter that shows `COUNT: 0 SUM: 0` means your benchmark run did not
   use that code path. For example, a short `fillseq`-only run shows no
   compaction stats. This result is not an error.
+
+## Custom Scan + MultiGet
+
+Stock db_bench has no benchmark that scans and then does a MultiGet. This
+wrapper adds one to imitate how GraphDB reads a range and then looks up keys.
+
+Turn it on with `--aveva_scan_before_multiread=N`, plus
+`--benchmarks=multireadrandom --multiread_batched=0 --async_io=0`
+(for example `--batch_size=2000`). Before each MultiGet, the tool scans up
+to `N` records. If the flag is left out or set to 0, it runs a normal MultiGet with no scan.
+
+- The scan starts at the first key of the random batch and stops after `N`
+  records or at the end of the database. It then looks up the original
+  random keys.
+- Only the normal Open is supported. The tool exits with an error if the flag
+  is set but the scan never ran.
+- This is a rough imitation, not a real GraphDB query. The scanned records and
+  the looked-up keys are not linked the way an index and its nodes would be.
+
+When the run ends, the tool prints a `SCAN_THEN_MULTIGET` line with the counts
+of queries, scanned records and bytes, and keys fetched and found. db_bench
+counts each fetched key as one operation, and its elapsed time includes the
+scans. To get queries per second, divide the query count by the run time. Don't
+compare this rate to plain `multireadrandom`, which has no scans.
+
+## GraphDB-compatible settings and logging
+
+The wrapper defaults to GraphDB's settings: `--block_size=16384
+--compression_type=lz4`. Upstream db_bench uses different defaults. Pass either
+flag to override it (for example `--compression_type=none`). These settings do
+not change SST files that already exist in a reused database.
+
+Set the plugin's log level with `--aveva_log_level`
+(`trace|debug|info|warning|error|fatal`, default `info`). Debug logging slows
+down write-heavy runs.
+
+`--aveva_log_level` and `--aveva_scan_before_multiread` only exist in this
+wrapper. They are gflags, so they also work in a `--flagfile`.
 
 ## Where to look for performance improvements
 

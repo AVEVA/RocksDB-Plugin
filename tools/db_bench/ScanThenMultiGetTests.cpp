@@ -6,6 +6,10 @@
 #include <gtest/gtest.h>
 #include <rocksdb/env.h>
 
+#include <memory>
+#include <string>
+#include <vector>
+
 namespace AVEVA::RocksDB::Plugin::Bench {
 namespace {
 
@@ -42,10 +46,13 @@ TEST_F(ScanThenMultiGetTests, ScansBeforeFetchingOriginalBatch) {
         ASSERT_EQ(statuses.size(), 2);
         EXPECT_TRUE(statuses[0].ok());
         EXPECT_TRUE(statuses[1].ok());
+
+        // get b and e
         EXPECT_EQ(values[0], "value-b");
         EXPECT_EQ(values[1], "value-e");
         EXPECT_EQ(counters.queries.load(), 1);
         EXPECT_EQ(counters.scannedRecords.load(), 3);
+        EXPECT_EQ(counters.scannedBytes.load(), 24); // b, c, d: 1-byte key + 7-byte value each
         EXPECT_EQ(counters.fetchedKeys.load(), 2);
         EXPECT_EQ(counters.foundKeys.load(), 2);
     }
