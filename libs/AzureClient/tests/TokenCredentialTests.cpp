@@ -313,6 +313,61 @@ TEST(TokenCredentialTests, CachingTokenCredential_InvalidatesCacheWhenScopesChan
     EXPECT_EQ(inner->RequestedScopes().at(1), (std::vector<std::string>{"scope-b"}));
 }
 
+TEST(TokenCredentialTests, CachingTokenCredential_CoalescesInterleavedScopesUntilEachRefreshCompletes) {
+    boost::asio::io_context context;
+    auto inner = std::make_shared<ScriptedTokenCredential>();
+    inner->EnqueueDeferred({}, MakeToken("token-a", std::chrono::hours(1)));
+    inner->EnqueueDeferred({}, MakeToken("token-b", std::chrono::hours(1)));
+    inner->EnqueueImmediate(std::make_error_code(std::errc::permission_denied), {});
+    auto credential = TestCachingCredential::Create(inner, RefreshWindow);
+
+    auto leaderA = Start(context, credential, {"scope-a"});
+    auto leaderB = Start(context, credential, {"scope-b"});
+    auto followerA = Start(context, credential, {"scope-a"});
+    EXPECT_EQ(inner->CallCount(), 2);
+    EXPECT_FALSE(followerA.Done());
+
+    // Completing B must not discard the still-running refresh for A.
+    EXPECT_EQ(inner->CompletePending(1U), AVEVA::AzureClient::Tests::Settlement::Settled);
+    Poll(context);
+    auto laterFollowerA = Start(context, credential, {"scope-a"});
+    EXPECT_EQ(inner->CallCount(), 2);
+    EXPECT_FALSE(laterFollowerA.Done());
+
+    EXPECT_EQ(inner->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
+    Poll(context);
+    ASSERT_TRUE(leaderB.Done());
+    EXPECT_EQ(TokenOf(leaderB.Result()), "token-b");
+    for (auto* operation : {&leaderA, &followerA, &laterFollowerA}) {
+        ASSERT_TRUE(operation->Done());
+        EXPECT_EQ(TokenOf(operation->Result()), "token-a");
+    }
+}
+
+TEST(TokenCredentialTests, CachingTokenCredential_InterleavedScopesDoNotDuplicateABackgroundRefresh) {
+    boost::asio::io_context context;
+    auto inner = std::make_shared<ScriptedTokenCredential>();
+    inner->EnqueueImmediate({}, MakeToken("old-a", InsideRefreshWindow));
+    inner->EnqueueDeferred({}, MakeToken("new-a", std::chrono::hours(1)));
+    inner->EnqueueDeferred({}, MakeToken("token-b", std::chrono::hours(1)));
+    inner->EnqueueImmediate(std::make_error_code(std::errc::permission_denied), {});
+    auto credential = TestCachingCredential::Create(inner, RefreshWindow);
+
+    EXPECT_EQ(TokenOf(Get(context, credential, {"scope-a"})), "old-a");
+    EXPECT_EQ(TokenOf(Get(context, credential, {"scope-a"})), "old-a");
+    auto otherScope = Start(context, credential, {"scope-b"});
+    EXPECT_EQ(TokenOf(Get(context, credential, {"scope-a"})), "old-a");
+    EXPECT_EQ(inner->CallCount(), 3);
+
+    EXPECT_EQ(inner->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
+    Poll(context);
+    EXPECT_EQ(TokenOf(Get(context, credential, {"scope-a"})), "new-a");
+    EXPECT_EQ(inner->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
+    Poll(context);
+    ASSERT_TRUE(otherScope.Done());
+    EXPECT_EQ(TokenOf(otherScope.Result()), "token-b");
+}
+
 TEST(TokenCredentialTests, CachingTokenCredential_RefreshFailureDoesNotDiscardPreviousScopeCache) {
     boost::asio::io_context context;
     auto inner = std::make_shared<ScriptedTokenCredential>();

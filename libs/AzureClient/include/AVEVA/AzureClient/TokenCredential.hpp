@@ -18,6 +18,7 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/system/system_error.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <concepts>
 #include <cstdint>
@@ -339,7 +340,7 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
     [[nodiscard]] std::shared_ptr<RefreshState> NewRefreshState(const ScopeList& scopes) {
         auto state = std::make_shared<RefreshState>();
         state->Scopes = scopes;
-        m_inFlightRefresh = state;
+        m_inFlightRefreshes.push_back(state);
         return state;
     }
 
@@ -366,17 +367,20 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
             result.Immediate = std::unexpected(m_lastFailure);
             return result;
         }
+        const auto inFlight = std::ranges::find_if(m_inFlightRefreshes, [&scopes](const auto& state) {
+            return SameScopes(state->Scopes, scopes) == ScopeMatch::Same;
+        });
         if (tokenStillValid) {
             // Inside the refresh window: serve the still-valid token now and refresh in the background
             // (joining a refresh that is already running).
             result.Immediate = m_cachedToken;
-            if (!m_inFlightRefresh || SameScopes(m_inFlightRefresh->Scopes, scopes) == ScopeMatch::Different) {
+            if (inFlight == m_inFlightRefreshes.end()) {
                 result.BackgroundRefresh = NewRefreshState(scopes);
             }
             return result;
         }
-        if (m_inFlightRefresh && SameScopes(m_inFlightRefresh->Scopes, scopes) == ScopeMatch::Same) {
-            result.State = m_inFlightRefresh;
+        if (inFlight != m_inFlightRefreshes.end()) {
+            result.State = *inFlight;
             return result;
         }
         result.State = NewRefreshState(scopes);
@@ -447,9 +451,7 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
     void Finish(const std::shared_ptr<RefreshState>& state, const TokenResult& result) {
         {
             std::scoped_lock const lock(m_mutex);
-            if (m_inFlightRefresh == state) {
-                m_inFlightRefresh.reset();
-            }
+            std::erase(m_inFlightRefreshes, state);
         }
         std::vector<std::pair<WaiterId, Waiter>> waiters;
         {
@@ -540,7 +542,7 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
     std::chrono::seconds m_refreshWindow;
     TClock m_clock;
     std::mutex m_mutex;
-    std::shared_ptr<RefreshState> m_inFlightRefresh;
+    std::vector<std::shared_ptr<RefreshState>> m_inFlightRefreshes;
     ScopeList m_cachedScopes;
     AccessToken m_cachedToken;
     CacheEntry m_cacheEntry = CacheEntry::Empty;
