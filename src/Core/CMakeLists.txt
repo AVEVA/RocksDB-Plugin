@@ -6,7 +6,6 @@ add_library(aveva-rocksdb-plugin-core
     Util.cpp
     LocalFilesystem.cpp
     LocalFile.cpp
-
 )
 add_library(aveva::rocksdb-plugin-core ALIAS aveva-rocksdb-plugin-core)
 set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../../include")
@@ -34,6 +33,7 @@ if(AVEVA_ROCKSDB_WITH_CACHELIB)
         CacheLibSecondaryCache.cpp
       PUBLIC
       FILE_SET HEADERS
+      BASE_DIRS "${base-include-dir}"
       FILES
         "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/CacheLibSecondaryCache.hpp"
     )

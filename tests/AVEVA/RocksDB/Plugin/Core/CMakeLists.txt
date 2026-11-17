@@ -5,9 +5,12 @@ add_executable(aveva-rocksdb-plugin-core-tests
     SecondaryCacheFactoryTests.cpp
     SecondaryCacheContractTests.cpp
     SecondaryCacheRocksDbTests.cpp
+    SecondaryCacheTestSupport.hpp
 )
 if(AVEVA_ROCKSDB_WITH_CACHELIB)
-    target_sources(aveva-rocksdb-plugin-core-tests PRIVATE CacheLibSecondaryCacheTests.cpp)
+    target_sources(aveva-rocksdb-plugin-core-tests PRIVATE
+        CacheLibSecondaryCacheTests.cpp
+    )
 endif()
 
 target_link_libraries(aveva-rocksdb-plugin-core-tests PRIVATE GTest::gtest GTest::gmock aveva-rocksdb-plugin-core aveva-rocksdb-plugin-core-mocks)
