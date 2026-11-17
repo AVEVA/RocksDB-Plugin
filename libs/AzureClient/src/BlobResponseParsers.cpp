@@ -292,16 +292,15 @@ constexpr DateField MinuteSeparator{.Offset = 15U, .Length = 1U}; // ":"
 constexpr DateField Second{.Offset = 16U, .Length = 2U};
 constexpr DateField Zone{.Offset = 18U, .Length = 4U}; // " GMT"
 
-// Two-digit years are read as 20xx, then pushed back a century if that would place them
-// more than 50 years in the future (RFC 9110 5.6.7).
-constexpr int CenturyBase = 2000;
+// Two-digit years take the reference year's century, then move by a century so that they land
+// in the 100-year window ending 50 years after the reference year (RFC 9110 5.6.7).
 constexpr int MaxYearsAhead = 50;
 constexpr int YearsPerCentury = 100;
 constexpr std::size_t WeekdaySeparatorLength = 2U; // ", "
 } // namespace Rfc850Layout
 
 [[nodiscard]] std::optional<std::chrono::system_clock::time_point>
-ParseRfc850HttpDate(std::string_view value) noexcept {
+ParseRfc850HttpDate(std::string_view value, std::chrono::year referenceYear) noexcept {
     using namespace Rfc850Layout;
 
     const std::size_t comma = value.find(", ");
@@ -335,11 +334,12 @@ ParseRfc850HttpDate(std::string_view value) noexcept {
         return std::nullopt;
     }
 
-    const int currentYear = static_cast<int>(
-        std::chrono::year_month_day{std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now())}.year());
-    int year = CenturyBase + static_cast<int>(*shortYear);
+    const int currentYear = static_cast<int>(referenceYear);
+    int year = currentYear - (currentYear % YearsPerCentury) + static_cast<int>(*shortYear);
     if (year > (currentYear + MaxYearsAhead)) {
         year -= YearsPerCentury;
+    } else if (year + YearsPerCentury <= currentYear + MaxYearsAhead) {
+        year += YearsPerCentury;
     }
 
     return BuildUtcTimePoint(std::chrono::year{year}, std::chrono::month{*month}, std::chrono::day{*day},
@@ -577,6 +577,13 @@ Models::LeaseDurationType ParseLeaseDurationType(std::string_view value) {
 }
 
 std::optional<std::chrono::system_clock::time_point> ParseHttpDateHeader(std::string_view value) noexcept {
+    return ParseHttpDateHeader(
+        value,
+        std::chrono::year_month_day{std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now())}.year());
+}
+
+std::optional<std::chrono::system_clock::time_point> ParseHttpDateHeader(std::string_view value,
+                                                                         std::chrono::year referenceYear) noexcept {
     value = TrimWhitespace(value);
     if (value.empty()) {
         return std::nullopt;
@@ -585,7 +592,7 @@ std::optional<std::chrono::system_clock::time_point> ParseHttpDateHeader(std::st
     if (const auto rfc1123 = ParseRfc1123HttpDate(value); rfc1123.has_value()) {
         return rfc1123;
     }
-    if (const auto rfc850 = ParseRfc850HttpDate(value); rfc850.has_value()) {
+    if (const auto rfc850 = ParseRfc850HttpDate(value, referenceYear); rfc850.has_value()) {
         return rfc850;
     }
     return ParseAsctimeHttpDate(value);

@@ -567,6 +567,14 @@ template <class TFlag>
 /// <param name="value">The header value, which may have surrounding whitespace.</param>
 /// <returns>The time, or nothing when the text is not a valid HTTP-date.</returns>
 [[nodiscard]] std::optional<std::chrono::system_clock::time_point> ParseHttpDateHeader(std::string_view value) noexcept;
+/// <summary>Parses an HTTP-date, resolving an RFC 850 two-digit year relative to <paramref name="referenceYear"/>
+/// rather than the system clock, so the RFC 9110 5.6.7 century window can be tested for any year.</summary>
+/// <param name="value">The header value, which may have surrounding whitespace.</param>
+/// <param name="referenceYear">The year a two-digit year is interpreted relative to (normally the current
+/// year).</param>
+/// <returns>The time, or nothing when the text is not a valid HTTP-date.</returns>
+[[nodiscard]] std::optional<std::chrono::system_clock::time_point>
+ParseHttpDateHeader(std::string_view value, std::chrono::year referenceYear) noexcept;
 /// <summary>Formats a time as an RFC 1123 HTTP-date in GMT, truncated to whole seconds.</summary>
 /// <param name="now">The time to format.</param>
 /// <returns>The header value.</returns>

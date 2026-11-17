@@ -260,6 +260,30 @@ TEST(AS_R08_HttpDateFormsTests, AcceptsRfc1123Rfc850AndAsctime) {
     }
 }
 
+// RFC 9110 5.6.7: a two-digit year is the nearest matching year that is at most 50 years ahead of the reference
+// year. A fixed 20xx base gets this wrong from 2050 on, which only an injected reference year can show today.
+TEST(AS_R08_HttpDateFormsTests, Rfc850TwoDigitYearIsWindowedRelativeToTheReferenceYear) {
+    struct Case {
+        year Reference;
+        std::string_view Value;
+        year Expected;
+    };
+    for (const Case& c : {
+             Case{.Reference = 2026y, .Value = "Sunday, 06-Nov-94 08:49:37 GMT", .Expected = 1994y},
+             Case{.Reference = 2026y, .Value = "Thursday, 06-Nov-76 08:49:37 GMT", .Expected = 2076y},
+             Case{.Reference = 2026y, .Value = "Saturday, 06-Nov-77 08:49:37 GMT", .Expected = 1977y},
+             Case{.Reference = 2080y, .Value = "Thursday, 06-Nov-10 08:49:37 GMT", .Expected = 2110y},
+             Case{.Reference = 2080y, .Value = "Tuesday, 06-Nov-30 08:49:37 GMT", .Expected = 2130y},
+             Case{.Reference = 2080y, .Value = "Wednesday, 06-Nov-31 08:49:37 GMT", .Expected = 2031y},
+             Case{.Reference = 2199y, .Value = "Saturday, 06-Nov-49 08:49:37 GMT", .Expected = 2249y},
+         }) {
+        SCOPED_TRACE(std::string{c.Value} + " @ " + std::to_string(static_cast<int>(c.Reference)));
+        const auto parsed = ParseHttpDateHeader(c.Value, c.Reference);
+        ASSERT_TRUE(parsed.has_value());
+        EXPECT_EQ(year_month_day{floor<days>(*parsed)}.year(), c.Expected);
+    }
+}
+
 TEST(AS_A09_DateRangeTests, DatesOutsideTheClockRangeAreRejectedNotWrapped) {
     const bool clockHoldsYear9999 =
         duration_cast<seconds>(system_clock::duration::max()) > sys_days{9999y / December / 31}.time_since_epoch();
