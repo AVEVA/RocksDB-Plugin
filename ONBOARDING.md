@@ -27,8 +27,6 @@ The repo also ships shared building blocks in `src/Core/`:
 
 - A **local filesystem** abstraction (`LocalFilesystem`). Code uses it directly, and
   the caches use it as their backing store.
-- A **file-based compressed secondary cache**
-  (`FileBasedCompressedSecondaryCache`). RocksDB uses it as a secondary cache tier.
 - A **file cache with an LRU index** (`FileCache`, `LruFileIndex`). It keeps hot
   blob content on the local disk.
 
@@ -60,7 +58,7 @@ description. The PR template has a section for breaking changes. Fill it in.
 | `src/Azure/` | Azure Page Blob Filesystem. Blob I/O, directory ops, lock files, logger, and Azure SDK error translation. |
 | `src/Azure/Impl/` | Internal parts of the Azure plugin. Page blob, container client, buffer chunking, log rate limiter, storage account, and configuration. |
 | `src/Azure/Models/` | Value types for credentials and storage info (`ServicePrincipalStorageInfo`, `ChainedCredentialInfo`). |
-| `src/Core/` | Shared filesystem, file cache, LRU index, secondary cache, RocksDB helpers, and utilities. |
+| `src/Core/` | shared filesystem, file cache, LRU index, RocksDB helpers, and utilities. |
 | `include/AVEVA/RocksDB/Plugin/Azure/` | **Public** Azure plugin headers. |
 | `include/AVEVA/RocksDB/Plugin/Core/` | **Public** Core headers. |
 | `tests/AVEVA/RocksDB/Plugin/Azure/Impl/` | Azure plugin unit tests and integration tests. The integration tests need Azurite or a real Azure account. |
@@ -263,9 +261,8 @@ The flow is:
 4. From here, the consumer calls RocksDB in the normal way. Every file
    operation goes through `BlobFilesystem` → `BlobFilesystemImpl` → the Azure
    SDK page blob calls.
-5. The local caches (`FileCache` and `FileBasedCompressedSecondaryCache`)
-   sit between hot reads and the blob backend. They stop repeated downloads
-   of the same SST.
+5. The local file cache (`FileCache`) sits between hot reads and the blob
+   backend. It stops repeated downloads of the same SST.
 
 ### 6.2 Register with a service principal (dev and test)
 
@@ -367,39 +364,7 @@ rocksdb::Status status = Plugin::Register(
     maxCacheSize);
 ```
 
-### 6.4 Add the compressed secondary cache
-
-The consumer can plug in the `FileBasedCompressedSecondaryCache` as a
-secondary tier of the RocksDB block cache. The cache writes RocksDB block
-cache spill to disk, and it applies LRU eviction.
-
-```cpp
-#include <AVEVA/RocksDB/Plugin/Core/FileBasedCompressedSecondaryCache.hpp>
-#include <AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp>
-#include <rocksdb/cache.h>
-#include <rocksdb/table.h>
-
-using AVEVA::RocksDB::Plugin::Core::FileBasedCompressedSecondaryCache;
-using AVEVA::RocksDB::Plugin::Core::LocalFilesystem;
-
-auto fs = std::make_shared<LocalFilesystem>(/* args as needed */);
-auto secondary = std::make_shared<FileBasedCompressedSecondaryCache>(
-    std::filesystem::path{"C:/data/rocksdb-l2"},
-    fs,
-    512ULL * kMib,   // 512 MiB capacity.
-    logger);
-
-rocksdb::LRUCacheOptions primaryCacheOpts;
-primaryCacheOpts.capacity = 256ULL * kMib;
-primaryCacheOpts.secondary_cache = secondary;
-auto blockCache = rocksdb::NewLRUCache(primaryCacheOpts);
-
-rocksdb::BlockBasedTableOptions tableOpts;
-tableOpts.block_cache = blockCache;
-options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(tableOpts));
-```
-
-### 6.5 How a downstream service integrates the plugin
+### 6.4 How a downstream service integrates the plugin
 
 A downstream service integrates the plugin in the same pattern as above. The key
 points are:
@@ -410,8 +375,8 @@ points are:
   the returned `rocksdb::Env*` for the life of the process.
 - The service opens each RocksDB instance at
   `StorageAccount::UniquePrefix(accountUrl, container)`.
-- The service turns on the local file cache and the secondary cache to keep
-  the read path fast against blob storage.
+- The service turns on the local file cache to keep the read path fast
+  against blob storage.
 
 When you change how `Plugin::Register` behaves, how the env maps paths, or how
 errors translate, check the change against this consumer path. If you cannot
