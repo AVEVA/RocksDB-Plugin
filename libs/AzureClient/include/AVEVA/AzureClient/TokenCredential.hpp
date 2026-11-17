@@ -4,18 +4,20 @@
 #pragma once
 
 #include <boost/asio/any_completion_handler.hpp>
+#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/associated_cancellation_slot.hpp>
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/bind_cancellation_slot.hpp>
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/cancellation_type.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/error.hpp>
-#include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/system/system_error.hpp>
@@ -246,16 +248,14 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
             if (lookup.Immediate.has_value()) {
                 if (lookup.BackgroundRefresh) {
                     // Started first, so a re-entrant call joins it.
-                    boost::asio::co_spawn(co_await boost::asio::this_coro::executor,
-                                          Refresh(self, scopes, std::move(lookup.BackgroundRefresh)),
-                                          boost::asio::detached);
+                    StartRefresh(co_await boost::asio::this_coro::executor, self, scopes,
+                                 std::move(lookup.BackgroundRefresh));
                 }
                 co_return std::move(*lookup.Immediate);
             }
             if (lookup.Role == RefreshRole::Leader) {
                 // Detached so a caller that stops waiting doesn't discard a token the next request can use.
-                boost::asio::co_spawn(co_await boost::asio::this_coro::executor, Refresh(self, scopes, lookup.State),
-                                      boost::asio::detached);
+                StartRefresh(co_await boost::asio::this_coro::executor, self, scopes, lookup.State);
             }
             if (const auto waitError = co_await WaitFor(lookup.State)) {
                 // Failures are returned, never thrown: a cancelled wait reports operation_canceled.
@@ -488,11 +488,28 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         }
     }
 
-    /// <summary>Completes after <paramref name="limit"/>; abandoned (it throws operation_aborted) when the race is
-    /// lost.</summary> <param name="limit">How long to wait.</param>
-    static boost::asio::awaitable<void> Expire(std::chrono::milliseconds limit) {
-        boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor, limit);
-        co_await timer.async_wait(boost::asio::use_awaitable);
+    /// <summary>
+    /// How a refresh's time limit reaches the inner request: the timer fires on the refresh's strand, flags the
+    /// expiry and cancels the request through <c>Cancel</c>. Shared with the timer handler, which can still run
+    /// after the refresh has finished.
+    /// </summary>
+    struct RefreshDeadline {
+        boost::asio::cancellation_signal Cancel;
+        bool Expired = false;
+    };
+
+    /// <summary>
+    /// Starts a refresh detached, on its own strand: the time limit's timer and the refresh then never run at
+    /// the same time, even on a multi-threaded executor.
+    /// </summary>
+    /// <param name="executor">The executor of the caller that triggered the refresh.</param>
+    /// <param name="self">Keeps the cache alive while the refresh is pending.</param>
+    /// <param name="scopes">The scopes the token must cover.</param>
+    /// <param name="state">The refresh to perform.</param>
+    static void StartRefresh(const boost::asio::any_io_executor& executor, std::shared_ptr<CachingTokenCredential> self,
+                             ScopeList scopes, std::shared_ptr<RefreshState> state) {
+        boost::asio::co_spawn(boost::asio::make_strand(executor),
+                              Refresh(std::move(self), std::move(scopes), std::move(state)), boost::asio::detached);
     }
 
     /// <summary>
@@ -504,15 +521,26 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
     /// <returns>The inner credential's result; an exception it throws is converted to an error code.</returns>
     static boost::asio::awaitable<TokenResult> Refresh(std::shared_ptr<CachingTokenCredential> self, ScopeList scopes,
                                                        std::shared_ptr<RefreshState> state) {
-        using namespace boost::asio::experimental::awaitable_operators;
         TokenResult result = std::unexpected(std::make_error_code(std::errc::operation_not_permitted));
         if (self->m_inner) {
             try {
                 // The refresh outlives the request that started it, so a hung provider is cut off here instead.
-                auto outcome = co_await (AskInner(self, scopes) || Expire(self->m_refreshTimeout));
-                result = outcome.index() == 0
-                             ? std::move(std::get<0>(outcome))
-                             : TokenResult(std::unexpected(std::make_error_code(std::errc::timed_out)));
+                const auto executor = co_await boost::asio::this_coro::executor;
+                const auto deadline = std::make_shared<RefreshDeadline>();
+                boost::asio::steady_timer timer(executor, self->m_refreshTimeout);
+                timer.async_wait([deadline](const boost::system::error_code& waitError) {
+                    if (!waitError) {
+                        deadline->Expired = true;
+                        deadline->Cancel.emit(boost::asio::cancellation_type::terminal);
+                    }
+                });
+                result = co_await boost::asio::co_spawn(
+                    executor, AskInner(self, scopes),
+                    boost::asio::bind_cancellation_slot(deadline->Cancel.slot(), boost::asio::use_awaitable));
+                timer.cancel();
+                if (deadline->Expired && !result.has_value()) {
+                    result = std::unexpected(std::make_error_code(std::errc::timed_out));
+                }
             } catch (...) {
                 result = std::unexpected(std::make_error_code(std::errc::io_error));
             }
@@ -523,8 +551,8 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
     }
 
     /// <summary>
-    /// Asks the inner credential, converting an exception it throws into an error code so the race in
-    /// <c>Refresh</c> only ever sees values.
+    /// Asks the inner credential, converting an exception it throws into an error code so <c>Refresh</c> only ever
+    /// sees values.
     /// </summary>
     /// <param name="self">Keeps the cache alive while the inner request is pending.</param>
     /// <param name="scopes">The scopes the token must cover.</param>
