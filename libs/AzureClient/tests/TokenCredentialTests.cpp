@@ -4,6 +4,7 @@
 #include "FakeHttpClient.hpp"
 #include "TestSupport.hpp"
 
+#include <AVEVA/AzureClient/ChainedTokenCredential.hpp>
 #include <AVEVA/AzureClient/TokenCredential.hpp>
 
 #include <boost/asio/awaitable.hpp>
@@ -534,12 +535,8 @@ TEST(TokenCredentialTests, CachingTokenCredential_InnerAbortedThrowMapsToCancele
     auto inner = std::make_shared<AbortingThenRecoveringTokenCredential>(1);
     auto credential = CachingTokenCredential<AbortingThenRecoveringTokenCredential>::Create(inner, RefreshWindow);
 
-    const auto aborted = Get(context, credential);
-    ASSERT_FALSE(aborted.has_value());
-    EXPECT_EQ(aborted.error(), std::make_error_code(std::errc::operation_canceled));
-
-    // Publish skips caching operation_canceled, so the next call is not served from the negative cache: it
-    // reaches the inner credential again instead of replaying the aborted outcome.
+    // The aborted inner request maps to operation_canceled, which tells nothing about the credential: it is not
+    // cached and not handed to callers, who ask again and reach the recovered inner credential.
     EXPECT_EQ(TokenOf(Get(context, credential)), "recovered");
     EXPECT_EQ(inner->CallCount(), 2);
 }
@@ -586,11 +583,10 @@ TEST(TokenCredentialTests, CachingTokenCredential_DeliversInnerErrorToAllWaiters
     EXPECT_EQ(inner->CallCount(), 1);
 }
 
-TEST(TokenCredentialTests, CachingTokenCredential_CancelledLeaderLetsWaitersAskAgain) {
+TEST(TokenCredentialTests, CachingTokenCredential_CancelledLeaderDoesNotCancelTheRefresh) {
     boost::asio::io_context context;
     auto inner = std::make_shared<ScriptedTokenCredential>();
-    inner->EnqueueDeferred({}, MakeToken("never-delivered", std::chrono::hours(1)));
-    inner->EnqueueImmediate({}, MakeToken("second", std::chrono::hours(1)));
+    inner->EnqueueDeferred({}, MakeToken("delivered", std::chrono::hours(1)));
     auto credential = TestCachingCredential::Create(inner, RefreshWindow);
 
     auto leader = Start(context, credential);
@@ -603,10 +599,49 @@ TEST(TokenCredentialTests, CachingTokenCredential_CancelledLeaderLetsWaitersAskA
     ASSERT_TRUE(leader.Done());
     ASSERT_FALSE(leader.Result().has_value());
     EXPECT_EQ(leader.Result().error(), std::make_error_code(std::errc::operation_canceled));
-    // The cancellation says nothing about the credential, so it is neither cached nor handed to the waiter.
+    // The refresh is detached, so the caller giving up neither cancels it nor affects the waiter.
+    EXPECT_EQ(inner->PendingCount(), 1U);
+    EXPECT_FALSE(waiter.Done());
+
+    EXPECT_EQ(inner->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
+    Poll(context);
     ASSERT_TRUE(waiter.Done());
-    EXPECT_EQ(TokenOf(waiter.Result()), "second");
-    EXPECT_EQ(inner->CallCount(), 2);
+    EXPECT_EQ(TokenOf(waiter.Result()), "delivered");
+    EXPECT_EQ(inner->CallCount(), 1);
+}
+
+TEST(TokenCredentialTests, CachingTokenCredential_TokenArrivingAfterTheCallerGaveUpServesTheNextRequest) {
+    boost::asio::io_context context;
+    auto inner = std::make_shared<ScriptedTokenCredential>();
+    inner->EnqueueDeferred({}, MakeToken("late", std::chrono::hours(1)));
+    auto credential = TestCachingCredential::Create(inner, RefreshWindow);
+
+    auto first = Start(context, credential);
+    first.Cancel();
+    Poll(context);
+    ASSERT_TRUE(first.Done());
+    EXPECT_FALSE(first.Result().has_value());
+
+    EXPECT_EQ(inner->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
+    Poll(context);
+
+    EXPECT_EQ(TokenOf(Get(context, credential)), "late");
+    EXPECT_EQ(inner->CallCount(), 1);
+}
+
+TEST(TokenCredentialTests, CachingTokenCredential_HungRefreshFailsWithTimedOut) {
+    constexpr std::chrono::milliseconds RefreshTimeout{50};
+    boost::asio::io_context context;
+    auto inner = std::make_shared<ScriptedTokenCredential>();
+    inner->EnqueueDeferred({}, MakeToken("never-delivered", std::chrono::hours(1)));
+    auto credential = TestCachingCredential::Create(inner, RefreshWindow, {}, RefreshTimeout);
+
+    const auto result = Get(context, credential);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), std::make_error_code(std::errc::timed_out));
+    EXPECT_EQ(inner->PendingCount(), 0U);
+    EXPECT_EQ(inner->CallCount(), 1);
 }
 
 TEST(TokenCredentialTests, CachingTokenCredential_CancelledWaiterStopsWaitingForAHungLeader) {
@@ -635,7 +670,7 @@ TEST(TokenCredentialTests, CachingTokenCredential_CancelledWaiterStopsWaitingFor
     EXPECT_FALSE(leader.Done());
     EXPECT_EQ(inner->PendingCount(), 1U);
 
-    // The leader is unaffected by the waiter's cancellation and still completes normally afterward.
+    // The refresh is unaffected by the waiter's cancellation and still completes normally afterward.
     EXPECT_EQ(inner->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     Poll(context);
     ASSERT_TRUE(leader.Done());
@@ -711,13 +746,12 @@ TEST(TokenCredentialTests, CachingTokenCredential_FailedCachePublicationStillDel
 }
 
 TEST(TokenCredentialTests, CachingTokenCredential_FailedRefreshResultCopyStillCompletesEveryCaller) {
-    // Allocation 1 copies the completed refresh into the result shared by its waiters.
+    // Allocation 1 copies the completed refresh into the result shared by its waiters; the refresh is detached, so
+    // every caller, the one that started it included, reads that shared result.
     const auto outcome = RunFanOutWithFailingTokenCopy(1);
     EXPECT_EQ(outcome.Invocations, std::vector<int>(3, 1));
-    EXPECT_FALSE(outcome.Errors.at(0));
-    EXPECT_EQ(outcome.TokenSizes.at(0), 4096U);
-    for (std::size_t i = 1; i < 3; ++i) {
-        EXPECT_EQ(outcome.Errors.at(i), std::make_error_code(std::errc::not_enough_memory));
+    for (std::size_t i = 0; i < 3; ++i) {
+        EXPECT_EQ(outcome.Errors.at(i), std::make_error_code(std::errc::not_enough_memory)) << i;
     }
 }
 
@@ -794,4 +828,43 @@ TEST(TokenCredentialTests, CachingTokenCredential_FixedClockDrivesRefreshWindowA
     now = start + PastRefreshedTokenStart;
     EXPECT_EQ(TokenOf(Get(context, credential)), "second");
     EXPECT_EQ(inner->CallCount(), 2);
+}
+
+TEST(TokenCredentialTests, ChainedTokenCredential_CancelledCallerStopsWithoutReportingOrTryingLaterSources) {
+    using Chain = AVEVA::AzureClient::ChainedTokenCredential<ScriptedTokenCredential>;
+    boost::asio::io_context context;
+    auto first = std::make_shared<ScriptedTokenCredential>();
+    auto second = std::make_shared<ScriptedTokenCredential>();
+    first->EnqueueDeferred({}, MakeToken("never-delivered", std::chrono::hours(1)));
+    second->EnqueueImmediate({}, MakeToken("second", std::chrono::hours(1)));
+    int observed = 0;
+    auto chain = Chain::Create({first, second}, [&observed](auto, auto, auto) { ++observed; });
+
+    auto operation = StartAwaitable(context, chain->GetTokenAsync({"scope-a"}));
+    ASSERT_EQ(first->PendingCount(), 1U);
+
+    operation.Cancel();
+    Poll(context);
+
+    // Returned, not thrown, and a healthy source cancelled by the caller is not reported as failed.
+    ASSERT_TRUE(operation.Done());
+    const auto result = operation.Result();
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), std::make_error_code(std::errc::operation_canceled));
+    EXPECT_EQ(observed, 0);
+    EXPECT_EQ(second->CallCount(), 0);
+}
+
+TEST(TokenCredentialTests, ChainedTokenCredential_FailingSourceFallsThroughToNext) {
+    using Chain = AVEVA::AzureClient::ChainedTokenCredential<ScriptedTokenCredential>;
+    boost::asio::io_context context;
+    auto first = std::make_shared<ScriptedTokenCredential>();
+    auto second = std::make_shared<ScriptedTokenCredential>();
+    first->EnqueueImmediate(std::make_error_code(std::errc::connection_reset), {});
+    second->EnqueueImmediate({}, MakeToken("second", std::chrono::hours(1)));
+    int observed = 0;
+    auto chain = Chain::Create({first, second}, [&observed](auto, auto, auto) { ++observed; });
+
+    EXPECT_EQ(TokenOf(RunAwaitable(context, chain->GetTokenAsync({"scope-a"}))), "second");
+    EXPECT_EQ(observed, 1);
 }

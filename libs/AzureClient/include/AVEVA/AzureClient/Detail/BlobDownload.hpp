@@ -661,7 +661,15 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
         m_turn.emplace(strand);
         // Only ever woken by cancel(), never by expiry.
         m_turn->expires_at(std::chrono::steady_clock::time_point::max());
+        // The group is set up and awaited on the workers' strand: if every worker finished fast on another thread,
+        // it could otherwise resume this coroutine while the launcher is still installing its cancellation slot.
+        co_await boost::asio::co_spawn(strand, AwaitWorkers(strand), boost::asio::use_awaitable);
+        m_turn.reset();
+    }
 
+    /// <summary>Launches the workers on <paramref name="strand"/> and waits for all of them.</summary>
+    /// <param name="strand">The strand the workers run on; this coroutine must run on it too.</param>
+    boost::asio::awaitable<void> AwaitWorkers(boost::asio::strand<boost::asio::any_io_executor> strand) {
         const std::uint64_t remaining = *m_end - m_next;
         const std::uint64_t chunks = remaining / m_chunkSize + (remaining % m_chunkSize != 0U ? 1U : 0U);
         const std::size_t workers = gsl::narrow_cast<std::size_t>(std::min<std::uint64_t>(m_concurrency, chunks));
@@ -675,7 +683,6 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
         // Completes only after every worker has, so none can touch this object once the owner returns.
         co_await boost::asio::experimental::make_parallel_group(std::move(operations))
             .async_wait(boost::asio::experimental::wait_for_one_error(), boost::asio::use_awaitable);
-        m_turn.reset();
     }
 
     /// <summary>Checks that everything arrived in time and builds the outcome.</summary>

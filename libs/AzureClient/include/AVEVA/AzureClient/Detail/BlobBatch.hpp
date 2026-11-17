@@ -339,16 +339,23 @@ DeleteBlobsAsync(THttp& httpClient, std::shared_ptr<THttp> httpOwner,
                                                   std::move(blobNames), std::move(requestOptions));
     const std::size_t workers = std::min(options.MaxConcurrentRequests.Value(), run.ChunkCount());
     const auto strand = boost::asio::make_strand(executor);
-    using Op = decltype(boost::asio::co_spawn(strand, run.Worker(), boost::asio::deferred));
-    std::vector<Op> operations;
     try {
-        operations.reserve(workers);
-        for (std::size_t index = 0; index < workers; ++index) {
-            operations.push_back(boost::asio::co_spawn(strand, run.Worker(), boost::asio::deferred));
-        }
-        // Waits for every worker even after a failure, so nothing touches `run` once this coroutine returns.
-        co_await boost::asio::experimental::make_parallel_group(std::move(operations))
-            .async_wait(boost::asio::experimental::wait_for_one_error(), boost::asio::use_awaitable);
+        // Set up and awaited on the workers' strand: if every worker failed fast on another thread, it could
+        // otherwise resume this coroutine while the launcher is still installing its cancellation slot.
+        co_await boost::asio::co_spawn(
+            strand,
+            [&run, workers, strand]() -> boost::asio::awaitable<void> {
+                using Op = decltype(boost::asio::co_spawn(strand, run.Worker(), boost::asio::deferred));
+                std::vector<Op> operations;
+                operations.reserve(workers);
+                for (std::size_t index = 0; index < workers; ++index) {
+                    operations.push_back(boost::asio::co_spawn(strand, run.Worker(), boost::asio::deferred));
+                }
+                // Waits for every worker even after a failure, so nothing touches `run` once this returns.
+                co_await boost::asio::experimental::make_parallel_group(std::move(operations))
+                    .async_wait(boost::asio::experimental::wait_for_one_error(), boost::asio::use_awaitable);
+            },
+            boost::asio::use_awaitable);
     } catch (...) {
         run.Fail(MakeFailureFromCurrentException());
     }

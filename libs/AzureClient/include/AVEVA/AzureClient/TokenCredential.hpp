@@ -13,7 +13,9 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/error.hpp>
+#include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/post.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/system/system_error.hpp>
@@ -52,6 +54,12 @@ inline constexpr std::chrono::seconds DefaultTokenCredentialFailedRefreshBackoff
 /// calling the inner credential again, so a failing identity provider is not hammered by every request.
 /// </summary>
 inline constexpr std::chrono::seconds DefaultTokenCredentialNegativeCacheWindow{5};
+
+/// <summary>
+/// The longest one refresh of the inner credential may take. Refreshes are not tied to the request that started them,
+/// so this bounds how long a hung provider can hold the in-flight state; on expiry the refresh fails with timed_out.
+/// </summary>
+inline constexpr std::chrono::seconds DefaultTokenCredentialRefreshTimeout{120};
 
 /// <summary>
 /// A bearer token together with the moment it stops being valid.
@@ -150,9 +158,10 @@ concept TokenClockLike =
 /// <c>DefaultTokenCredentialNegativeCacheWindow</c> (5 s) and returned without calling the inner credential.
 ///
 /// Thread safety: <c>GetTokenAsync</c> may be called concurrently from several threads; internal state is
-/// mutex-protected. The first caller without a usable token performs the inner request inside its own
-/// coroutine and the others wait for its outcome; a background refresh runs as a detached coroutine on the
-/// executor of the caller that triggered it. If the leading caller is cancelled, the waiters ask again.
+/// mutex-protected. Every refresh of the inner credential runs as a detached coroutine on the executor of the caller
+/// that triggered it; callers without a usable token wait for its outcome, so a caller that stops waiting
+/// (cancelled or timed out) does not discard a token the next request can use. Each refresh is bounded by
+/// <c>refreshTimeout</c> and fails with timed_out when it expires.
 /// </summary>
 /// <typeparam name="TInner">The credential whose tokens are cached.</typeparam>
 /// <typeparam name="TClock">The clock used for expiry and backoff decisions.</typeparam>
@@ -182,12 +191,16 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
     /// <param name="inner">The credential to cache.</param>
     /// <param name="refreshWindow">How long before expiry a refresh starts.</param>
     /// <param name="clock">The clock to read the time from.</param>
+    /// <param name="refreshTimeout">The longest one refresh of the inner credential may take.</param>
     /// <returns>The new cache.</returns>
     /// <exception cref="std::invalid_argument">Thrown when <paramref name="refreshWindow"/> is negative.</exception>
     [[nodiscard]] static std::shared_ptr<CachingTokenCredential>
     Create(std::shared_ptr<TInner> inner, std::chrono::seconds refreshWindow = DefaultTokenCredentialRefreshWindow,
-           TClock clock = {}) {
-        return std::make_shared<CachingTokenCredential>(CreateKey{}, std::move(inner), refreshWindow, std::move(clock));
+           TClock clock = {},
+           std::chrono::milliseconds refreshTimeout =
+               std::chrono::duration_cast<std::chrono::milliseconds>(DefaultTokenCredentialRefreshTimeout)) {
+        return std::make_shared<CachingTokenCredential>(CreateKey{}, std::move(inner), refreshWindow, std::move(clock),
+                                                        refreshTimeout);
     }
 
     /// <summary>
@@ -197,9 +210,12 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
     /// <param name="inner">The credential to cache.</param>
     /// <param name="refreshWindow">How long before expiry a refresh starts.</param>
     /// <param name="clock">The clock to read the time from.</param>
+    /// <param name="refreshTimeout">The longest one refresh of the inner credential may take.</param>
     /// <exception cref="std::invalid_argument">Thrown when <paramref name="refreshWindow"/> is negative.</exception>
-    CachingTokenCredential(CreateKey, std::shared_ptr<TInner> inner, std::chrono::seconds refreshWindow, TClock clock)
-        : m_inner(std::move(inner)), m_refreshWindow(refreshWindow), m_clock(std::move(clock)) {
+    CachingTokenCredential(CreateKey, std::shared_ptr<TInner> inner, std::chrono::seconds refreshWindow, TClock clock,
+                           std::chrono::milliseconds refreshTimeout)
+        : m_inner(std::move(inner)), m_refreshWindow(refreshWindow), m_refreshTimeout(refreshTimeout),
+          m_clock(std::move(clock)) {
         // A negative window makes every token look about to expire, so each request would start a refresh.
         if (m_refreshWindow < std::chrono::seconds::zero()) {
             throw std::invalid_argument("CachingTokenCredential refreshWindow must not be negative.");
@@ -237,13 +253,15 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
                 co_return std::move(*lookup.Immediate);
             }
             if (lookup.Role == RefreshRole::Leader) {
-                co_return co_await Refresh(self, scopes, std::move(lookup.State));
+                // Detached so a caller that stops waiting doesn't discard a token the next request can use.
+                boost::asio::co_spawn(co_await boost::asio::this_coro::executor, Refresh(self, scopes, lookup.State),
+                                      boost::asio::detached);
             }
             if (const auto waitError = co_await WaitFor(lookup.State)) {
                 // Failures are returned, never thrown: a cancelled wait reports operation_canceled.
                 co_return std::unexpected(std::make_error_code(std::errc::operation_canceled));
             }
-            // A cancelled leader tells nothing about the credential, so ask again.
+            // A cancelled refresh tells nothing about the credential, so ask again.
             if (lookup.State->Result.has_value() ||
                 lookup.State->Result.error() != std::make_error_code(std::errc::operation_canceled)) {
                 co_return lookup.State->Result;
@@ -470,6 +488,13 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         }
     }
 
+    /// <summary>Completes after <paramref name="limit"/>; abandoned (it throws operation_aborted) when the race is
+    /// lost.</summary> <param name="limit">How long to wait.</param>
+    static boost::asio::awaitable<void> Expire(std::chrono::milliseconds limit) {
+        boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor, limit);
+        co_await timer.async_wait(boost::asio::use_awaitable);
+    }
+
     /// <summary>
     /// Asks the inner credential and publishes the outcome to the cache and to every waiter.
     /// </summary>
@@ -479,21 +504,15 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
     /// <returns>The inner credential's result; an exception it throws is converted to an error code.</returns>
     static boost::asio::awaitable<TokenResult> Refresh(std::shared_ptr<CachingTokenCredential> self, ScopeList scopes,
                                                        std::shared_ptr<RefreshState> state) {
+        using namespace boost::asio::experimental::awaitable_operators;
         TokenResult result = std::unexpected(std::make_error_code(std::errc::operation_not_permitted));
         if (self->m_inner) {
             try {
-                result = co_await GetTokenForScopes(*self->m_inner, scopes);
-            } catch (const std::bad_alloc&) {
-                result = std::unexpected(std::make_error_code(std::errc::not_enough_memory));
-            } catch (const std::system_error& e) {
-                result = std::unexpected(e.code());
-            } catch (const boost::system::system_error& e) {
-                // boost::system::system_error derives from std::runtime_error, not std::system_error, so it
-                // needs its own clause; otherwise a cancelled inner request (e.g. from cancel_after) would
-                // fall through to the generic io_error catch below and be negative-cached as such.
-                result = std::unexpected(e.code() == boost::asio::error::operation_aborted
-                                             ? std::make_error_code(std::errc::operation_canceled)
-                                             : std::error_code(e.code()));
+                // The refresh outlives the request that started it, so a hung provider is cut off here instead.
+                auto outcome = co_await (AskInner(self, scopes) || Expire(self->m_refreshTimeout));
+                result = outcome.index() == 0
+                             ? std::move(std::get<0>(outcome))
+                             : TokenResult(std::unexpected(std::make_error_code(std::errc::timed_out)));
             } catch (...) {
                 result = std::unexpected(std::make_error_code(std::errc::io_error));
             }
@@ -501,6 +520,33 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
         self->Publish(scopes, result);
         self->Finish(state, result);
         co_return result;
+    }
+
+    /// <summary>
+    /// Asks the inner credential, converting an exception it throws into an error code so the race in
+    /// <c>Refresh</c> only ever sees values.
+    /// </summary>
+    /// <param name="self">Keeps the cache alive while the inner request is pending.</param>
+    /// <param name="scopes">The scopes the token must cover.</param>
+    /// <returns>The inner credential's result, or the error its exception maps to.</returns>
+    static boost::asio::awaitable<TokenResult> AskInner(std::shared_ptr<CachingTokenCredential> self,
+                                                        ScopeList scopes) {
+        try {
+            co_return co_await GetTokenForScopes(*self->m_inner, scopes);
+        } catch (const std::bad_alloc&) {
+            co_return std::unexpected(std::make_error_code(std::errc::not_enough_memory));
+        } catch (const std::system_error& e) {
+            co_return std::unexpected(e.code());
+        } catch (const boost::system::system_error& e) {
+            // boost::system::system_error derives from std::runtime_error, not std::system_error, so it
+            // needs its own clause; otherwise a cancelled inner request (e.g. from cancel_after) would
+            // fall through to the generic io_error catch below and be negative-cached as such.
+            co_return std::unexpected(e.code() == boost::asio::error::operation_aborted
+                                          ? std::make_error_code(std::errc::operation_canceled)
+                                          : std::error_code(e.code()));
+        } catch (...) {
+            co_return std::unexpected(std::make_error_code(std::errc::io_error));
+        }
     }
 
     /// <summary>
@@ -540,6 +586,7 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
 
     std::shared_ptr<TInner> m_inner;
     std::chrono::seconds m_refreshWindow;
+    std::chrono::milliseconds m_refreshTimeout;
     TClock m_clock;
     std::mutex m_mutex;
     std::vector<std::shared_ptr<RefreshState>> m_inFlightRefreshes;

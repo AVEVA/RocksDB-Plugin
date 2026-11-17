@@ -9,6 +9,8 @@
 #include <AVEVA/HttpClient/Units.hpp>
 
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/cancellation_type.hpp>
+#include <boost/asio/this_coro.hpp>
 
 #include <algorithm>
 #include <cstddef>
@@ -95,6 +97,13 @@ class ChainedTokenCredential final : public std::enable_shared_from_this<Chained
             TokenResult result = co_await self->m_sources[index]->GetTokenAsync(scopes);
             if (result.has_value()) {
                 co_return result;
+            }
+            // The caller gave up; that says nothing about this source, so stop without reporting it. The chain's
+            // own cancellation state is checked rather than the error, so a source that timed out under its own
+            // cancellation still falls through to the next one. The next co_await would throw operation_aborted.
+            const auto cancellation = co_await boost::asio::this_coro::cancellation_state;
+            if (cancellation.cancelled() != boost::asio::cancellation_type::none) {
+                co_return std::unexpected(std::make_error_code(std::errc::operation_canceled));
             }
             lastError = result.error();
             if (self->m_observer) {

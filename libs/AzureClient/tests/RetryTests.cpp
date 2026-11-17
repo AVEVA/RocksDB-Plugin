@@ -666,6 +666,10 @@ TEST(RetryTests, HungTokenAcquisitionIsBoundedByTheTotalDeadline) {
     ASSERT_FALSE(ValueOrFail(observed).has_value());
     EXPECT_EQ(ValueOrFail(observed).error().Code, std::make_error_code(std::errc::timed_out));
     EXPECT_EQ(httpClient.RequestCount(), 0U);
+
+    // The detached token request outlives the timed-out call; finish it so the client can shut down promptly.
+    EXPECT_EQ(credential->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
+    httpClient.Poll();
 }
 
 TEST(RetryTests, UnauthorizedResponseIsOnlyRefreshedOnce) {

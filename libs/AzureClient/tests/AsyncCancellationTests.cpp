@@ -56,7 +56,8 @@ TEST(AsyncBehaviorTests, CancellationDuringTokenAcquisitionCompletesPromptlyAndN
     ASSERT_FALSE(operation.Result().has_value());
     EXPECT_TRUE(IsCanceled(operation.Result().error()));
 
-    EXPECT_EQ(credential->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::NothingPending);
+    // The token request is detached from the cancelled call, so it still finishes; its late token is ignored.
+    EXPECT_EQ(credential->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
     httpClient.Poll();
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
