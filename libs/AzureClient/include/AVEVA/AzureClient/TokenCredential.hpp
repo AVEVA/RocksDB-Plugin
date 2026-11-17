@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <AVEVA/AzureClient/BlobStorageErrorCode.hpp>
+
 #include <boost/asio/any_completion_handler.hpp>
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/as_tuple.hpp>
@@ -156,7 +158,10 @@ concept TokenClockLike =
 /// <c>refreshWindow</c> remains before expiry (the stale-but-valid token is served meanwhile), concurrent
 /// requests for the same scopes coalesce into a single inner request, and after a failed refresh of a
 /// still-valid token the cached token is reused for <c>DefaultTokenCredentialFailedRefreshBackoff</c> (30 s)
-/// before another refresh is attempted. When there is no valid token at all, a failure is remembered for
+/// before another refresh is attempted. A refresh that replaces a still-valid token with one that is again inside
+/// the refresh window backs off the same way, so a source that keeps returning short-lived tokens is not asked on
+/// every call. A token that is already expired when it arrives is treated as an InvalidResponse failure. When there
+/// is no valid token at all, a failure is remembered for
 /// <c>DefaultTokenCredentialNegativeCacheWindow</c> (5 s) and returned without calling the inner credential.
 ///
 /// Thread safety: <c>GetTokenAsync</c> may be called concurrently from several threads; internal state is
@@ -545,6 +550,7 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
                 result = std::unexpected(std::make_error_code(std::errc::io_error));
             }
         }
+        self->RejectExpired(result);
         self->Publish(scopes, result);
         self->Finish(state, result);
         co_return result;
@@ -578,8 +584,21 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
     }
 
     /// <summary>
+    /// Turns a token that is already expired into an InvalidResponse failure. Delivering it would only earn a 401,
+    /// and caching it would make every later call refresh again with no backoff; as a failure it is remembered for
+    /// the negative-cache window like any other.
+    /// </summary>
+    /// <param name="result">The inner credential's outcome, replaced in place when it holds an expired token.</param>
+    void RejectExpired(TokenResult& result) {
+        if (result.has_value() && result->ExpiresOn <= m_clock()) {
+            result = std::unexpected(make_error_code(BlobStorageErrorCode::InvalidResponse));
+        }
+    }
+
+    /// <summary>
     /// Stores a token, or remembers a failure, in the cache. Caching is an optimisation: a failure to publish must
-    /// not prevent delivering the outcome.
+    /// not prevent delivering the outcome. A refresh that replaces a still-valid token with one that is again
+    /// inside the refresh window gains nothing, so the next refresh waits for the failed-refresh backoff.
     /// </summary>
     /// <param name="scopes">The scopes the outcome is for.</param>
     /// <param name="result">The outcome to remember; a cancellation is not remembered.</param>
@@ -592,10 +611,16 @@ class CachingTokenCredential : public std::enable_shared_from_this<CachingTokenC
             if (result) {
                 auto cachedToken = *result;
                 std::scoped_lock const lock(m_mutex);
+                const bool replacesValidToken = m_cacheEntry == CacheEntry::Filled &&
+                                                SameScopes(m_cachedScopes, scopes) == ScopeMatch::Same &&
+                                                m_cachedToken.ExpiresOn > now;
                 m_cachedScopes = scopes;
                 m_cachedToken = std::move(cachedToken);
                 m_cacheEntry = CacheEntry::Filled;
                 m_nextRefreshRetryAfter.reset();
+                if (replacesValidToken && m_cachedToken.ExpiresOn - now <= m_refreshWindow) {
+                    m_nextRefreshRetryAfter = now + DefaultTokenCredentialFailedRefreshBackoff;
+                }
                 m_failureRetryAfter.reset();
             } else {
                 std::scoped_lock const lock(m_mutex);

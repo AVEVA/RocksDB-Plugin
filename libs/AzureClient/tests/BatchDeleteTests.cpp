@@ -485,21 +485,21 @@ TEST(BatchDeleteTests, ResponseMissingASubrequestIsAnInvalidResponse) {
 }
 
 // A retried batch must not replay the sub-requests of the failed attempt: their bearer tokens are re-acquired and the
-// body is rebuilt for every attempt.
+// body is rebuilt for every attempt. A 401 makes the retry fetch a fresh token.
 TEST(BatchDeleteTests, RetriedBatchRebuildsSubrequestsWithAFreshToken) {
     FakeHttpClient http;
     http.SetResponder([](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
         if (record.Body.find("token-one") != std::string::npos) {
             return FakeHttpClient::ScriptedResult{
-                .Response = HttpResponse{
-                    AVEVA::HttpStatus::ServiceUnavailable,
-                    {AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-error-code"}, AVEVA::HeaderValue{"ServerBusy"})},
-                    ""}};
+                .Response = HttpResponse{AVEVA::HttpStatus::Unauthorized,
+                                         {AVEVA::HttpHeader(AVEVA::HeaderName{"x-ms-error-code"},
+                                                            AVEVA::HeaderValue{"InvalidAuthenticationInfo"})},
+                                         ""}};
         }
         return BuildBatchResponse(record, [](const std::string&) { return PartOutcome{}; });
     });
     auto credential = std::make_shared<ScriptedTokenCredential>();
-    credential->EnqueueImmediate({}, MakeToken("token-one", -std::chrono::seconds(1)));
+    credential->EnqueueImmediate({}, MakeToken("token-one", std::chrono::hours(1)));
     credential->EnqueueImmediate({}, MakeToken("token-two", std::chrono::hours(1)));
     auto options = MakeBlobContainerClientOptions();
     options.SasToken.clear();

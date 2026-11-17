@@ -278,24 +278,57 @@ TEST(TokenCredentialTests, CachingTokenCredential_TokenShorterThanRefreshWindowI
     EXPECT_EQ(TokenOf(Get(context, credential)), "refreshed");
 }
 
-TEST(TokenCredentialTests, CachingTokenCredential_ExpiredTokenWaitsForTheRefresh) {
+// An already-expired token would only earn a 401, and caching it made every later call refresh again with no backoff.
+TEST(TokenCredentialTests, CachingTokenCredential_ExpiredTokenFromInnerIsAnInvalidResponseThatIsRememberedBriefly) {
     boost::asio::io_context context;
+    const std::chrono::system_clock::time_point start{FixedEpochOffset};
+    auto now = start;
     auto inner = std::make_shared<ScriptedTokenCredential>();
-    inner->EnqueueImmediate({}, MakeToken("expired-token", -std::chrono::seconds(1)));
-    inner->EnqueueDeferred({}, MakeToken("new-token", std::chrono::hours(1)));
-    auto credential = TestCachingCredential::Create(inner, RefreshWindow);
+    inner->EnqueueImmediate({}, AccessToken{.Token = "expired-token", .ExpiresOn = start - std::chrono::seconds(1)});
+    inner->EnqueueImmediate({}, AccessToken{.Token = "new-token", .ExpiresOn = start + std::chrono::hours(1)});
+    auto credential = ClockedCachingCredential::Create(inner, RefreshWindow, NowRef{&now});
+    const auto invalidResponse = make_error_code(AVEVA::AzureClient::BlobStorageErrorCode::InvalidResponse);
 
-    static_cast<void>(Get(context, credential));
+    const auto first = Get(context, credential);
+    ASSERT_FALSE(first.has_value());
+    EXPECT_EQ(first.error(), invalidResponse);
 
-    auto operation = Start(context, credential);
-    EXPECT_FALSE(operation.Done());
-    EXPECT_EQ(inner->PendingCount(), 1U);
+    const auto second = Get(context, credential);
+    ASSERT_FALSE(second.has_value());
+    EXPECT_EQ(second.error(), invalidResponse);
+    EXPECT_EQ(inner->CallCount(), 1);
 
-    EXPECT_EQ(inner->CompleteNext(), AVEVA::AzureClient::Tests::Settlement::Settled);
-    Poll(context);
+    now += AVEVA::AzureClient::DefaultTokenCredentialNegativeCacheWindow + std::chrono::seconds(1);
+    EXPECT_EQ(TokenOf(Get(context, credential)), "new-token");
+    EXPECT_EQ(inner->CallCount(), 2);
+}
 
-    ASSERT_TRUE(operation.Done());
-    EXPECT_EQ(TokenOf(operation.Result()), "new-token");
+// A source that keeps handing back tokens inside the refresh window (e.g. managed identity returning its own nearly
+// expired cached token) used to be asked again on every call.
+TEST(TokenCredentialTests, CachingTokenCredential_RefreshThatStaysInsideTheWindowBacksOffBeforeTheNext) {
+    boost::asio::io_context context;
+    const std::chrono::system_clock::time_point start{FixedEpochOffset};
+    auto now = start;
+    auto inner = std::make_shared<ScriptedTokenCredential>();
+    inner->EnqueueImmediate({}, AccessToken{.Token = "a", .ExpiresOn = start + InsideRefreshWindow});
+    inner->EnqueueImmediate({}, AccessToken{.Token = "b", .ExpiresOn = start + 2 * InsideRefreshWindow});
+    inner->EnqueueImmediate({}, AccessToken{.Token = "c", .ExpiresOn = start + std::chrono::hours(1)});
+    auto credential = ClockedCachingCredential::Create(inner, RefreshWindow, NowRef{&now});
+
+    // A first token inside the window is still refreshed on the next call.
+    EXPECT_EQ(TokenOf(Get(context, credential)), "a");
+    EXPECT_EQ(TokenOf(Get(context, credential)), "a");
+    EXPECT_EQ(inner->CallCount(), 2);
+
+    // That refresh brought no relief, so the next one waits for the backoff.
+    EXPECT_EQ(TokenOf(Get(context, credential)), "b");
+    EXPECT_EQ(TokenOf(Get(context, credential)), "b");
+    EXPECT_EQ(inner->CallCount(), 2);
+
+    now += AVEVA::AzureClient::DefaultTokenCredentialFailedRefreshBackoff + std::chrono::seconds(1);
+    EXPECT_EQ(TokenOf(Get(context, credential)), "b");
+    EXPECT_EQ(inner->CallCount(), 3);
+    EXPECT_EQ(TokenOf(Get(context, credential)), "c");
 }
 
 TEST(TokenCredentialTests, CachingTokenCredential_InvalidatesCacheWhenScopesChange) {
@@ -448,15 +481,13 @@ TEST(TokenCredentialTests, CachingTokenCredential_ConcurrentInWindowCallersShare
 TEST(TokenCredentialTests, CachingTokenCredential_CoalescesConcurrentCallersWithoutAValidToken) {
     boost::asio::io_context context;
     auto inner = std::make_shared<ScriptedTokenCredential>();
-    inner->EnqueueImmediate({}, MakeToken("expired-token", -std::chrono::seconds(1)));
     inner->EnqueueDeferred({}, MakeToken("refreshed-token", std::chrono::hours(1)));
     auto credential = TestCachingCredential::Create(inner, RefreshWindow);
 
-    static_cast<void>(Get(context, credential));
     auto first = Start(context, credential);
     auto second = Start(context, credential);
 
-    EXPECT_EQ(inner->CallCount(), 2);
+    EXPECT_EQ(inner->CallCount(), 1);
     EXPECT_EQ(inner->PendingCount(), 1U);
     EXPECT_FALSE(first.Done());
     EXPECT_FALSE(second.Done());
