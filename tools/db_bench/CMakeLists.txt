@@ -10,7 +10,7 @@ add_library(aveva-rocksdb-plugin-db-bench-scan STATIC
 add_library(aveva::rocksdb-plugin-db-bench-scan ALIAS aveva-rocksdb-plugin-db-bench-scan)
 target_compile_features(aveva-rocksdb-plugin-db-bench-scan PUBLIC cxx_std_23)
 target_include_directories(aveva-rocksdb-plugin-db-bench-scan PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(aveva-rocksdb-plugin-db-bench-scan PUBLIC RocksDB::rocksdb)
+target_link_libraries(aveva-rocksdb-plugin-db-bench-scan PUBLIC RocksDB::rocksdb RocksDB::db_bench_tool)
 
 add_executable(aveva_db_bench BenchmarkRunner.cpp)
 target_compile_features(aveva_db_bench PRIVATE cxx_std_23)

@@ -43,18 +43,18 @@ TEST_F(ScanThenMultiGetTests, ScansBeforeFetchingOriginalBatch) {
         ScanThenMultiGetDB db(std::move(m_db), 3, counters);
         std::vector<std::string> values;
         auto statuses = db.MultiGet({}, std::vector<rocksdb::Slice>{"b", "e"}, &values);
-        ASSERT_EQ(statuses.size(), 2);
+        ASSERT_EQ(statuses.size(), 2U);
         EXPECT_TRUE(statuses[0].ok());
         EXPECT_TRUE(statuses[1].ok());
 
         // get b and e
         EXPECT_EQ(values[0], "value-b");
         EXPECT_EQ(values[1], "value-e");
-        EXPECT_EQ(counters.queries.load(), 1);
-        EXPECT_EQ(counters.scannedRecords.load(), 3);
-        EXPECT_EQ(counters.scannedBytes.load(), 24); // b, c, d: 1-byte key + 7-byte value each
-        EXPECT_EQ(counters.fetchedKeys.load(), 2);
-        EXPECT_EQ(counters.foundKeys.load(), 2);
+        EXPECT_EQ(counters.queries.load(), 1ULL);
+        EXPECT_EQ(counters.scannedRecords.load(), 3ULL);
+        EXPECT_EQ(counters.scannedBytes.load(), 24ULL); // b, c, d: 1-byte key + 7-byte value each
+        EXPECT_EQ(counters.fetchedKeys.load(), 2ULL);
+        EXPECT_EQ(counters.foundKeys.load(), 2ULL);
     }
 }
 
@@ -66,9 +66,9 @@ TEST_F(ScanThenMultiGetTests, EndOfDatabaseDoesNotInventScannedRecords) {
         auto statuses = db.MultiGet({}, std::vector<rocksdb::Slice>{"e", "missing"}, &values);
         EXPECT_TRUE(statuses[0].ok());
         EXPECT_TRUE(statuses[1].IsNotFound());
-        EXPECT_EQ(counters.scannedRecords.load(), 1);
-        EXPECT_EQ(counters.fetchedKeys.load(), 2);
-        EXPECT_EQ(counters.foundKeys.load(), 1);
+        EXPECT_EQ(counters.scannedRecords.load(), 1ULL);
+        EXPECT_EQ(counters.fetchedKeys.load(), 2ULL);
+        EXPECT_EQ(counters.foundKeys.load(), 1ULL);
     }
 }
 
@@ -78,8 +78,8 @@ TEST_F(ScanThenMultiGetTests, EmptyBatchDoesNotScan) {
         ScanThenMultiGetDB db(std::move(m_db), 2000, counters);
         std::vector<std::string> values;
         EXPECT_TRUE(db.MultiGet({}, std::vector<rocksdb::Slice>{}, &values).empty());
-        EXPECT_EQ(counters.queries.load(), 0);
-        EXPECT_EQ(counters.scannedRecords.load(), 0);
+        EXPECT_EQ(counters.queries.load(), 0ULL);
+        EXPECT_EQ(counters.scannedRecords.load(), 0ULL);
     }
 }
 

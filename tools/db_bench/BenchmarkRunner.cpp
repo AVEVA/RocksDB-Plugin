@@ -71,8 +71,14 @@ int main(int argc, char** argv) {
     using AVEVA::RocksDB::Plugin::Azure::Models::ServicePrincipalStorageInfo;
 
     // GraphDB uses 16 KiB blocks with LZ4
-    GFLAGS_NAMESPACE::SetCommandLineOptionWithMode("block_size", "16384", GFLAGS_NAMESPACE::SET_FLAGS_DEFAULT);
-    GFLAGS_NAMESPACE::SetCommandLineOptionWithMode("compression_type", "lz4", GFLAGS_NAMESPACE::SET_FLAGS_DEFAULT);
+    // An empty result means the flag no longer exists upstream; fail rather than silently drop the default.
+    for (const auto& [name, value] : {std::pair{"block_size", "16384"}, std::pair{"compression_type", "lz4"}}) {
+        if (GFLAGS_NAMESPACE::SetCommandLineOptionWithMode(name, value, GFLAGS_NAMESPACE::SET_FLAGS_DEFAULT)
+                .empty()) {
+            std::cerr << "aveva_db_bench: could not set default for --" << name << "\n";
+            return 2;
+        }
+    }
 
     // Parse wrapper flags
     GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, /*remove_flags=*/false);
