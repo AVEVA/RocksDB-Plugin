@@ -3,12 +3,9 @@
 
 #pragma once
 
-#include "AVEVA/RocksDB/Plugin/Core/SecondaryCacheFactory.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/SecondaryCacheOptions.hpp"
 
-#if defined(AVEVA_ROCKSDB_WITH_CACHELIB)
 #include "AVEVA/RocksDB/Plugin/Core/CacheLibSecondaryCache.hpp"
-#endif
 
 #include <rocksdb/secondary_cache.h>
 
@@ -24,25 +21,6 @@
 #include <vector>
 
 namespace AVEVA::RocksDB::Plugin::Core::Testing {
-/// <summary>Backends that are available in this build, for value-parameterized tests.</summary>
-inline std::vector<SecondaryCacheBackend> AvailableBackends() {
-    std::vector<SecondaryCacheBackend> backends;
-    if (IsCacheLibSecondaryCacheAvailable()) {
-        backends.push_back(SecondaryCacheBackend::CacheLib);
-    }
-    return backends;
-}
-
-inline std::string BackendName(const ::testing::TestParamInfo<SecondaryCacheBackend>& info) {
-    switch (info.param) {
-    case SecondaryCacheBackend::CacheLib:
-        return "CacheLib";
-    case SecondaryCacheBackend::Default:
-        return "Default";
-    }
-    return "Unknown";
-}
-
 inline std::shared_ptr<SecondaryCacheOptions::Logger> MakeQuietLogger() {
     return std::make_shared<SecondaryCacheOptions::Logger>();
 }
@@ -65,10 +43,8 @@ inline std::filesystem::path MakeUniqueTempDir(std::string_view prefix) {
 /// Options with small, test friendly CacheLib settings (1 MiB regions) so tests
 /// can fill the cache quickly.
 /// </summary>
-inline SecondaryCacheOptions MakeTestOptions(SecondaryCacheBackend backend, const std::filesystem::path& dir,
-                                             size_t capacity = 32ULL * 1024 * 1024) {
+inline SecondaryCacheOptions MakeTestOptions(const std::filesystem::path& dir, size_t capacity = 32ULL * 1024 * 1024) {
     SecondaryCacheOptions options;
-    options.backend = backend;
     options.cacheDir = dir;
     options.capacity = capacity;
     options.logger = MakeQuietLogger();

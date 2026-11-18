@@ -15,16 +15,6 @@
 
 namespace AVEVA::RocksDB::Plugin::Core {
 /// <summary>
-/// Selects the secondary cache implementation created by <c>CreateSecondaryCache</c>.
-/// </summary>
-enum class SecondaryCacheBackend {
-    /// <summary>CacheLib when available; construction fails when the build excludes it.</summary>
-    Default,
-    /// <summary><c>CacheLibSecondaryCache</c>: CacheLib Navy BlockCache on a single cache file.</summary>
-    CacheLib,
-};
-
-/// <summary>
 /// Tuning knobs for the CacheLib (Navy) secondary cache. The defaults minimize DRAM
 /// because RocksDB's block cache already provides the in-memory tier.
 /// Region buffers reserve <c>2 * cleanRegions * regionSizeBytes</c> bytes.
@@ -93,15 +83,13 @@ struct CacheLibSecondaryCacheOptions {
 };
 
 /// <summary>
-/// Options for <c>CreateSecondaryCache</c>. Common fields apply to every backend; the
-/// nested <c>cachelib</c> block applies only to the CacheLib backend.
+/// Options for <c>CacheLibSecondaryCache</c>. The common fields are shared; the
+/// nested <c>cachelib</c> block holds the Navy tuning knobs.
 /// </summary>
 struct SecondaryCacheOptions {
     using Logger = boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>;
 
     static constexpr size_t kDefaultCapacity = 512ULL * 1024 * 1024; // 512 MiB
-
-    SecondaryCacheBackend backend = SecondaryCacheBackend::Default;
 
     /// <summary>Directory owned by the cache. Previous cache contents are discarded on open.</summary>
     std::filesystem::path cacheDir;

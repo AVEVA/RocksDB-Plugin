@@ -20,7 +20,6 @@
 #include <memory>
 #include <ostream>
 #include <string>
-#include <tuple>
 #include <vector>
 
 using namespace AVEVA::RocksDB::Plugin::Core;
@@ -50,8 +49,7 @@ struct PrimaryCacheKind {
 // Stable printing keeps ctest-discovered names independent of pointer values.
 [[maybe_unused]] void PrintTo(const PrimaryCacheKind& kind, std::ostream* os) { *os << kind.name; }
 
-class SecondaryCacheRocksDbTests
-    : public ::testing::TestWithParam<std::tuple<SecondaryCacheBackend, PrimaryCacheKind>> {
+class SecondaryCacheRocksDbTests : public ::testing::TestWithParam<PrimaryCacheKind> {
   protected:
     std::filesystem::path m_root;
     std::shared_ptr<rocksdb::SecondaryCache> m_secondary;
@@ -61,11 +59,11 @@ class SecondaryCacheRocksDbTests
 
     void SetUp() override {
         m_root = MakeUniqueTempDir("sec_cache_e2e");
-        m_secondary = CreateSecondaryCache(MakeTestOptions(std::get<0>(GetParam()), m_root / "cache"));
+        m_secondary = std::make_shared<CacheLibSecondaryCache>(MakeTestOptions(m_root / "cache"));
 
         // A primary cache much smaller than the data set forces evictions into the secondary cache.
         constexpr size_t kPrimaryCapacity = 256 * 1024;
-        if (std::get<1>(GetParam()).hyperClock) {
+        if (GetParam().hyperClock) {
             rocksdb::HyperClockCacheOptions options(kPrimaryCapacity, 0, 0);
             options.secondary_cache = m_secondary;
             m_primary = options.MakeSharedCache();
@@ -172,9 +170,6 @@ TEST_P(SecondaryCacheRocksDbTests, SecondaryCacheHitsAreNotDoubleCounted) {
 }
 
 TEST_P(SecondaryCacheRocksDbTests, SecondaryCacheIsNotRewrittenOnReHit) {
-    if (std::get<0>(GetParam()) != SecondaryCacheBackend::CacheLib) {
-        GTEST_SKIP() << "Only CacheLib reports insert counters";
-    }
     ReadAll();
     Settle(*m_secondary);
     ReadAll();
@@ -186,19 +181,9 @@ TEST_P(SecondaryCacheRocksDbTests, SecondaryCacheIsNotRewrittenOnReHit) {
     EXPECT_EQ(CacheLibCounter(*m_secondary, "navy_inserts"), inserts);
 }
 
-std::vector<std::tuple<SecondaryCacheBackend, PrimaryCacheKind>> Params() {
-    std::vector<std::tuple<SecondaryCacheBackend, PrimaryCacheKind>> params;
-    for (auto backend : AvailableBackends()) {
-        params.emplace_back(backend, PrimaryCacheKind{"LRU", false});
-        params.emplace_back(backend, PrimaryCacheKind{"HyperClock", true});
-    }
-    return params;
-}
+std::string ParamName(const ::testing::TestParamInfo<PrimaryCacheKind>& info) { return info.param.name; }
 
-std::string ParamName(const ::testing::TestParamInfo<std::tuple<SecondaryCacheBackend, PrimaryCacheKind>>& info) {
-    return BackendName({std::get<0>(info.param), info.index}) + "_" + std::get<1>(info.param).name;
-}
-
-INSTANTIATE_TEST_SUITE_P(Backends, SecondaryCacheRocksDbTests, ::testing::ValuesIn(Params()), ParamName);
-GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(SecondaryCacheRocksDbTests);
+INSTANTIATE_TEST_SUITE_P(PrimaryCaches, SecondaryCacheRocksDbTests,
+                         ::testing::Values(PrimaryCacheKind{"LRU", false}, PrimaryCacheKind{"HyperClock", true}),
+                         ParamName);
 } // namespace

@@ -70,8 +70,7 @@ class CacheLibSecondaryCacheTests : public ::testing::Test {
     }
 
     void Open(size_t capacity = 16ULL * 1024 * 1024) {
-        m_cache =
-            std::make_unique<CacheLibSecondaryCache>(MakeTestOptions(SecondaryCacheBackend::CacheLib, m_dir, capacity));
+        m_cache = std::make_unique<CacheLibSecondaryCache>(MakeTestOptions(m_dir, capacity));
     }
 
     rocksdb::Status Put(const std::string& key, const std::string& value) {
@@ -214,7 +213,7 @@ TEST_F(CacheLibSecondaryCacheTests, RecordsNoStatistics) {
 }
 
 TEST_F(CacheLibSecondaryCacheTests, SingleThreadPoolsWork) {
-    auto options = MakeTestOptions(SecondaryCacheBackend::CacheLib, m_dir);
+    auto options = MakeTestOptions(m_dir);
     options.cachelib.readerThreads = 1;
     options.cachelib.writerThreads = 1;
     m_cache = std::make_unique<CacheLibSecondaryCache>(options);
@@ -224,7 +223,7 @@ TEST_F(CacheLibSecondaryCacheTests, SingleThreadPoolsWork) {
 }
 
 TEST_F(CacheLibSecondaryCacheTests, LruEvictionPolicyWorks) {
-    auto options = MakeTestOptions(SecondaryCacheBackend::CacheLib, m_dir);
+    auto options = MakeTestOptions(m_dir);
     options.cachelib.evictionPolicy = CacheLibSecondaryCacheOptions::EvictionPolicy::Lru;
     m_cache = std::make_unique<CacheLibSecondaryCache>(options);
     ASSERT_TRUE(Put("lru", "value").ok());
@@ -237,7 +236,7 @@ TEST_F(CacheLibSecondaryCacheTests, RequestOrderingSlotsPreserveConcurrentRoundT
     for (const uint32_t power : {1U, 16U, 20U}) {
         SCOPED_TRACE(power);
         m_cache.reset();
-        auto options = MakeTestOptions(SecondaryCacheBackend::CacheLib, m_dir);
+        auto options = MakeTestOptions(m_dir);
         options.cachelib.requestOrderingShardsPower = power;
         m_cache = std::make_unique<CacheLibSecondaryCache>(options);
         EXPECT_NE(m_cache->GetPrintableOptions().find("navyConfig::navyReqOrderingShards: " + std::to_string(power)),
@@ -282,21 +281,21 @@ TEST_F(CacheLibSecondaryCacheTests, RequestOrderingSlotsPreserveConcurrentRoundT
 }
 
 TEST_F(CacheLibSecondaryCacheTests, InvalidOptionsAreRejected) {
-    auto tooSmall = MakeTestOptions(SecondaryCacheBackend::CacheLib, m_dir, 1024 * 1024);
+    auto tooSmall = MakeTestOptions(m_dir, 1024 * 1024);
     EXPECT_THROW(CacheLibSecondaryCache{tooSmall}, std::invalid_argument);
 
-    auto emptyDir = MakeTestOptions(SecondaryCacheBackend::CacheLib, {});
+    auto emptyDir = MakeTestOptions({});
     EXPECT_THROW(CacheLibSecondaryCache{emptyDir}, std::invalid_argument);
 
-    auto badThreads = MakeTestOptions(SecondaryCacheBackend::CacheLib, m_dir);
+    auto badThreads = MakeTestOptions(m_dir);
     badThreads.cachelib.readerThreads = 0;
     EXPECT_THROW(CacheLibSecondaryCache{badThreads}, std::invalid_argument);
 
-    auto badBlock = MakeTestOptions(SecondaryCacheBackend::CacheLib, m_dir);
+    auto badBlock = MakeTestOptions(m_dir);
     badBlock.cachelib.blockSize = 1000;
     EXPECT_THROW(CacheLibSecondaryCache{badBlock}, std::invalid_argument);
 
-    auto badShards = MakeTestOptions(SecondaryCacheBackend::CacheLib, m_dir);
+    auto badShards = MakeTestOptions(m_dir);
     for (const uint32_t power : {0U, 21U, 64U}) {
         badShards.cachelib.requestOrderingShardsPower = power;
         EXPECT_THROW(CacheLibSecondaryCache{badShards}, std::invalid_argument);

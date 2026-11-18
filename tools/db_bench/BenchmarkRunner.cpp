@@ -109,7 +109,6 @@ void RegisterCacheLibSecondaryCache() {
                     throw std::invalid_argument("--aveva_secondary_cache_dir must be set to use CacheLib");
                 }
                 SecondaryCacheOptions options;
-                options.backend = SecondaryCacheBackend::CacheLib;
                 options.cacheDir = FLAGS_aveva_secondary_cache_dir;
                 if (FLAGS_aveva_secondary_cache_capacity_mb > std::numeric_limits<size_t>::max() / (1024 * 1024)) {
                     throw std::invalid_argument("--aveva_secondary_cache_capacity_mb is too large");

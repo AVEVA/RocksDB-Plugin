@@ -2,14 +2,13 @@ add_subdirectory(Mocks)
 add_executable(aveva-rocksdb-plugin-core-tests
     CoreTests.cpp
     FileCacheTests.cpp
-    SecondaryCacheFactoryTests.cpp
-    SecondaryCacheContractTests.cpp
-    SecondaryCacheRocksDbTests.cpp
-    SecondaryCacheTestSupport.hpp
 )
 if(AVEVA_ROCKSDB_WITH_CACHELIB)
     target_sources(aveva-rocksdb-plugin-core-tests PRIVATE
         CacheLibSecondaryCacheTests.cpp
+        SecondaryCacheContractTests.cpp
+        SecondaryCacheRocksDbTests.cpp
+        SecondaryCacheTestSupport.hpp
     )
 endif()
 

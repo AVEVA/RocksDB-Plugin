@@ -76,7 +76,7 @@ std::string TakeValue(rocksdb::SecondaryCacheResultHandle& handle) {
     return data;
 }
 
-class SecondaryCacheContractTests : public ::testing::TestWithParam<SecondaryCacheBackend> {
+class SecondaryCacheContractTests : public ::testing::Test {
   protected:
     std::filesystem::path m_dir;
     std::shared_ptr<rocksdb::SecondaryCache> m_cache;
@@ -86,7 +86,7 @@ class SecondaryCacheContractTests : public ::testing::TestWithParam<SecondaryCac
 
     void SetUp() override {
         m_dir = MakeUniqueTempDir("sec_cache_contract");
-        m_cache = CreateSecondaryCache(MakeTestOptions(GetParam(), m_dir));
+        m_cache = std::make_shared<CacheLibSecondaryCache>(MakeTestOptions(m_dir));
     }
 
     void TearDown() override {
@@ -105,7 +105,7 @@ class SecondaryCacheContractTests : public ::testing::TestWithParam<SecondaryCac
     }
 };
 
-TEST_P(SecondaryCacheContractTests, RoundTripSynchronousLookup) {
+TEST_F(SecondaryCacheContractTests, RoundTripSynchronousLookup) {
     Put(KeyFor(1), ValueFor(KeyFor(1)));
     Settle(*m_cache);
 
@@ -116,7 +116,7 @@ TEST_P(SecondaryCacheContractTests, RoundTripSynchronousLookup) {
     EXPECT_EQ(TakeValue(*handle), ValueFor(KeyFor(1)));
 }
 
-TEST_P(SecondaryCacheContractTests, RoundTripAsynchronousLookupWithWaitAll) {
+TEST_F(SecondaryCacheContractTests, RoundTripAsynchronousLookupWithWaitAll) {
     constexpr size_t kCount = 16;
     for (size_t i = 0; i < kCount; ++i) {
         Put(KeyFor(i), ValueFor(KeyFor(i)));
@@ -137,7 +137,7 @@ TEST_P(SecondaryCacheContractTests, RoundTripAsynchronousLookupWithWaitAll) {
     }
 }
 
-TEST_P(SecondaryCacheContractTests, RoundTripAsynchronousLookupWithWait) {
+TEST_F(SecondaryCacheContractTests, RoundTripAsynchronousLookupWithWait) {
     Put(KeyFor(7), ValueFor(KeyFor(7)));
     Settle(*m_cache);
 
@@ -148,7 +148,7 @@ TEST_P(SecondaryCacheContractTests, RoundTripAsynchronousLookupWithWait) {
     EXPECT_EQ(TakeValue(*handle), ValueFor(KeyFor(7)));
 }
 
-TEST_P(SecondaryCacheContractTests, InsertSavedPreservesCompressionType) {
+TEST_F(SecondaryCacheContractTests, InsertSavedPreservesCompressionType) {
     const std::string saved = "pretend-compressed-bytes";
     ASSERT_TRUE(m_cache->InsertSaved(KeyFor(2), saved, rocksdb::kZSTD, rocksdb::CacheTier::kVolatileTier).ok());
     Settle(*m_cache);
@@ -160,7 +160,7 @@ TEST_P(SecondaryCacheContractTests, InsertSavedPreservesCompressionType) {
     EXPECT_EQ(TakeValue(*handle), saved);
 }
 
-TEST_P(SecondaryCacheContractTests, MissReturnsNull) {
+TEST_F(SecondaryCacheContractTests, MissReturnsNull) {
     EXPECT_EQ(Get(KeyFor(404)), nullptr);
 
     auto handle = Get(KeyFor(405), /*wait*/ false);
@@ -170,7 +170,7 @@ TEST_P(SecondaryCacheContractTests, MissReturnsNull) {
     }
 }
 
-TEST_P(SecondaryCacheContractTests, NullOrIncompatibleHelperIsIgnored) {
+TEST_F(SecondaryCacheContractTests, NullOrIncompatibleHelperIsIgnored) {
     Payload payload{"value"};
     EXPECT_TRUE(m_cache->Insert(KeyFor(3), &payload, nullptr, false).ok());
     EXPECT_TRUE(m_cache->Insert(KeyFor(3), &payload, &m_helperNoSec, false).ok());
@@ -184,20 +184,20 @@ TEST_P(SecondaryCacheContractTests, NullOrIncompatibleHelperIsIgnored) {
     EXPECT_FALSE(kept);
 }
 
-TEST_P(SecondaryCacheContractTests, ZeroSizeValueIsNotStored) {
+TEST_F(SecondaryCacheContractTests, ZeroSizeValueIsNotStored) {
     Put(KeyFor(5), "");
     Settle(*m_cache);
     EXPECT_EQ(Get(KeyFor(5)), nullptr);
 }
 
-TEST_P(SecondaryCacheContractTests, EraseRemovesEntry) {
+TEST_F(SecondaryCacheContractTests, EraseRemovesEntry) {
     Put(KeyFor(6), ValueFor(KeyFor(6)));
     Settle(*m_cache);
     m_cache->Erase(KeyFor(6));
     EXPECT_EQ(Get(KeyFor(6)), nullptr);
 }
 
-TEST_P(SecondaryCacheContractTests, ConcurrentOperationsReturnIntactValues) {
+TEST_F(SecondaryCacheContractTests, ConcurrentOperationsReturnIntactValues) {
     constexpr size_t kThreads = 8;
     constexpr size_t kOpsPerThread = 400;
     constexpr size_t kKeySpace = 128;
@@ -241,15 +241,13 @@ TEST_P(SecondaryCacheContractTests, ConcurrentOperationsReturnIntactValues) {
     EXPECT_GT(hits.load(), 0U);
 }
 
-TEST_P(SecondaryCacheContractTests, ReopenStartsEmpty) {
+TEST_F(SecondaryCacheContractTests, ReopenStartsEmpty) {
     Put(KeyFor(8), ValueFor(KeyFor(8)));
     Settle(*m_cache);
     m_cache.reset();
 
-    m_cache = CreateSecondaryCache(MakeTestOptions(GetParam(), m_dir));
+    m_cache = std::make_shared<CacheLibSecondaryCache>(MakeTestOptions(m_dir));
     EXPECT_EQ(Get(KeyFor(8)), nullptr);
 }
 
-INSTANTIATE_TEST_SUITE_P(Backends, SecondaryCacheContractTests, ::testing::ValuesIn(AvailableBackends()), BackendName);
-GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(SecondaryCacheContractTests);
 } // namespace

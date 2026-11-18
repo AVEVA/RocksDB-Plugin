@@ -2,7 +2,6 @@ add_library(aveva-rocksdb-plugin-core
     FileCache.cpp
     FileCacheEntry.cpp
     RocksDBHelpers.cpp
-    SecondaryCacheFactory.cpp
     Util.cpp
     LocalFilesystem.cpp
     LocalFile.cpp
@@ -25,7 +24,6 @@ target_sources(aveva-rocksdb-plugin-core
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/LocalFile.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/SecondaryCacheOptions.hpp"
-    "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/SecondaryCacheFactory.hpp"
 )
 if(AVEVA_ROCKSDB_WITH_CACHELIB)
     target_sources(aveva-rocksdb-plugin-core

@@ -104,7 +104,7 @@ reset on construction; restart persistence and runtime capacity resizing are not
 supported.
 
 ```cpp
-#include <AVEVA/RocksDB/Plugin/Core/SecondaryCacheFactory.hpp>
+#include <AVEVA/RocksDB/Plugin/Core/CacheLibSecondaryCache.hpp>
 
 using namespace AVEVA::RocksDB::Plugin::Core;
 SecondaryCacheOptions secondary;
@@ -114,13 +114,13 @@ secondary.logger = std::make_shared<SecondaryCacheOptions::Logger>();
 
 rocksdb::LRUCacheOptions primary;
 primary.capacity = 1ULL << 30;
-primary.secondary_cache = CreateSecondaryCache(secondary);
+primary.secondary_cache = std::make_shared<CacheLibSecondaryCache>(secondary);
 table_options.block_cache = primary.MakeSharedCache();
 ```
 
-`CreateSecondaryCache` throws when CacheLib is unavailable; there is no compressed
-cache fallback. Check `IsCacheLibSecondaryCacheAvailable()` before attaching one
-on unsupported platforms or builds configured with `AVEVA_ROCKSDB_WITH_CACHELIB=OFF`.
+`CacheLibSecondaryCache` only exists in builds with `AVEVA_ROCKSDB_WITH_CACHELIB=ON` (Linux x64);
+guard its use with `#if defined(AVEVA_ROCKSDB_WITH_CACHELIB)`. The constructor throws
+`std::invalid_argument` on invalid options. There is no compressed cache fallback.
 
 Default request-ordering bookkeeping is approximately 4.5 MiB on Linux x64
 (`72 * 2^16` bytes), plus 8 MiB of region buffers (`2 * cleanRegions * regionSizeBytes`).
