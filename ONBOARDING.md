@@ -27,8 +27,7 @@ The repo also ships shared building blocks in `src/Core/`:
 
 - A **local filesystem** abstraction (`LocalFilesystem`). Code uses it directly, and
   the caches use it as their backing store.
-- A **file cache with an LRU index** (`FileCache`, `LruFileIndex`). It keeps hot
-  blob content on the local disk.
+- A **file cache** (`FileCache`). It keeps hot blob content on the local disk.
 - A **CacheLib SSD secondary cache** (`CacheLibSecondaryCache`). It is a RocksDB
   `SecondaryCache` that stores evicted blocks on a local SSD through CacheLib's
   Navy engine. It is **Linux x64 only** and is built when
@@ -62,7 +61,7 @@ description. The PR template has a section for breaking changes. Fill it in.
 | `src/Azure/` | Azure Page Blob Filesystem. Blob I/O, directory ops, lock files, logger, and Azure SDK error translation. |
 | `src/Azure/Impl/` | Internal parts of the Azure plugin. Page blob, container client, buffer chunking, log rate limiter, storage account, and configuration. |
 | `src/Azure/Models/` | Value types for credentials and storage info (`ServicePrincipalStorageInfo`, `ChainedCredentialInfo`). |
-| `src/Core/` | shared filesystem, file cache, LRU index, RocksDB helpers, and utilities. |
+| `src/Core/` | shared filesystem, file cache, RocksDB helpers, and utilities. |
 | `src/Core/CacheLibSecondaryCache.cpp` | Navy-backed SSD secondary cache. Compiled only when `AVEVA_ROCKSDB_WITH_CACHELIB` is on. |
 | `tools/db_bench/` | `aveva_db_bench`: RocksDB `db_bench` plus the Azure plugin, the scan-then-MultiGet workload, and the CacheLib registration. Build it with `-DAVEVA_ROCKSDB_BUILD_DB_BENCH=ON`. See its [README](tools/db_bench/README.md). |
 | `infrastructure/vcpkg/ports/cachelib-navy/` | vcpkg overlay port that builds only CacheLib's Navy engine. It carries patches and shims, and is pinned to one CacheLib release. |

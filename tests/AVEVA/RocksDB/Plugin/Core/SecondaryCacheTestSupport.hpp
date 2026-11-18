@@ -52,22 +52,16 @@ inline SecondaryCacheOptions MakeTestOptions(const std::filesystem::path& dir, s
     return options;
 }
 
-/// <summary>Waits for queued asynchronous writes where the backend has them.</summary>
+/// <summary>Waits for queued asynchronous writes to be applied.</summary>
 inline void Settle(rocksdb::SecondaryCache& cache) {
-#if defined(AVEVA_ROCKSDB_WITH_CACHELIB)
     if (auto* cachelib = dynamic_cast<CacheLibSecondaryCache*>(&cache)) {
         cachelib->Drain();
     }
-#else
-    (void)cache;
-#endif
 }
 
 /// <summary>Returns a CacheLib counter, or -1 when the cache is not CacheLib or the counter is unknown.</summary>
-inline double CacheLibCounter([[maybe_unused]] const rocksdb::SecondaryCache& cache,
-                              [[maybe_unused]] std::string_view name) {
+inline double CacheLibCounter(const rocksdb::SecondaryCache& cache, std::string_view name) {
     double result = -1;
-#if defined(AVEVA_ROCKSDB_WITH_CACHELIB)
     if (const auto* cachelib = dynamic_cast<const CacheLibSecondaryCache*>(&cache)) {
         cachelib->VisitCounters([&](std::string_view counter, double value) {
             if (counter == name) {
@@ -75,7 +69,6 @@ inline double CacheLibCounter([[maybe_unused]] const rocksdb::SecondaryCache& ca
             }
         });
     }
-#endif
     return result;
 }
 } // namespace AVEVA::RocksDB::Plugin::Core::Testing

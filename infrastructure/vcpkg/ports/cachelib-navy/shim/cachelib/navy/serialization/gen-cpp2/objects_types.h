@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
 /*
  * Thrift-free replacement for the code generated from
  * cachelib/navy/serialization/objects.thrift (CacheLib v2026.02.23.00).

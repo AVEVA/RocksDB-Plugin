@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
 /*
  * Thrift-free replacement for <thrift/lib/cpp2/protocol/Serializer.h>.
  * Part of the AVEVA cachelib-navy vcpkg overlay port; see

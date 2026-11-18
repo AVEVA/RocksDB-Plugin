@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 AVEVA
+
 /*
  * Thrift-free replacement for the subset of the fbthrift generated C++ API
  * used by CacheLib Navy. Part of the AVEVA cachelib-navy vcpkg overlay port.
