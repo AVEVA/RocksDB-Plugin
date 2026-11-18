@@ -43,7 +43,9 @@ void PageBlob::UploadPages(const std::span<char> buffer, const int64_t blobOffse
 
 int64_t PageBlob::Download(std::span<char> buffer, int64_t offset, int64_t length, const ::Azure::ETag& ifMatch) {
     ::Azure::Storage::Blobs::DownloadBlobOptions options{.Range = ::Azure::Core::Http::HttpRange{offset, length}};
-    options.AccessConditions.IfMatch = ifMatch;
+    if (ifMatch.HasValue()) {
+        options.AccessConditions.IfMatch = ifMatch;
+    }
     const auto result = m_client.Download(options, ::Azure::Core::Context{});
     const auto& content = result.Value;
 

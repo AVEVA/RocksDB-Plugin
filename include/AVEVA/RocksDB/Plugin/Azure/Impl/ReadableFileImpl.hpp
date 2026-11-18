@@ -4,6 +4,7 @@
 #pragma once
 #include "AVEVA/RocksDB/Plugin/Core/FileCache.hpp"
 #include "AVEVA/RocksDB/Plugin/Core/BlobClient.hpp"
+#include "AVEVA/RocksDB/Plugin/Core/RocksDBHelpers.hpp"
 
 #include <boost/log/trivial.hpp>
 
@@ -22,6 +23,9 @@ namespace AVEVA::RocksDB::Plugin::Azure::Impl
         mutable int64_t m_size;
         mutable ::Azure::ETag m_etag;
         std::shared_ptr<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>> m_logger;
+        // A WAL is appended to while a secondary tails it. Bytes already written never change, so a changed ETag must
+        // not fail its reads: they are unconditional and return what exists, and a short read is a normal EOF.
+        bool m_appendOnly;
 
         int64_t DownloadWithRetry(const int64_t offset, const int64_t bytesToRead, char* buffer) const;
 

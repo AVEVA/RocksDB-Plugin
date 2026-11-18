@@ -421,3 +421,91 @@ TEST_F(ReadableFileTests, SequentialRead_InterleavedWithSkip_MaintainsCorrectOff
     // Assert
     EXPECT_EQ(readSize + skipAmount + readSize, file.GetOffset());
 }
+
+TEST_F(ReadableFileTests, RandomRead_WalAppendedAfterOpen_ReadsWithoutAnETagCondition)
+{
+    // Arrange
+    constexpr int64_t bytesToRead = 100;
+    std::vector<char> buffer(bytesToRead);
+    ON_CALL(*m_blobClient, GetEtag())
+        .WillByDefault(Return(::Azure::ETag{ "etag" }));
+
+    EXPECT_CALL(*m_blobClient, Download(::testing::A<std::span<char>>(), 0, bytesToRead,
+        ::testing::Property(&::Azure::ETag::HasValue, false)))
+        .WillOnce(Return(bytesToRead));
+
+    ReadableFileImpl file{ "000012.log", m_blobClient, nullptr, m_logger };
+
+    // Act
+    const auto bytesRead = file.RandomRead(0, bytesToRead, buffer.data());
+
+    // Assert
+    EXPECT_EQ(bytesToRead, bytesRead);
+}
+
+TEST_F(ReadableFileTests, RandomRead_SstDownload_KeepsItsETagCondition)
+{
+    // Arrange
+    constexpr int64_t bytesToRead = 100;
+    std::vector<char> buffer(bytesToRead);
+    ON_CALL(*m_blobClient, GetEtag())
+        .WillByDefault(Return(::Azure::ETag{ "etag" }));
+
+    EXPECT_CALL(*m_blobClient, Download(::testing::A<std::span<char>>(), 0, bytesToRead, ::Azure::ETag{ "etag" }))
+        .WillOnce(Return(bytesToRead));
+
+    ReadableFileImpl file{ "000012.sst", m_blobClient, nullptr, m_logger };
+
+    // Act
+    const auto bytesRead = file.RandomRead(0, bytesToRead, buffer.data());
+
+    // Assert
+    EXPECT_EQ(bytesToRead, bytesRead);
+}
+
+TEST_F(ReadableFileTests, RandomRead_WalAtItsEndWhileETagMoved_IsAShortReadNotAnError)
+{
+    // Arrange
+    constexpr uint64_t blobSize = 1024;
+    std::vector<char> buffer(100);
+    EXPECT_CALL(*m_blobClient, GetSize())
+        .WillRepeatedly(Return(blobSize));
+    ::testing::Sequence etags;
+    EXPECT_CALL(*m_blobClient, GetEtag())
+        .InSequence(etags)
+        .WillOnce(Return(::Azure::ETag{ "open" }))
+        .WillRepeatedly(Return(::Azure::ETag{ "appended" }));
+
+    ReadableFileImpl file{ "000012.log", m_blobClient, nullptr, m_logger };
+
+    // Act
+    const auto bytesRead = file.RandomRead(blobSize, 100, buffer.data());
+
+    // Assert
+    EXPECT_EQ(0, bytesRead);
+}
+
+TEST_F(ReadableFileTests, RandomRead_WalGrewPastTheCachedEnd_ReadsTheNewBytes)
+{
+    // Arrange
+    constexpr uint64_t oldSize = 1024;
+    constexpr uint64_t newSize = 2048;
+    constexpr int64_t bytesToRead = 100;
+    std::vector<char> buffer(bytesToRead);
+    EXPECT_CALL(*m_blobClient, GetSize())
+        .WillOnce(Return(oldSize))
+        .WillRepeatedly(Return(newSize));
+    ON_CALL(*m_blobClient, GetEtag())
+        .WillByDefault(Return(::Azure::ETag{ "etag" }));
+    EXPECT_CALL(*m_blobClient, Download(::testing::A<std::span<char>>(), static_cast<int64_t>(oldSize), bytesToRead,
+        ::testing::Property(&::Azure::ETag::HasValue, false)))
+        .WillOnce(Return(bytesToRead));
+
+    ReadableFileImpl file{ "000012.log", m_blobClient, nullptr, m_logger };
+
+    // Act
+    const auto bytesRead = file.RandomRead(static_cast<int64_t>(oldSize), bytesToRead, buffer.data());
+
+    // Assert
+    EXPECT_EQ(bytesToRead, bytesRead);
+}
