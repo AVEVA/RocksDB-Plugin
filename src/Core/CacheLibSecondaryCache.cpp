@@ -241,6 +241,8 @@ class CacheLibSecondaryCache::Impl {
         Validate(options);
         const auto& o = options.cachelib;
 
+        // folly's logger registry is process-global, so this affects every CacheLib user in the process,
+        // and the most recently constructed cache wins.
         folly::LoggerDB::get().setLevel("cachelib", ParseLogLevel(o.cachelibLogLevel));
 
         std::filesystem::create_directories(options.cacheDir);
@@ -315,8 +317,9 @@ class CacheLibSecondaryCache::Impl {
                                                                 const rocksdb::Cache::CacheItemHelper* helper,
                                                                 rocksdb::Cache::CreateContext* createContext, bool wait,
                                                                 bool& keptInSecCache) noexcept {
-        // Entries are never removed on a hit, so RocksDB must not re-insert
-        // them into this cache when they are evicted from the primary again.
+        // Reports whether the entry is still in this cache after the lookup. It stays false on a miss and is
+        // set to true on a hit, because hits never remove the entry. That lets RocksDB skip re-inserting the
+        // block when the primary cache evicts it again.
         keptInSecCache = false;
         try {
             if (!helper || !helper->IsSecondaryCacheCompatible() || key.size() > kMaxKeySize) {
