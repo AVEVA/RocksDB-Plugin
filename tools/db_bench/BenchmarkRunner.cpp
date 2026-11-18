@@ -39,6 +39,7 @@
 #include <rocksdb/db_bench_tool.h>
 #include <rocksdb/env.h>
 
+#include <atomic>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -94,6 +95,27 @@ std::string Require(const char* name, const std::optional<std::string>& value) {
 // ObjectLibrary matches the full URI, including the scheme separator.
 constexpr const char* kCacheLibSecondaryCacheName = "aveva-cachelib-secondary-cache://";
 
+// The most recently created cache, kept so the totals can be logged before _Exit. db_bench retains the
+// cache until process exit, so the pointer stays valid for that final read.
+std::atomic<AVEVA::RocksDB::Plugin::Core::CacheLibSecondaryCache*> g_cache{nullptr};
+
+// One greppable line per counter so pipelines can extract totals (e.g. navy_device_bytes_written for
+// SSD wear). Totals are only meaningful after queued inserts are applied, hence the drain.
+void LogCacheLibCounters() {
+    auto* cache = g_cache.load();
+    if (cache == nullptr || !FLAGS_aveva_cachelib_log_counters) {
+        return;
+    }
+    try {
+        cache->Drain();
+        cache->VisitCounters([](std::string_view name, double value) {
+            std::cout << "CACHELIB_COUNTER " << name << "=" << std::fixed << value << "\n";
+        });
+    } catch (const std::exception& error) {
+        std::cerr << "aveva_db_bench: failed to collect CacheLib counters: " << error.what() << "\n";
+    }
+}
+
 // Registering is safe without cache settings; the factory reads them on demand.
 void RegisterCacheLibSecondaryCache() {
     using namespace AVEVA::RocksDB::Plugin::Core;
@@ -124,7 +146,6 @@ void RegisterCacheLibSecondaryCache() {
                 cachelib.requestOrderingShardsPower = FLAGS_aveva_cachelib_request_ordering_shards_power;
                 cachelib.maxParcelMemoryMB = FLAGS_aveva_cachelib_max_parcel_memory_mb;
                 cachelib.dataChecksum = FLAGS_aveva_cachelib_data_checksum;
-                cachelib.logCountersOnShutdown = FLAGS_aveva_cachelib_log_counters;
                 if (FLAGS_aveva_cachelib_eviction_policy == "lru") {
                     cachelib.evictionPolicy = CacheLibSecondaryCacheOptions::EvictionPolicy::Lru;
                 } else if (FLAGS_aveva_cachelib_eviction_policy == "fifo") {
@@ -137,7 +158,9 @@ void RegisterCacheLibSecondaryCache() {
                 }
                 cachelib.cachelibLogLevel = FLAGS_aveva_cachelib_log_level;
                 cachelib.fileName = FLAGS_aveva_cachelib_file_name;
-                *guard = std::make_unique<CacheLibSecondaryCache>(options);
+                auto cache = std::make_unique<CacheLibSecondaryCache>(options);
+                g_cache.store(cache.get());
+                *guard = std::move(cache);
                 return guard->get();
             } catch (const std::exception& error) {
                 *errmsg = std::string("Failed to create CacheLib secondary cache: ") + error.what();
@@ -235,6 +258,10 @@ int main(int argc, char** argv) {
     } else {
         rc = rocksdb::db_bench_tool(argc, argv);
     }
+
+#if defined(AVEVA_ROCKSDB_WITH_CACHELIB)
+    LogCacheLibCounters();
+#endif
 
     // Skip C++ static destructors: boost.log tears down thread-local storage
     // before the plugin's background threads exit, which triggers SIGABRT

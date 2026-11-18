@@ -236,8 +236,7 @@ std::string Describe(const navy::NavyConfig& config) {
 
 class CacheLibSecondaryCache::Impl {
   public:
-    explicit Impl(const SecondaryCacheOptions& options)
-        : m_logger(options.logger), m_logCountersOnShutdown(options.cachelib.logCountersOnShutdown) {
+    explicit Impl(const SecondaryCacheOptions& options) : m_logger(options.logger) {
         Validate(options);
         const auto& o = options.cachelib;
 
@@ -264,11 +263,7 @@ class CacheLibSecondaryCache::Impl {
         if (!m_navy) {
             return;
         }
-        // Drain first so queued inserts are reflected in the final counters.
         m_navy->drain();
-        if (m_logCountersOnShutdown) {
-            LogCounters();
-        }
     }
 
     Impl(const Impl&) = delete;
@@ -400,26 +395,6 @@ class CacheLibSecondaryCache::Impl {
     const std::string& PrintableOptions() const noexcept { return m_printable; }
 
   private:
-    // Greppable one-line-per-counter format so benchmark pipelines can extract the totals
-    // (e.g. navy_device_bytes_written for SSD wear) from the db_bench log. Never throws: it runs
-    // from the destructor.
-    void LogCounters(bool progressOnly = false) noexcept {
-        try {
-            VisitCounters([this, progressOnly](std::string_view name, double value) {
-                if (progressOnly && name != "navy_bc_evictions" && name != "navy_bc_reclaim" &&
-                    name != "navy_bc_used_size_bytes" && name != "navy_bc_succ_inserts" &&
-                    name != "navy_bc_succ_lookups" && name != "navy_device_bytes_read" &&
-                    name != "navy_device_bytes_written") {
-                    return;
-                }
-                BOOST_LOG_SEV(*m_logger, info) << "CACHELIB_COUNTER " << name << "=" << std::fixed << value;
-            });
-        } catch (...) {
-            BOOST_LOG_SEV(*m_logger, warning)
-                << "CacheLibSecondaryCache: failed to collect counters: " << CurrentExceptionToStatus().ToString();
-        }
-    }
-
     struct Entry {
         std::unique_ptr<char[]> buffer;
         size_t keySize = 0;
@@ -467,16 +442,9 @@ class CacheLibSecondaryCache::Impl {
                             [buffer = std::move(entry.buffer)](navy::Status, facebook::cachelib::HashedKey) mutable {
                                 buffer.reset();
                             });
-        // db_bench retains the cache in a static shared_ptr and skips static
-        // destructors. Sample during use so reclaim telemetry is not lost.
-        if (m_logCountersOnShutdown && m_scheduledInserts.fetch_add(1, std::memory_order_relaxed) % 4096 == 4095) {
-            LogCounters(/*progressOnly=*/true);
-        }
     }
 
     std::shared_ptr<SecondaryCacheOptions::Logger> m_logger;
-    bool m_logCountersOnShutdown = false;
-    std::atomic<uint64_t> m_scheduledInserts{0};
     std::unique_ptr<navy::AbstractCache> m_navy;
     size_t m_maxEntrySize = 0;
     std::string m_printable;

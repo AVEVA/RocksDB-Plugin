@@ -68,13 +68,6 @@ struct CacheLibSecondaryCacheOptions {
     std::string fileName = "navy.cache";
 
     /// <summary>
-    /// When true, every Navy counter (hits, inserts, bytes written to the device, ...) is logged at info
-    /// level as <c>CACHELIB_COUNTER name=value</c> when the cache is destroyed. Intended for benchmarks,
-    /// since the cache is reset on every open and the totals therefore cover one DB session.
-    /// </summary>
-    bool logCountersOnShutdown = false;
-
-    /// <summary>
     /// Log2 of the request-ordering slot count (1-20). Fewer slots save fixed RAM
     /// but can serialize unrelated requests. 16 uses 65,536 slots; 20 restores
     /// Navy's upstream default of 1,048,576 slots (about 72 MiB of bookkeeping).
