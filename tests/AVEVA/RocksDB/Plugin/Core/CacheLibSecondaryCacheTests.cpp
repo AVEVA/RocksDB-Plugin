@@ -7,8 +7,6 @@
 
 #include "AVEVA/RocksDB/Plugin/Core/CacheLibSecondaryCache.hpp"
 
-#include <rocksdb/statistics.h>
-
 #include <gtest/gtest.h>
 
 #include <cstring>
@@ -22,35 +20,6 @@ using namespace AVEVA::RocksDB::Plugin::Core;
 using namespace AVEVA::RocksDB::Plugin::Core::Testing;
 
 namespace {
-struct Payload {
-    std::string data;
-};
-
-size_t SizeCb(rocksdb::Cache::ObjectPtr obj) { return static_cast<Payload*>(obj)->data.size(); }
-
-rocksdb::Status SaveToCb(rocksdb::Cache::ObjectPtr obj, size_t offset, size_t length, char* out) {
-    std::memcpy(out, static_cast<Payload*>(obj)->data.data() + offset, length);
-    return rocksdb::Status::OK();
-}
-
-thread_local rocksdb::CacheTier t_lastSource = rocksdb::CacheTier::kVolatileTier;
-thread_local bool t_failCreate = false;
-
-rocksdb::Status CreateCb(const rocksdb::Slice& data, rocksdb::CompressionType, rocksdb::CacheTier source,
-                         rocksdb::Cache::CreateContext*, rocksdb::MemoryAllocator*, rocksdb::Cache::ObjectPtr* out,
-                         size_t* charge) {
-    t_lastSource = source;
-    if (t_failCreate) {
-        return rocksdb::Status::Corruption("injected");
-    }
-    auto* payload = new Payload{data.ToString()};
-    *out = payload;
-    *charge = payload->data.size();
-    return rocksdb::Status::OK();
-}
-
-void DeleteCb(rocksdb::Cache::ObjectPtr obj, rocksdb::MemoryAllocator*) { delete static_cast<Payload*>(obj); }
-
 class CacheLibSecondaryCacheTests : public ::testing::Test {
   protected:
     std::filesystem::path m_dir;
@@ -98,8 +67,7 @@ TEST_F(CacheLibSecondaryCacheTests, NameAndPrintableOptions) {
     EXPECT_NE(m_cache->GetPrintableOptions().find("navyConfig::"), std::string::npos);
 }
 
-// The file based cache stops admitting new entries once full; CacheLib evicts
-// the oldest region instead.
+// Unlike a cache that stops admitting once full, CacheLib evicts the oldest region.
 TEST_F(CacheLibSecondaryCacheTests, KeepsAdmittingAfterFull) {
     Open(8ULL * 1024 * 1024);
     const std::string value(64 * 1024, 'x');
@@ -128,6 +96,7 @@ TEST_F(CacheLibSecondaryCacheTests, DuplicateInsertIsSkipped) {
     ASSERT_TRUE(Put("dup", "first").ok());
     m_cache->Drain();
     const double before = Counter("navy_inserts");
+    ASSERT_GE(before, 1.0) << "navy_inserts counter missing or the first insert was not recorded";
     ASSERT_TRUE(Put("dup", "second").ok());
     m_cache->Drain();
     EXPECT_EQ(Counter("navy_inserts"), before);
@@ -176,6 +145,22 @@ TEST_F(CacheLibSecondaryCacheTests, CreateFailureIsAMissAndDropsEntry) {
     EXPECT_FALSE(Has("bad"));
 }
 
+TEST_F(CacheLibSecondaryCacheTests, AsyncCreateFailureIsAMissAndDropsEntry) {
+    Open();
+    ASSERT_TRUE(Put("bad", "value").ok());
+    m_cache->Drain();
+
+    t_failCreate = true;
+    bool kept = false;
+    auto handle = m_cache->Lookup("bad", &m_helper, nullptr, false, false, nullptr, kept);
+    ASSERT_NE(handle, nullptr);
+    handle->Wait();
+    EXPECT_EQ(handle->Value(), nullptr);
+    t_failCreate = false;
+    m_cache->Drain();
+    EXPECT_FALSE(Has("bad"));
+}
+
 TEST_F(CacheLibSecondaryCacheTests, InsertSavedPreservesSourceTier) {
     Open();
     ASSERT_TRUE(
@@ -196,20 +181,6 @@ TEST_F(CacheLibSecondaryCacheTests, CapacityIsFixed) {
     EXPECT_TRUE(m_cache->SetCapacity(1).IsNotSupported());
     EXPECT_TRUE(m_cache->Deflate(1).IsNotSupported());
     EXPECT_TRUE(m_cache->Inflate(1).IsNotSupported());
-}
-
-TEST_F(CacheLibSecondaryCacheTests, RecordsNoStatistics) {
-    Open();
-    ASSERT_TRUE(Put("stats", "value").ok());
-    m_cache->Drain();
-
-    auto stats = rocksdb::CreateDBStatistics();
-    bool kept = false;
-    auto handle = m_cache->Lookup("stats", &m_helper, nullptr, true, false, stats.get(), kept);
-    ASSERT_NE(handle, nullptr);
-    delete static_cast<Payload*>(handle->Value());
-    EXPECT_EQ(stats->getTickerCount(rocksdb::SECONDARY_CACHE_HITS), 0U);
-    EXPECT_EQ(stats->getTickerCount(rocksdb::SECONDARY_CACHE_DATA_HITS), 0U);
 }
 
 TEST_F(CacheLibSecondaryCacheTests, SingleThreadPoolsWork) {

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
-// Behavior every secondary cache backend must provide, run against each
-// backend available in this build.
+// Behavior any rocksdb::SecondaryCache must provide, checked through the
+// generic interface against CacheLibSecondaryCache.
 
 #include "SecondaryCacheTestSupport.hpp"
 
@@ -23,35 +23,6 @@ using namespace AVEVA::RocksDB::Plugin::Core;
 using namespace AVEVA::RocksDB::Plugin::Core::Testing;
 
 namespace {
-struct Payload {
-    std::string data;
-};
-
-size_t SizeCb(rocksdb::Cache::ObjectPtr obj) { return static_cast<Payload*>(obj)->data.size(); }
-
-rocksdb::Status SaveToCb(rocksdb::Cache::ObjectPtr obj, size_t offset, size_t length, char* out) {
-    const auto& data = static_cast<Payload*>(obj)->data;
-    if (offset + length > data.size()) {
-        return rocksdb::Status::InvalidArgument("out of range");
-    }
-    std::memcpy(out, data.data() + offset, length);
-    return rocksdb::Status::OK();
-}
-
-thread_local rocksdb::CompressionType t_lastType = rocksdb::kNoCompression;
-
-rocksdb::Status CreateCb(const rocksdb::Slice& data, rocksdb::CompressionType type, rocksdb::CacheTier,
-                         rocksdb::Cache::CreateContext*, rocksdb::MemoryAllocator*, rocksdb::Cache::ObjectPtr* out,
-                         size_t* charge) {
-    t_lastType = type;
-    auto* payload = new Payload{data.ToString()};
-    *out = payload;
-    *charge = payload->data.size();
-    return rocksdb::Status::OK();
-}
-
-void DeleteCb(rocksdb::Cache::ObjectPtr obj, rocksdb::MemoryAllocator*) { delete static_cast<Payload*>(obj); }
-
 std::string ValueFor(const std::string& key, size_t size = 3000) {
     std::string value;
     value.reserve(size);
@@ -164,10 +135,9 @@ TEST_F(SecondaryCacheContractTests, MissReturnsNull) {
     EXPECT_EQ(Get(KeyFor(404)), nullptr);
 
     auto handle = Get(KeyFor(405), /*wait*/ false);
-    if (handle) {
-        handle->Wait();
-        EXPECT_EQ(handle->Value(), nullptr);
-    }
+    ASSERT_NE(handle, nullptr);
+    handle->Wait();
+    EXPECT_EQ(handle->Value(), nullptr);
 }
 
 TEST_F(SecondaryCacheContractTests, NullOrIncompatibleHelperIsIgnored) {

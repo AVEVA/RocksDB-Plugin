@@ -14,6 +14,7 @@
 #include <boost/log/sources/severity_logger.hpp>
 #include <boost/log/trivial.hpp>
 
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -51,6 +52,46 @@ inline SecondaryCacheOptions MakeTestOptions(const std::filesystem::path& dir, s
     options.cachelib.regionSizeBytes = 1024 * 1024;
     return options;
 }
+
+/// <summary>
+/// A cache value plus the callbacks RocksDB needs to size, serialize, rebuild and delete it.
+/// <c>t_lastType</c>/<c>t_lastSource</c> record what the last <c>CreateCb</c> call received, and
+/// <c>t_failCreate</c> makes it fail so tests can exercise the deserialization-error path.
+/// </summary>
+struct Payload {
+    std::string data;
+};
+
+inline thread_local rocksdb::CompressionType t_lastType = rocksdb::kNoCompression;
+inline thread_local rocksdb::CacheTier t_lastSource = rocksdb::CacheTier::kVolatileTier;
+inline thread_local bool t_failCreate = false;
+
+inline size_t SizeCb(rocksdb::Cache::ObjectPtr obj) { return static_cast<Payload*>(obj)->data.size(); }
+
+inline rocksdb::Status SaveToCb(rocksdb::Cache::ObjectPtr obj, size_t offset, size_t length, char* out) {
+    const auto& data = static_cast<Payload*>(obj)->data;
+    if (offset + length > data.size()) {
+        return rocksdb::Status::InvalidArgument("out of range");
+    }
+    std::memcpy(out, data.data() + offset, length);
+    return rocksdb::Status::OK();
+}
+
+inline rocksdb::Status CreateCb(const rocksdb::Slice& data, rocksdb::CompressionType type, rocksdb::CacheTier source,
+                                rocksdb::Cache::CreateContext*, rocksdb::MemoryAllocator*,
+                                rocksdb::Cache::ObjectPtr* out, size_t* charge) {
+    t_lastType = type;
+    t_lastSource = source;
+    if (t_failCreate) {
+        return rocksdb::Status::Corruption("injected");
+    }
+    auto* payload = new Payload{data.ToString()};
+    *out = payload;
+    *charge = payload->data.size();
+    return rocksdb::Status::OK();
+}
+
+inline void DeleteCb(rocksdb::Cache::ObjectPtr obj, rocksdb::MemoryAllocator*) { delete static_cast<Payload*>(obj); }
 
 /// <summary>Waits for queued asynchronous writes to be applied.</summary>
 inline void Settle(rocksdb::SecondaryCache& cache) {

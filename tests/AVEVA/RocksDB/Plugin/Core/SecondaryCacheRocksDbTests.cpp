@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 AVEVA
 
 // End-to-end: a real RocksDB instance on the local filesystem whose block cache
-// is backed by each available secondary cache backend.
+// is backed by CacheLibSecondaryCache.
 
 #include "SecondaryCacheTestSupport.hpp"
 
@@ -161,9 +161,10 @@ TEST_P(SecondaryCacheRocksDbTests, SecondaryCacheHitsAreNotDoubleCounted) {
     Settle(*m_secondary);
     ReadAll();
 
-    // The adapter records SECONDARY_CACHE_HITS; a backend that also records it
+    // RocksDB records SECONDARY_CACHE_HITS itself; a cache that also records it
     // makes the per-role breakdown exceed the total.
     const auto total = Ticker(rocksdb::SECONDARY_CACHE_HITS);
+    ASSERT_GT(total, 0U) << "no secondary cache hits; the comparison below would be vacuous";
     const auto byRole = Ticker(rocksdb::SECONDARY_CACHE_DATA_HITS) + Ticker(rocksdb::SECONDARY_CACHE_INDEX_HITS) +
                         Ticker(rocksdb::SECONDARY_CACHE_FILTER_HITS);
     EXPECT_EQ(byRole, total);
@@ -175,6 +176,7 @@ TEST_P(SecondaryCacheRocksDbTests, SecondaryCacheIsNotRewrittenOnReHit) {
     ReadAll();
     Settle(*m_secondary);
     const auto inserts = CacheLibCounter(*m_secondary, "navy_inserts");
+    ASSERT_GT(inserts, 0.0) << "navy_inserts counter missing or nothing was written";
     ReadAll();
     Settle(*m_secondary);
     // Blocks already on SSD are kept there, so a further pass writes nothing new.
