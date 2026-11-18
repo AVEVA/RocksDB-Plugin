@@ -86,7 +86,8 @@ class CacheLibSecondaryCache final : public rocksdb::SecondaryCache {
     /// <summary>Visits every CacheLib (Navy) counter, e.g. "navy_bc_inserts".</summary>
     void VisitCounters(const std::function<void(std::string_view name, double value)>& visitor) const;
 
-    /// <summary>Waits until all queued inserts/removes have been applied. Intended for tests.</summary>
+    /// <summary>Waits until all queued inserts/removes have been applied. Used by tests and by db_bench before it reads
+    /// the counters.</summary>
     void Drain() noexcept;
 
   private:

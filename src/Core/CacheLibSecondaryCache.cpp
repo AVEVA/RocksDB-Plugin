@@ -51,6 +51,27 @@ rocksdb::Status CurrentExceptionToStatus() noexcept {
     }
 }
 
+using Logger = SecondaryCacheOptions::Logger;
+
+// Logging must never turn a degraded cache into a process abort: the callers are noexcept.
+void LogNoThrow(const std::shared_ptr<Logger>& logger, severity_level level, const std::string& message) noexcept {
+    try {
+        if (logger) {
+            BOOST_LOG_SEV(*logger, level) << "CacheLibSecondaryCache: " << message;
+        }
+    } catch (...) {
+    }
+}
+
+// NotFound is the normal miss; anything else means the device or Navy itself failed, which must be visible.
+void LogIfLookupFailed(const std::shared_ptr<Logger>& logger, navy::Status status) noexcept {
+    if (status == navy::Status::Ok || status == navy::Status::NotFound) {
+        return;
+    }
+    LogNoThrow(logger, warning,
+               "lookup failed with Navy status " + std::to_string(static_cast<int>(status)) + "; treating as a miss");
+}
+
 facebook::cachelib::HashedKey ToHashedKey(const rocksdb::Slice& key) { return navy::makeHK(key.data(), key.size()); }
 
 // Decodes the entry header and reconstructs the object through the helper.
@@ -79,8 +100,11 @@ struct AsyncLookupState {
     folly::Baton<> done;
     navy::Status status = navy::Status::NotFound;
     navy::Buffer value;
+    std::shared_ptr<Logger> logger;
 };
 
+// The handle keeps a raw pointer to the Navy cache for RemoveAsync, so it must not outlive the
+// CacheLibSecondaryCache that created it. RocksDB guarantees this by destroying handles before the cache.
 class CacheLibResultHandle final : public rocksdb::SecondaryCacheResultHandle {
   public:
     // Ready handle (synchronous lookup).
@@ -122,6 +146,7 @@ class CacheLibResultHandle final : public rocksdb::SecondaryCacheResultHandle {
     void Complete() noexcept {
         m_ready = true;
         if (m_state->status != navy::Status::Ok) {
+            LogIfLookupFailed(m_state->logger, m_state->status);
             m_state.reset();
             return;
         }
@@ -136,6 +161,7 @@ class CacheLibResultHandle final : public rocksdb::SecondaryCacheResultHandle {
             m_value = created.value;
             m_charge = created.charge;
         } else {
+            LogNoThrow(m_state->logger, warning, "dropping entry that failed to deserialize: " + s.ToString());
             RemoveAsync();
         }
         m_state->value = navy::Buffer{};
@@ -260,10 +286,9 @@ class CacheLibSecondaryCache::Impl {
     }
 
     ~Impl() {
-        if (!m_navy) {
-            return;
+        if (m_navy) {
+            Drain();
         }
-        m_navy->drain();
     }
 
     Impl(const Impl&) = delete;
@@ -323,6 +348,7 @@ class CacheLibSecondaryCache::Impl {
             if (!wait) {
                 auto state = std::make_shared<AsyncLookupState>();
                 state->key.assign(key.data(), key.size());
+                state->logger = m_logger;
                 auto handle = std::make_unique<CacheLibResultHandle>(state, helper, createContext, m_navy.get());
                 m_navy->lookupAsync(navy::makeHK(state->key.data(), state->key.size()),
                                     [state](navy::Status status, facebook::cachelib::HashedKey, navy::Buffer value) {
@@ -336,22 +362,22 @@ class CacheLibSecondaryCache::Impl {
 
             const auto hk = ToHashedKey(key);
             navy::Buffer value;
-            if (m_navy->lookup(hk, value) != navy::Status::Ok) {
+            const auto status = m_navy->lookup(hk, value);
+            if (status != navy::Status::Ok) {
+                LogIfLookupFailed(m_logger, status);
                 return nullptr;
             }
             CreatedObject created;
             auto s = CreateObject(value.view(), helper, createContext, created);
             if (!s.ok()) {
-                BOOST_LOG_SEV(*m_logger, warning)
-                    << "CacheLibSecondaryCache: dropping entry that failed to deserialize: " << s.ToString();
+                LogNoThrow(m_logger, warning, "dropping entry that failed to deserialize: " + s.ToString());
                 m_navy->remove(hk);
                 return nullptr;
             }
             keptInSecCache = true;
             return std::make_unique<CacheLibResultHandle>(created.value, created.charge);
         } catch (...) {
-            BOOST_LOG_SEV(*m_logger, error)
-                << "CacheLibSecondaryCache: lookup failed: " << CurrentExceptionToStatus().ToString();
+            LogNoThrow(m_logger, error, "lookup failed: " + CurrentExceptionToStatus().ToString());
             return nullptr;
         }
     }
@@ -362,8 +388,7 @@ class CacheLibSecondaryCache::Impl {
                 m_navy->remove(ToHashedKey(key));
             }
         } catch (...) {
-            BOOST_LOG_SEV(*m_logger, error)
-                << "CacheLibSecondaryCache: erase failed: " << CurrentExceptionToStatus().ToString();
+            LogNoThrow(m_logger, error, "erase failed: " + CurrentExceptionToStatus().ToString());
         }
     }
 
@@ -389,6 +414,7 @@ class CacheLibSecondaryCache::Impl {
         try {
             m_navy->drain();
         } catch (...) {
+            LogNoThrow(m_logger, error, "drain failed: " + CurrentExceptionToStatus().ToString());
         }
     }
 

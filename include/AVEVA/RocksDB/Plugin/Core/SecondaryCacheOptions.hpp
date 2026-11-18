@@ -22,7 +22,9 @@ namespace AVEVA::RocksDB::Plugin::Core {
 /// bytes on Linux x64 (4.5 MiB by default). Indexes, thread stacks and queued
 /// inserts consume additional RAM; maxParcelMemoryMB limits pending insert bytes,
 /// not total RAM, and is not an upfront reservation.
-/// I/O is synchronous (pread/pwrite) on Navy's reader and writer thread pools.
+/// Device I/O is synchronous (pread/pwrite) but runs on Navy's reader and writer thread pools, so
+/// lookups and inserts are still asynchronous to RocksDB; readerThreads/writerThreads set the
+/// concurrency. SSD latency (~100 us) is small next to an Azure read, so io_uring is not worth it.
 /// </summary>
 struct CacheLibSecondaryCacheOptions {
     enum class EvictionPolicy {
