@@ -94,7 +94,7 @@ int main(int argc, char** argv) {
         container, storageAccountUrl, clientId, clientSecret, tenantId,
     };
 
-    auto logger = std::make_shared<boost::log::souresultes::severity_logger_mt<boost::log::trivial::severity_level>>();
+    auto logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
 
     rocksdb::ConfigOptions configOptions;
     rocksdb::Env* env = nullptr;
@@ -127,7 +127,7 @@ int main(int argc, char** argv) {
                   << " fetched_keys=" << hooks.counters.fetchedKeys.load()
                   << " found_keys=" << hooks.counters.foundKeys.load() << "\n";
         if (result == 0 && hooks.counters.queries == 0) {
-            std::cerr << "aveva_db_bench: scan-before-MultiGet hook was not exeresultised; use normal Open and "
+            std::cerr << "aveva_db_bench: scan-before-MultiGet hook was not exercised; use normal Open and "
                          "--benchmarks=multireadrandom --multiread_batched=0\n";
             result = 2;
         }
