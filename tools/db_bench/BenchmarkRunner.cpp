@@ -70,16 +70,6 @@ int main(int argc, char** argv) {
     using AVEVA::RocksDB::Plugin::Azure::Impl::StorageAccount;
     using AVEVA::RocksDB::Plugin::Azure::Models::ServicePrincipalStorageInfo;
 
-    // GraphDB uses 16 KiB blocks with LZ4
-    // An empty result means the flag no longer exists upstream; fail rather than silently drop the default.
-    for (const auto& [name, value] : {std::pair{"block_size", "16384"}, std::pair{"compression_type", "lz4"}}) {
-        if (GFLAGS_NAMESPACE::SetCommandLineOptionWithMode(name, value, GFLAGS_NAMESPACE::SET_FLAGS_DEFAULT)
-                .empty()) {
-            std::cerr << "aveva_db_bench: could not set default for --" << name << "\n";
-            return 2;
-        }
-    }
-
     // Parse wrapper flags
     GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, /*remove_flags=*/false);
 
@@ -104,7 +94,7 @@ int main(int argc, char** argv) {
         container, storageAccountUrl, clientId, clientSecret, tenantId,
     };
 
-    auto logger = std::make_shared<boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level>>();
+    auto logger = std::make_shared<boost::log::souresultes::severity_logger_mt<boost::log::trivial::severity_level>>();
 
     rocksdb::ConfigOptions configOptions;
     rocksdb::Env* env = nullptr;
@@ -127,22 +117,22 @@ int main(int argc, char** argv) {
 
     std::fflush(nullptr);
     std::cout.flush();
-    int rc;
+    int result;
     if (scanLength > 0) {
         AVEVA::RocksDB::Plugin::Bench::ScanThenMultiGetHooks hooks(scanLength);
-        rc = rocksdb::db_bench_tool(argc, argv, hooks);
+        result = rocksdb::db_bench_tool(argc, argv, hooks);
         std::cout << "SCAN_THEN_MULTIGET queries=" << hooks.counters.queries.load()
                   << " scanned_records=" << hooks.counters.scannedRecords.load()
                   << " scanned_bytes=" << hooks.counters.scannedBytes.load()
                   << " fetched_keys=" << hooks.counters.fetchedKeys.load()
                   << " found_keys=" << hooks.counters.foundKeys.load() << "\n";
-        if (rc == 0 && hooks.counters.queries == 0) {
-            std::cerr << "aveva_db_bench: scan-before-MultiGet hook was not exercised; use normal Open and "
+        if (result == 0 && hooks.counters.queries == 0) {
+            std::cerr << "aveva_db_bench: scan-before-MultiGet hook was not exeresultised; use normal Open and "
                          "--benchmarks=multireadrandom --multiread_batched=0\n";
-            rc = 2;
+            result = 2;
         }
     } else {
-        rc = rocksdb::db_bench_tool(argc, argv);
+        result = rocksdb::db_bench_tool(argc, argv);
     }
 
     // Skip C++ static destructors: boost.log tears down thread-local storage
@@ -151,5 +141,5 @@ int main(int argc, char** argv) {
     boost::log::core::get()->flush();
     std::fflush(nullptr);
     std::cout.flush();
-    std::_Exit(rc);
+    std::_Exit(result);
 }
