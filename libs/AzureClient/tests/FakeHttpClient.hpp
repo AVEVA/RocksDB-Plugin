@@ -822,17 +822,51 @@ class FakeHttpClient final {
     }
 };
 
+// The clients share ownership of their transport. Most tests keep the fake on the stack, so Borrowed hands it over
+// without taking ownership (the fake outlives the clients, as the test scope guarantees).
+template <class T> [[nodiscard]] std::shared_ptr<T> Borrowed(T& value) noexcept {
+    return std::shared_ptr<T>(std::shared_ptr<void>(), &value);
+}
+
+// Lets a test pass the stack-allocated fake directly: forwards to the shared_ptr constructor through Borrowed.
+template <class TClient> class BorrowingClient : public TClient {
+  public:
+    using TClient::TClient;
+    explicit(false) BorrowingClient(TClient&& client) : TClient(std::move(client)) {}
+    template <class... TArgs>
+    explicit(false) BorrowingClient(FakeHttpClient& http, TArgs&&... args)
+        : TClient(Borrowed(http), std::forward<TArgs>(args)...) {}
+};
+
+// Credentials are final, so a test-only wrapper stands in for BorrowingClient.
+template <class TCredential> class BorrowingCredential {
+  public:
+    template <class... TArgs>
+    explicit(false) BorrowingCredential(FakeHttpClient& http, TArgs&&... args)
+        : m_credential(Borrowed(http), std::forward<TArgs>(args)...) {}
+    template <class... TArgs>
+    explicit(false) BorrowingCredential(std::shared_ptr<FakeHttpClient> http, TArgs&&... args)
+        : m_credential(std::move(http), std::forward<TArgs>(args)...) {}
+
+    [[nodiscard]] auto GetTokenAsync(std::vector<std::string> scopes) {
+        return m_credential.GetTokenAsync(std::move(scopes));
+    }
+
+  private:
+    TCredential m_credential;
+};
+
 // The clients under test run on the fake transport; these shadow the HttpClient-bound aliases of the library.
 // Definitions are explicitly instantiated in FakeInstantiations.cpp.
-using BlobClient = BasicBlobClient<FakeHttpClient>;
-using PageBlobClient = BasicPageBlobClient<FakeHttpClient>;
-using BlobContainerClient = BasicBlobContainerClient<FakeHttpClient>;
-using BlobServiceClient = BasicBlobServiceClient<FakeHttpClient>;
-using ClientSecretCredential = BasicClientSecretCredential<FakeHttpClient>;
-using WorkloadIdentityCredential = BasicWorkloadIdentityCredential<FakeHttpClient>;
-using ClientAssertionCredential = BasicClientAssertionCredential<FakeHttpClient>;
-using ManagedIdentityCredential = BasicManagedIdentityCredential<FakeHttpClient>;
-using AzurePipelinesCredential = BasicAzurePipelinesCredential<FakeHttpClient>;
+using BlobClient = BorrowingClient<BasicBlobClient<FakeHttpClient>>;
+using PageBlobClient = BorrowingClient<BasicPageBlobClient<FakeHttpClient>>;
+using BlobContainerClient = BorrowingClient<BasicBlobContainerClient<FakeHttpClient>>;
+using BlobServiceClient = BorrowingClient<BasicBlobServiceClient<FakeHttpClient>>;
+using ClientSecretCredential = BorrowingCredential<BasicClientSecretCredential<FakeHttpClient>>;
+using WorkloadIdentityCredential = BorrowingCredential<BasicWorkloadIdentityCredential<FakeHttpClient>>;
+using ClientAssertionCredential = BorrowingCredential<BasicClientAssertionCredential<FakeHttpClient>>;
+using ManagedIdentityCredential = BorrowingCredential<BasicManagedIdentityCredential<FakeHttpClient>>;
+using AzurePipelinesCredential = BorrowingCredential<BasicAzurePipelinesCredential<FakeHttpClient>>;
 
 // Returns a fixed token. The requested `scopes` are ignored.
 class StaticTokenCredential {

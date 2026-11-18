@@ -49,21 +49,6 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobServic
     using ContainerClientType = BasicBlobContainerClient<THttp, TCred>;
 
     /// <summary>
-    /// Creates a client that borrows the HTTP client.
-    /// </summary>
-    /// <param name="httpClient">The HTTP client to send requests with; it must outlive this client and everything
-    /// made from it.</param>
-    /// <param name="options">The account endpoint and authentication settings.</param>
-    /// <param name="credential">The token credential to authorize with; null when the options carry the
-    /// authentication (SAS, Shared Key or a static bearer token).</param>
-    /// <exception cref="std::invalid_argument">Thrown when <paramref name="options"/> are invalid.</exception>
-    BasicBlobServiceClient(THttp& httpClient, BlobServiceClientOptions options,
-                           std::shared_ptr<TCred> credential = nullptr)
-        : m_httpClient(&httpClient),
-          m_connection(Private::MakeConnectionState(std::move(options), Private::PresenceOf(credential))),
-          m_credential(Private::MakeCachedCredential(std::move(credential))) {}
-
-    /// <summary>
     /// Creates a client that shares ownership of the HTTP client for as long as this client or any client made from
     /// it exists, including the operations those clients have in flight.
     /// </summary>
@@ -75,9 +60,9 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobServic
     /// <paramref name="options"/> are invalid.</exception>
     BasicBlobServiceClient(std::shared_ptr<THttp> httpClient, BlobServiceClientOptions options,
                            std::shared_ptr<TCred> credential = nullptr)
-        : BasicBlobServiceClient(Private::RequireHttpClient(httpClient), std::move(options), std::move(credential)) {
-        m_httpOwner = std::move(httpClient);
-    }
+        : m_httpClient(Private::RequireHttpClient(std::move(httpClient))),
+          m_connection(Private::MakeConnectionState(std::move(options), Private::PresenceOf(credential))),
+          m_credential(Private::MakeCachedCredential(std::move(credential))) {}
     /// <summary>Not copyable: the client owns shared connection state that child clients reference.</summary>
     BasicBlobServiceClient(const BasicBlobServiceClient&) = delete;
     /// <summary>Not copy-assignable.</summary>
@@ -109,13 +94,11 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BasicBlobServic
     /// <exception cref="std::invalid_argument">Thrown when <paramref name="containerName"/> is not a valid container
     /// name.</exception>
     [[nodiscard]] ContainerClientType GetBlobContainerClient(std::string containerName) const {
-        return ContainerClientType{*m_httpClient, m_connection, m_credential, std::move(containerName), m_httpOwner};
+        return ContainerClientType{m_httpClient, m_connection, m_credential, std::move(containerName)};
     }
 
   private:
-    gsl::not_null<THttp*> m_httpClient;
-    // Set when the client was given shared ownership of the HTTP client; null when it only borrows it.
-    std::shared_ptr<THttp> m_httpOwner;
+    std::shared_ptr<THttp> m_httpClient;
     // Shared immutable connection state referenced by child clients.
     std::shared_ptr<const Private::ConnectionState> m_connection;
     std::shared_ptr<CachedTokenCredential<TCred>> m_credential;

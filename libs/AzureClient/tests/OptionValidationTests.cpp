@@ -112,12 +112,12 @@ std::vector<TokenTransportCase> MakeTokenTransportCases() {
     };
 }
 
-using StaticBlobClient =
-    AVEVA::AzureClient::BasicBlobClient<FakeHttpClient, AVEVA::AzureClient::Tests::StaticTokenCredential>;
-using StaticContainerClient =
-    AVEVA::AzureClient::BasicBlobContainerClient<FakeHttpClient, AVEVA::AzureClient::Tests::StaticTokenCredential>;
-using StaticServiceClient =
-    AVEVA::AzureClient::BasicBlobServiceClient<FakeHttpClient, AVEVA::AzureClient::Tests::StaticTokenCredential>;
+using StaticBlobClient = AVEVA::AzureClient::Tests::BorrowingClient<
+    AVEVA::AzureClient::BasicBlobClient<FakeHttpClient, AVEVA::AzureClient::Tests::StaticTokenCredential>>;
+using StaticContainerClient = AVEVA::AzureClient::Tests::BorrowingClient<
+    AVEVA::AzureClient::BasicBlobContainerClient<FakeHttpClient, AVEVA::AzureClient::Tests::StaticTokenCredential>>;
+using StaticServiceClient = AVEVA::AzureClient::Tests::BorrowingClient<
+    AVEVA::AzureClient::BasicBlobServiceClient<FakeHttpClient, AVEVA::AzureClient::Tests::StaticTokenCredential>>;
 
 template <class TOptions> void ApplyCase(TOptions& options, const TokenTransportCase& testCase) {
     options.ServiceEndpoint = testCase.Endpoint;

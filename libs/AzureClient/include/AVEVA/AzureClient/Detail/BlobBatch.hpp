@@ -93,17 +93,15 @@ struct StopWorkers {};
 template <HttpClientLike THttp, TokenCredentialLike TCred> class BatchDeleteRun {
   public:
     /// <summary>Prepares the run.</summary>
-    /// <param name="httpClient">The HTTP client to send the batch requests through; kept alive by
-    /// <paramref name="httpOwner"/> when that is set, otherwise by the caller.</param>
-    /// <param name="httpOwner">The shared owner of the HTTP client; null when it is only borrowed.</param>
+    /// <param name="httpClient">The HTTP client to send the batch requests through; the run shares ownership.</param>
     /// <param name="target">The container the blobs are deleted from.</param>
     /// <param name="names">The blob names to delete.</param>
     /// <param name="requestOptions">The options every batch request starts from; their total deadline is the budget of
     /// the whole run.</param>
-    BatchDeleteRun(THttp& httpClient, std::shared_ptr<THttp> httpOwner,
+    BatchDeleteRun(std::shared_ptr<THttp> httpClient,
                    gsl::not_null<std::shared_ptr<const BasicContainerTarget<TCred>>> target,
                    std::vector<std::string> names, AzureRequestOptions requestOptions)
-        : m_httpClient(&httpClient), m_httpOwner(std::move(httpOwner)), m_target(std::move(target)),
+        : m_httpClient(std::move(httpClient)), m_target(std::move(target)),
           m_names(std::move(names)), m_requestOptions(std::move(requestOptions)), m_deadline(m_requestOptions),
           m_auth(MakeRequestAuth(*m_target->Connection, PresenceOf(m_target->Credential))) {
         m_items.resize(m_names.size());
@@ -283,8 +281,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BatchDeleteRun 
         }
     }
 
-    gsl::not_null<THttp*> m_httpClient;
-    std::shared_ptr<THttp> m_httpOwner;
+    std::shared_ptr<THttp> m_httpClient;
     gsl::not_null<std::shared_ptr<const BasicContainerTarget<TCred>>> m_target;
     std::vector<std::string> m_names;
     AzureRequestOptions m_requestOptions;
@@ -308,9 +305,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BatchDeleteRun 
 /// </summary>
 /// <typeparam name="THttp">The HTTP client type the batch requests are sent through.</typeparam>
 /// <typeparam name="TCred">The credential type the container target authorizes with.</typeparam>
-/// <param name="httpClient">The HTTP client to send the batch requests through.</param>
-/// <param name="httpOwner">The shared owner of <paramref name="httpClient"/>, held for the whole call; null when the
-/// caller keeps the HTTP client alive.</param>
+/// <param name="httpClient">The HTTP client to send the batch requests through; held for the whole call.</param>
 /// <param name="target">The container the blobs are deleted from.</param>
 /// <param name="blobNames">The names of the blobs to delete.</param>
 /// <param name="options">The operation options; <c>MaxConcurrentRequests</c> bounds the parallel batch
@@ -320,7 +315,7 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BatchDeleteRun 
 /// <returns>The per-blob results, or the first failure; failures are returned rather than thrown.</returns>
 template <HttpClientLike THttp, TokenCredentialLike TCred>
 boost::asio::awaitable<std::expected<Response<Models::DeleteBlobsResult>, BlobStorageError>>
-DeleteBlobsAsync(THttp& httpClient, std::shared_ptr<THttp> httpOwner,
+DeleteBlobsAsync(std::shared_ptr<THttp> httpClient,
                  gsl::not_null<std::shared_ptr<const BasicContainerTarget<TCred>>> target,
                  std::vector<std::string> blobNames, DeleteBlobsOptions options, AzureRequestOptions requestOptions) {
     using Result = std::expected<Response<Models::DeleteBlobsResult>, BlobStorageError>;
@@ -335,8 +330,8 @@ DeleteBlobsAsync(THttp& httpClient, std::shared_ptr<THttp> httpOwner,
 
     const auto executor = co_await boost::asio::this_coro::executor;
 
-    BatchDetail::BatchDeleteRun<THttp, TCred> run(httpClient, std::move(httpOwner), std::move(target),
-                                                  std::move(blobNames), std::move(requestOptions));
+    BatchDetail::BatchDeleteRun<THttp, TCred> run(std::move(httpClient), std::move(target), std::move(blobNames),
+                                                  std::move(requestOptions));
     const std::size_t workers = std::min(options.MaxConcurrentRequests.Value(), run.ChunkCount());
     const auto strand = boost::asio::make_strand(executor);
     try {

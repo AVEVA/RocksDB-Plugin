@@ -356,7 +356,7 @@ RunResult Measure(std::size_t readSize, std::size_t inFlight, std::size_t reads,
         // Otherwise the pipeline would retry the closed connection with backoff and outlive the drain bound.
         options.Retry.MaxRetries = AVEVA::RetryCount{0U};
     }
-    AVEVA::AzureClient::BlobClient client{http, options};
+    AVEVA::AzureClient::BlobClient client{std::shared_ptr<AVEVA::HttpClient>(std::shared_ptr<void>(), &http), options};
 
     const auto runUntil = [&](auto done, std::chrono::milliseconds limit) {
         const auto deadline = std::chrono::steady_clock::now() + limit;

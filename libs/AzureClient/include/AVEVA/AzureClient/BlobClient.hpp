@@ -54,9 +54,8 @@ template <class T> using BlobResult = std::expected<Response<T>, BlobStorageErro
 /// not be touched by the caller until the operation completes.
 ///
 /// Lifetime: the arguments, this client's target and request options are captured when the operation is called, so
-/// destroying or moving from this BlobClient afterwards is fine. The HTTP client (and its io_context) is borrowed
-/// and must outlive the operation, unless this client was built from a std::shared_ptr to it (then every operation
-/// shares ownership). Span arguments and caller-owned objects passed by reference must outlive the operation.
+/// destroying or moving from this BlobClient afterwards is fine. The HTTP client is shared: every operation keeps it
+/// alive until it completes. Span arguments and caller-owned objects passed by reference must outlive the operation.
 ///
 /// Cancellation: cancel the coroutine (for example through a cancellation slot bound to the completion token of
 /// co_spawn). Only terminal and total cancellation abort an operation; a partial cancellation request is ignored.
@@ -71,18 +70,6 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
   public:
     /// <summary>The immutable description of the blob this client operates on.</summary>
     using Target = Private::BasicBlobTarget<TCred>;
-
-    /// <summary>
-    /// Creates a client that borrows the HTTP client.
-    /// </summary>
-    /// <param name="httpClient">The HTTP client to send requests with; it must outlive this client and its
-    /// operations.</param>
-    /// <param name="options">The blob, endpoint and authentication settings.</param>
-    /// <param name="credential">The token credential to authorize with; null when the options carry the
-    /// authentication (SAS, Shared Key or a static bearer token).</param>
-    /// <exception cref="std::invalid_argument">Thrown when <paramref name="options"/> are invalid.</exception>
-    BasicBlobClient(THttp& httpClient, const BlobClientOptions& options, std::shared_ptr<TCred> credential = nullptr)
-        : Core(httpClient, std::make_shared<const Target>(Private::MakeBlobTarget(options, std::move(credential)))) {}
 
     /// <summary>
     /// Creates a client that shares ownership of the HTTP client for as long as this client or any operation started
@@ -159,8 +146,7 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     /// <returns>The content and properties of the blob, or the error that failed the request.</returns>
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::DownloadBlobResult>>
     DownloadAsync(DownloadBlobOptions options = {}, std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return DownloadImpl(*m_httpClient, m_target, m_httpOwner, std::move(options),
-                            Core::Resolve(std::move(requestOptions)));
+        return DownloadImpl(m_httpClient, m_target, std::move(options), Core::Resolve(std::move(requestOptions)));
     }
 
     /// <summary>
@@ -181,7 +167,7 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::DownloadBlobToResult>>
     DownloadToAsync(std::filesystem::path path, DownloadToOptions options = {},
                     std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return DownloadToFileImpl(*m_httpClient, m_target, m_httpOwner, std::move(options), std::move(path),
+        return DownloadToFileImpl(m_httpClient, m_target, std::move(options), std::move(path),
                                   Core::Resolve(std::move(requestOptions)));
     }
 
@@ -198,7 +184,7 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::DownloadBlobToResult>>
     DownloadToAsync(std::span<char> destination, DownloadBlobOptions options,
                     std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return DownloadToSpanImpl(*m_httpClient, m_target, m_httpOwner, std::move(options), destination,
+        return DownloadToSpanImpl(m_httpClient, m_target, std::move(options), destination,
                                   Core::Resolve(std::move(requestOptions)));
     }
 
@@ -210,8 +196,8 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     /// <returns>The outcome of the deletion, or the error that failed the request.</returns>
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::DeleteBlobResult>>
     DeleteAsync(DeleteBlobOptions options = {}, std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return DeleteImpl(*m_httpClient, m_target, m_httpOwner, std::move(options),
-                          Core::Resolve(std::move(requestOptions)), MissingTarget::Fail);
+        return DeleteImpl(m_httpClient, m_target, std::move(options), Core::Resolve(std::move(requestOptions)),
+                          MissingTarget::Fail);
     }
 
     /// <summary>
@@ -228,8 +214,8 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::DeleteBlobResult>>
     DeleteIfExistsAsync(DeleteBlobOptions options = {},
                         std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return DeleteImpl(*m_httpClient, m_target, m_httpOwner, std::move(options),
-                          Core::Resolve(std::move(requestOptions)), MissingTarget::Tolerate);
+        return DeleteImpl(m_httpClient, m_target, std::move(options), Core::Resolve(std::move(requestOptions)),
+                          MissingTarget::Tolerate);
     }
 
     /// <summary>
@@ -241,8 +227,7 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::BlobProperties>>
     GetPropertiesAsync(GetBlobPropertiesOptions options = {},
                        std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return GetPropertiesImpl(*m_httpClient, m_target, m_httpOwner, std::move(options),
-                                 Core::Resolve(std::move(requestOptions)));
+        return GetPropertiesImpl(m_httpClient, m_target, std::move(options), Core::Resolve(std::move(requestOptions)));
     }
 
     /// <summary>
@@ -253,7 +238,7 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     /// <returns><c>Existence::Present</c> or <c>Existence::Absent</c>, or the error that failed the request.</returns>
     [[nodiscard]] boost::asio::awaitable<BlobResult<Existence>>
     ExistsAsync(std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return ExistsImpl(*m_httpClient, m_target, m_httpOwner, Core::Resolve(std::move(requestOptions)));
+        return ExistsImpl(m_httpClient, m_target, Core::Resolve(std::move(requestOptions)));
     }
 
     /// <summary>
@@ -264,8 +249,7 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     /// <returns>The blob's new ETag and last-modified time, or the error that failed the request.</returns>
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::SetBlobMetadataResult>>
     SetMetadataAsync(SetBlobMetadataOptions options, std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return SetMetadataImpl(*m_httpClient, m_target, m_httpOwner, std::move(options),
-                               Core::Resolve(std::move(requestOptions)));
+        return SetMetadataImpl(m_httpClient, m_target, std::move(options), Core::Resolve(std::move(requestOptions)));
     }
 
     /// <summary>
@@ -277,8 +261,7 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::AcquireBlobLeaseResult>>
     AcquireLeaseAsync(AcquireLeaseOptions options = {},
                       std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return AcquireLeaseImpl(*m_httpClient, m_target, m_httpOwner, std::move(options),
-                                Core::Resolve(std::move(requestOptions)));
+        return AcquireLeaseImpl(m_httpClient, m_target, std::move(options), Core::Resolve(std::move(requestOptions)));
     }
 
     /// <summary>
@@ -289,8 +272,7 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     /// <returns>The renewed lease, or the error that failed the request.</returns>
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::RenewBlobLeaseResult>>
     RenewLeaseAsync(RenewLeaseOptions options, std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return RenewLeaseImpl(*m_httpClient, m_target, m_httpOwner, std::move(options),
-                              Core::Resolve(std::move(requestOptions)));
+        return RenewLeaseImpl(m_httpClient, m_target, std::move(options), Core::Resolve(std::move(requestOptions)));
     }
 
     /// <summary>
@@ -303,8 +285,7 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     /// <returns>The ETag and last-modified time after the release, or the error that failed the request.</returns>
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::ReleaseBlobLeaseResult>>
     ReleaseLeaseAsync(ReleaseLeaseOptions options, std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
-        return ReleaseLeaseImpl(*m_httpClient, m_target, m_httpOwner, std::move(options),
-                                Core::Resolve(std::move(requestOptions)));
+        return ReleaseLeaseImpl(m_httpClient, m_target, std::move(options), Core::Resolve(std::move(requestOptions)));
     }
 
   protected:
@@ -312,20 +293,16 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     /// <summary>
     /// Creates a client for a target already validated by the container client that makes it.
     /// </summary>
-    /// <param name="httpClient">The HTTP client to send requests with.</param>
+    /// <param name="httpClient">The HTTP client to send requests with; shared with the container client.</param>
     /// <param name="target">The validated blob target; shares the container client's connection state (no
     /// re-normalisation).</param>
-    /// <param name="owner">The shared owner of the HTTP client; null when it is only borrowed.</param>
-    BasicBlobClient(THttp& httpClient, std::shared_ptr<const Target> target, std::shared_ptr<THttp> owner = nullptr)
-        : Core(httpClient, std::move(target), std::move(owner)) {}
+    BasicBlobClient(std::shared_ptr<THttp> httpClient, std::shared_ptr<const Target> target)
+        : Core(std::move(httpClient), std::move(target)) {}
 
     using Core::Resolve;
-    /// <summary>The HTTP client operations send requests with.</summary>
+    /// <summary>The shared HTTP client, which operations hand to their coroutine frames to keep it alive.</summary>
     /// <returns>The HTTP client; valid for as long as this client.</returns>
-    [[nodiscard]] THttp& Http() const noexcept AVEVA_LIFETIMEBOUND { return *m_httpClient; }
-    /// <summary>The shared owner of the HTTP client, for operations that must keep it alive.</summary>
-    /// <returns>The owner; null when the HTTP client is only borrowed.</returns>
-    [[nodiscard]] const std::shared_ptr<THttp>& HttpOwner() const noexcept AVEVA_LIFETIMEBOUND { return m_httpOwner; }
+    [[nodiscard]] const std::shared_ptr<THttp>& Http() const noexcept AVEVA_LIFETIMEBOUND { return m_httpClient; }
     /// <summary>The blob this client operates on.</summary>
     /// <returns>The target; valid for as long as this client.</returns>
     [[nodiscard]] const Target& GetTarget() const noexcept AVEVA_LIFETIMEBOUND { return *m_target; }
@@ -337,7 +314,6 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
 
   private:
     using Core::m_httpClient;
-    using Core::m_httpOwner;
     using Core::m_target;
 
     /// <summary>The body of DownloadAsync; see DeleteImpl for why it is a static coroutine.</summary>
@@ -347,9 +323,9 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     /// <param name="requestOptions">The resolved per-request options.</param>
     /// <returns>The content and properties of the blob, or the error that failed the download.</returns>
     static boost::asio::awaitable<BlobResult<Models::DownloadBlobResult>>
-    DownloadImpl(THttp& http, std::shared_ptr<const Target> target, std::shared_ptr<THttp> /*owner*/,
-                 DownloadBlobOptions options, AzureRequestOptions requestOptions) {
-        co_return co_await Private::DownloadBlobAsync(http, std::move(target), std::move(options),
+    DownloadImpl(std::shared_ptr<THttp> http, std::shared_ptr<const Target> target, DownloadBlobOptions options,
+                 AzureRequestOptions requestOptions) {
+        co_return co_await Private::DownloadBlobAsync(*http, std::move(target), std::move(options),
                                                       std::move(requestOptions));
     }
 
@@ -361,9 +337,9 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     /// <param name="requestOptions">The resolved per-request options.</param>
     /// <returns>The number of bytes written and the blob's properties, or the error that failed the download.</returns>
     static boost::asio::awaitable<BlobResult<Models::DownloadBlobToResult>>
-    DownloadToFileImpl(THttp& http, std::shared_ptr<const Target> target, std::shared_ptr<THttp> /*owner*/,
-                       DownloadToOptions options, std::filesystem::path path, AzureRequestOptions requestOptions) {
-        co_return co_await Private::DownloadBlobToFileAsync(http, std::move(target), std::move(options),
+    DownloadToFileImpl(std::shared_ptr<THttp> http, std::shared_ptr<const Target> target, DownloadToOptions options,
+                       std::filesystem::path path, AzureRequestOptions requestOptions) {
+        co_return co_await Private::DownloadBlobToFileAsync(*http, std::move(target), std::move(options),
                                                             std::move(path), std::move(requestOptions));
     }
 
@@ -376,16 +352,16 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     /// <param name="requestOptions">The resolved per-request options.</param>
     /// <returns>The number of bytes stored and the blob's properties, or the error that failed the download.</returns>
     static boost::asio::awaitable<BlobResult<Models::DownloadBlobToResult>>
-    DownloadToSpanImpl(THttp& http, std::shared_ptr<const Target> target, std::shared_ptr<THttp> /*owner*/,
-                       DownloadBlobOptions options, std::span<char> destination, AzureRequestOptions requestOptions) {
-        co_return co_await Private::DownloadBlobToSpanAsync(http, std::move(target),
+    DownloadToSpanImpl(std::shared_ptr<THttp> http, std::shared_ptr<const Target> target, DownloadBlobOptions options,
+                       std::span<char> destination, AzureRequestOptions requestOptions) {
+        co_return co_await Private::DownloadBlobToSpanAsync(*http, std::move(target),
                                                             Private::ToDownloadToOptions(std::move(options)),
                                                             destination, std::move(requestOptions));
     }
 
     /// <summary>The body of DeleteAsync and DeleteIfExistsAsync.</summary>
     /// <remarks>
-    /// The operation bodies are static coroutines whose frames own the target and the HTTP client's owner, so a
+    /// The operation bodies are static coroutines whose frames own the target and the HTTP client, so a
     /// running operation does not depend on this client object.
     /// </remarks>
     /// <param name="http">The HTTP client to send the request with.</param>
@@ -395,14 +371,14 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     /// <param name="missingTarget">Whether a blob that does not exist counts as success.</param>
     /// <returns>The outcome of the deletion, or the error that failed the request.</returns>
     static boost::asio::awaitable<BlobResult<Models::DeleteBlobResult>>
-    DeleteImpl(THttp& http, std::shared_ptr<const Target> target, std::shared_ptr<THttp> /*owner*/,
-               DeleteBlobOptions options, AzureRequestOptions requestOptions, MissingTarget missingTarget) {
+    DeleteImpl(std::shared_ptr<THttp> http, std::shared_ptr<const Target> target, DeleteBlobOptions options,
+               AzureRequestOptions requestOptions, MissingTarget missingTarget) {
         if (missingTarget == MissingTarget::Tolerate) {
             co_return co_await Private::DeleteBlobAsync(
-                http, *target, std::move(options), std::move(requestOptions), ReplaySafety::Safe,
+                *http, *target, std::move(options), std::move(requestOptions), ReplaySafety::Safe,
                 {BlobStorageErrorCode::BlobNotFound, BlobStorageErrorCode::ResourceNotFound});
         }
-        co_return co_await Private::DeleteBlobAsync(http, *target, std::move(options), std::move(requestOptions));
+        co_return co_await Private::DeleteBlobAsync(*http, *target, std::move(options), std::move(requestOptions));
     }
 
     /// <summary>The body of GetPropertiesAsync.</summary>
@@ -412,9 +388,9 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     /// <param name="requestOptions">The resolved per-request options.</param>
     /// <returns>The blob's properties, or the error that failed the request.</returns>
     static boost::asio::awaitable<BlobResult<Models::BlobProperties>>
-    GetPropertiesImpl(THttp& http, std::shared_ptr<const Target> target, std::shared_ptr<THttp> /*owner*/,
+    GetPropertiesImpl(std::shared_ptr<THttp> http, std::shared_ptr<const Target> target,
                       GetBlobPropertiesOptions options, AzureRequestOptions requestOptions) {
-        co_return co_await Private::GetBlobPropertiesAsync(http, *target, std::move(options),
+        co_return co_await Private::GetBlobPropertiesAsync(*http, *target, std::move(options),
                                                            std::move(requestOptions));
     }
 
@@ -423,10 +399,10 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     /// <param name="target">The blob to look for.</param>
     /// <param name="requestOptions">The resolved per-request options.</param>
     /// <returns>Whether the blob exists, or the error that failed the request.</returns>
-    static boost::asio::awaitable<BlobResult<Existence>> ExistsImpl(THttp& http, std::shared_ptr<const Target> target,
-                                                                    std::shared_ptr<THttp> /*owner*/,
+    static boost::asio::awaitable<BlobResult<Existence>> ExistsImpl(std::shared_ptr<THttp> http,
+                                                                    std::shared_ptr<const Target> target,
                                                                     AzureRequestOptions requestOptions) {
-        co_return co_await Private::ExistsBlobAsync(http, *target, std::move(requestOptions));
+        co_return co_await Private::ExistsBlobAsync(*http, *target, std::move(requestOptions));
     }
 
     /// <summary>The body of SetMetadataAsync.</summary>
@@ -436,9 +412,9 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     /// <param name="requestOptions">The resolved per-request options.</param>
     /// <returns>The blob's new ETag and last-modified time, or the error that failed the request.</returns>
     static boost::asio::awaitable<BlobResult<Models::SetBlobMetadataResult>>
-    SetMetadataImpl(THttp& http, std::shared_ptr<const Target> target, std::shared_ptr<THttp> /*owner*/,
-                    SetBlobMetadataOptions options, AzureRequestOptions requestOptions) {
-        co_return co_await Private::SetBlobMetadataAsync(http, *target, std::move(options), std::move(requestOptions));
+    SetMetadataImpl(std::shared_ptr<THttp> http, std::shared_ptr<const Target> target, SetBlobMetadataOptions options,
+                    AzureRequestOptions requestOptions) {
+        co_return co_await Private::SetBlobMetadataAsync(*http, *target, std::move(options), std::move(requestOptions));
     }
 
     /// <summary>The body of AcquireLeaseAsync.</summary>
@@ -448,9 +424,9 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     /// <param name="requestOptions">The resolved per-request options.</param>
     /// <returns>The lease acquired, or the error that failed the request.</returns>
     static boost::asio::awaitable<BlobResult<Models::AcquireBlobLeaseResult>>
-    AcquireLeaseImpl(THttp& http, std::shared_ptr<const Target> target, std::shared_ptr<THttp> /*owner*/,
-                     AcquireLeaseOptions options, AzureRequestOptions requestOptions) {
-        co_return co_await Private::AcquireLeaseAsync(http, *target, std::move(options), std::move(requestOptions));
+    AcquireLeaseImpl(std::shared_ptr<THttp> http, std::shared_ptr<const Target> target, AcquireLeaseOptions options,
+                     AzureRequestOptions requestOptions) {
+        co_return co_await Private::AcquireLeaseAsync(*http, *target, std::move(options), std::move(requestOptions));
     }
 
     /// <summary>The body of RenewLeaseAsync.</summary>
@@ -460,9 +436,9 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     /// <param name="requestOptions">The resolved per-request options.</param>
     /// <returns>The renewed lease, or the error that failed the request.</returns>
     static boost::asio::awaitable<BlobResult<Models::RenewBlobLeaseResult>>
-    RenewLeaseImpl(THttp& http, std::shared_ptr<const Target> target, std::shared_ptr<THttp> /*owner*/,
-                   RenewLeaseOptions options, AzureRequestOptions requestOptions) {
-        co_return co_await Private::RenewLeaseAsync(http, *target, std::move(options), std::move(requestOptions));
+    RenewLeaseImpl(std::shared_ptr<THttp> http, std::shared_ptr<const Target> target, RenewLeaseOptions options,
+                   AzureRequestOptions requestOptions) {
+        co_return co_await Private::RenewLeaseAsync(*http, *target, std::move(options), std::move(requestOptions));
     }
 
     /// <summary>The body of ReleaseLeaseAsync.</summary>
@@ -472,9 +448,9 @@ class BasicBlobClient : Private::ClientCore<THttp, Private::BasicBlobTarget<TCre
     /// <param name="requestOptions">The resolved per-request options.</param>
     /// <returns>The ETag and last-modified time after the release, or the error that failed the request.</returns>
     static boost::asio::awaitable<BlobResult<Models::ReleaseBlobLeaseResult>>
-    ReleaseLeaseImpl(THttp& http, std::shared_ptr<const Target> target, std::shared_ptr<THttp> /*owner*/,
-                     ReleaseLeaseOptions options, AzureRequestOptions requestOptions) {
-        co_return co_await Private::ReleaseLeaseAsync(http, *target, std::move(options), std::move(requestOptions));
+    ReleaseLeaseImpl(std::shared_ptr<THttp> http, std::shared_ptr<const Target> target, ReleaseLeaseOptions options,
+                     AzureRequestOptions requestOptions) {
+        co_return co_await Private::ReleaseLeaseAsync(*http, *target, std::move(options), std::move(requestOptions));
     }
 };
 

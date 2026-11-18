@@ -52,8 +52,8 @@ using AVEVA::AzureClient::Tests::PageBlobClient;
 using AVEVA::AzureClient::Tests::RunAwaitable;
 using AVEVA::AzureClient::Tests::ScriptedTokenCredential;
 using AVEVA::AzureClient::Tests::StartAwaitable;
-using ScriptedBlobClient =
-    AVEVA::AzureClient::BasicBlobClient<AVEVA::AzureClient::Tests::FakeHttpClient, ScriptedTokenCredential>;
+using ScriptedBlobClient = AVEVA::AzureClient::Tests::BorrowingClient<
+    AVEVA::AzureClient::BasicBlobClient<AVEVA::AzureClient::Tests::FakeHttpClient, ScriptedTokenCredential>>;
 using DeleteResult = std::expected<Response<DeleteBlobResult>, BlobStorageError>;
 using GetBlobPropertiesResult = std::expected<Response<BlobProperties>, BlobStorageError>;
 

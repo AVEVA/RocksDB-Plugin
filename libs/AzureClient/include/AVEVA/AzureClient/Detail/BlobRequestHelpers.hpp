@@ -470,16 +470,17 @@ struct RequestFailure {
     return (value >= 'A' && value <= 'Z') ? static_cast<char>(value | 0x20) : value;
 }
 
-/// <summary>The HTTP client a shared_ptr constructor keeps alive; a null handle is a caller error.</summary>
+/// <summary>Validates the HTTP client a constructor takes shared ownership of; a null handle is a caller
+/// error.</summary>
 /// <typeparam name="THttp">The HTTP client type.</typeparam>
-/// <param name="httpClient">The handle to dereference.</param>
-/// <returns>The HTTP client the handle points at.</returns>
+/// <param name="httpClient">The handle to validate.</param>
+/// <returns>The same handle, known to be non-null.</returns>
 /// <exception cref="std::invalid_argument">Thrown when <paramref name="httpClient"/> is null.</exception>
-template <class THttp> THttp& RequireHttpClient(const std::shared_ptr<THttp>& httpClient) {
+template <class THttp> std::shared_ptr<THttp> RequireHttpClient(std::shared_ptr<THttp> httpClient) {
     if (!httpClient) {
         throw std::invalid_argument("The HTTP client must not be null.");
     }
-    return *httpClient;
+    return httpClient;
 }
 
 /// <summary>Compares two texts, ignoring ASCII case.</summary>

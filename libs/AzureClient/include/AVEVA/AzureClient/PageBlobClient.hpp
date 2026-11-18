@@ -84,19 +84,6 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
 
   public:
     /// <summary>
-    /// Creates a client that borrows the HTTP client.
-    /// </summary>
-    /// <param name="httpClient">The HTTP client to send requests with; it must outlive this client and its
-    /// operations.</param>
-    /// <param name="options">The blob, endpoint and authentication settings.</param>
-    /// <param name="credential">The token credential to authorize with; null when the options carry the
-    /// authentication (SAS, Shared Key or a static bearer token).</param>
-    /// <exception cref="std::invalid_argument">Thrown when <paramref name="options"/> are invalid.</exception>
-    BasicPageBlobClient(THttp& httpClient, const BlobClientOptions& options,
-                        std::shared_ptr<TCred> credential = nullptr)
-        : Base(httpClient, options, std::move(credential)) {}
-
-    /// <summary>
     /// Creates a client that shares ownership of the HTTP client for as long as this client or any operation started
     /// from it exists.
     /// </summary>
@@ -122,7 +109,7 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     CreateAsync(PageBlobSize contentLength, CreatePageBlobOptions options = {},
                 std::optional<AzureRequestOptions> requestOptions = std::nullopt) {
         return SendPrepared<Models::CreatePageBlobResult>(
-            this->Http(), this->SharedTarget(), this->HttpOwner(), BuildCreate(contentLength, options),
+            this->Http(), this->SharedTarget(), BuildCreate(contentLength, options),
             Private::ParseETagAndLastModified<Models::CreatePageBlobResult>, this->Resolve(std::move(requestOptions)),
             ReplaySafety::Unsafe, {});
     }
@@ -157,7 +144,7 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
             prepared = BuildCreate(contentLength, options);
         }
         return SendPrepared<Models::CreatePageBlobResult>(
-            this->Http(), this->SharedTarget(), this->HttpOwner(), std::move(prepared),
+            this->Http(), this->SharedTarget(), std::move(prepared),
             Private::ParseETagAndLastModified<Models::CreatePageBlobResult>, this->Resolve(std::move(requestOptions)),
             ReplaySafety::Safe, {BlobStorageErrorCode::BlobAlreadyExists, BlobStorageErrorCode::ConditionNotMet});
     }
@@ -196,7 +183,7 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
         Private::AddHeader(request, Private::XMsBlobContentLengthHeaderName, std::to_string(newSize.Value()));
         Private::ApplyBlobRequestConditions(request, options.Conditions);
         return SendPrepared<Models::ResizePageBlobResult>(
-            this->Http(), this->SharedTarget(), this->HttpOwner(), Prepared(std::move(request)),
+            this->Http(), this->SharedTarget(), Prepared(std::move(request)),
             Private::ParseETagAndLastModified<Models::ResizePageBlobResult>, this->Resolve(std::move(requestOptions)),
             ReplaySafety::Unsafe, {});
     }
@@ -219,7 +206,7 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
             Private::BuildBlobRequest(this->GetTarget(), HttpMethod::Get, Private::BuildQueryString(queryParameters));
         Private::ApplyBlobRequestConditions(request, options.Conditions);
         return SendPrepared<Models::GetPageRangesResult>(
-            this->Http(), this->SharedTarget(), this->HttpOwner(), Prepared(std::move(request)),
+            this->Http(), this->SharedTarget(), Prepared(std::move(request)),
             Private::ParseGetPageRangesResult, this->Resolve(std::move(requestOptions)), ReplaySafety::Unsafe, {});
     }
 
@@ -249,18 +236,17 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
   private:
     template <HttpClientLike, TokenCredentialLike> friend class BasicBlobContainerClient;
     /// <summary>Creates a client for a target already validated by the container client that makes it.</summary>
-    /// <param name="httpClient">The HTTP client to send requests with.</param>
+    /// <param name="httpClient">The HTTP client to send requests with; shared with the container client.</param>
     /// <param name="target">The validated blob target.</param>
-    /// <param name="owner">The shared owner of the HTTP client; null when it is only borrowed.</param>
-    BasicPageBlobClient(THttp& httpClient, std::shared_ptr<const Target> target, std::shared_ptr<THttp> owner = nullptr)
-        : Base(httpClient, std::move(target), std::move(owner)) {}
+    BasicPageBlobClient(std::shared_ptr<THttp> httpClient, std::shared_ptr<const Target> target)
+        : Base(std::move(httpClient), std::move(target)) {}
 
     /// <summary>
     /// Sends a request built by one of the Build functions, or fails with its validation message.
     /// </summary>
     /// <typeparam name="TModel">The model the response is parsed into.</typeparam>
     /// <typeparam name="TParser">The callable that parses the response.</typeparam>
-    /// <param name="http">The HTTP client to send the request with.</param>
+    /// <param name="http">The HTTP client to send the request with; kept alive by the frame.</param>
     /// <param name="target">The blob the request addresses.</param>
     /// <param name="prepared">The request, or the validation message that fails the operation.</param>
     /// <param name="parser">Parses the response into <typeparamref name="TModel"/>.</param>
@@ -272,13 +258,13 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     /// <returns>The parsed response, or the validation or request error.</returns>
     template <class TModel, class TParser>
     static boost::asio::awaitable<BlobResult<TModel>>
-    SendPrepared(THttp& http, std::shared_ptr<const Target> target, std::shared_ptr<THttp> /*owner*/, Prepared prepared,
-                 TParser parser, AzureRequestOptions requestOptions, ReplaySafety replaySafe,
+    SendPrepared(std::shared_ptr<THttp> http, std::shared_ptr<const Target> target, Prepared prepared, TParser parser,
+                 AzureRequestOptions requestOptions, ReplaySafety replaySafe,
                  std::vector<BlobStorageErrorCode> suppressed) {
         if (!prepared) {
             co_return Private::InvalidArgument(std::move(prepared.error()));
         }
-        co_return co_await Private::SendAndParse<TModel>(http, *target, std::move(*prepared), parser,
+        co_return co_await Private::SendAndParse<TModel>(*http, *target, std::move(*prepared), parser,
                                                          std::move(requestOptions), replaySafe, std::move(suppressed));
     }
 
@@ -289,7 +275,7 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     [[nodiscard]] boost::asio::awaitable<BlobResult<Models::UploadPagesResult>>
     SendUpload(Prepared prepared, std::optional<AzureRequestOptions> requestOptions) {
         return SendPrepared<Models::UploadPagesResult>(
-            this->Http(), this->SharedTarget(), this->HttpOwner(), std::move(prepared),
+            this->Http(), this->SharedTarget(), std::move(prepared),
             Private::ParseETagAndLastModified<Models::UploadPagesResult>, this->Resolve(std::move(requestOptions)),
             ReplaySafety::Unsafe, {});
     }

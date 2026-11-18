@@ -284,8 +284,9 @@ TEST(MultiThreadedExecutorTests, ConcurrentChunkedDownloadsOnAThreadPool) {
     constexpr std::size_t BlobCount = 8;
     constexpr std::size_t BlobSize = (64U * 1024U) + 123U;
 
-    ThreadPoolBlobService service;
-    const PoolBlobContainerClient container{service, SharedKeyContainerOptions()};
+    const auto serviceOwner = std::make_shared<ThreadPoolBlobService>();
+    ThreadPoolBlobService& service = *serviceOwner;
+    const PoolBlobContainerClient container{serviceOwner, SharedKeyContainerOptions()};
     ConcurrentBlobData data = MakeConcurrentBlobData(container, BlobCountValue{BlobCount}, BlobSizeValue{BlobSize});
 
     for (std::size_t i = 0; i < BlobCount; ++i) {
@@ -303,8 +304,9 @@ TEST(MultiThreadedExecutorTests, ConcurrentChunkedDownloadsOnAThreadPool) {
 }
 
 TEST(MultiThreadedExecutorTests, FileDownloadWithoutAWriterFailsAsNotSupported) {
-    ThreadPoolBlobService service;
-    const PoolBlobContainerClient container{service, SharedKeyContainerOptions()};
+    const auto serviceOwner = std::make_shared<ThreadPoolBlobService>();
+    ThreadPoolBlobService& service = *serviceOwner;
+    const PoolBlobContainerClient container{serviceOwner, SharedKeyContainerOptions()};
     service.Seed("blob-0", "payload");
     auto client = container.GetPageBlobClient("blob-0");
 
@@ -318,8 +320,9 @@ TEST(MultiThreadedExecutorTests, ClientsAreSafeToInitiateFromManyThreads) {
     constexpr std::size_t Threads = 8;
     constexpr std::size_t CallsPerThread = 25;
 
-    ThreadPoolBlobService service;
-    const PoolBlobContainerClient container{service, SharedKeyContainerOptions()};
+    const auto serviceOwner = std::make_shared<ThreadPoolBlobService>();
+    ThreadPoolBlobService& service = *serviceOwner;
+    const PoolBlobContainerClient container{serviceOwner, SharedKeyContainerOptions()};
     service.Seed("shared", "payload");
     auto shared = container.GetPageBlobClient("shared");
 

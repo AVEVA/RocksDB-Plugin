@@ -108,7 +108,10 @@ class Loopback {
         boost::asio::co_spawn(m_context, Accept(&m_acceptor, &m_requests), boost::asio::detached);
     }
 
-    [[nodiscard]] AVEVA::HttpClient& Http() noexcept { return m_http; }
+    // Non-owning: the loopback outlives every client created in a test.
+    [[nodiscard]] std::shared_ptr<AVEVA::HttpClient> Http() noexcept {
+        return std::shared_ptr<AVEVA::HttpClient>(std::shared_ptr<void>(), &m_http);
+    }
 
     [[nodiscard]] std::string Endpoint() const {
         return "http://127.0.0.1:" + std::to_string(m_acceptor.local_endpoint().port());

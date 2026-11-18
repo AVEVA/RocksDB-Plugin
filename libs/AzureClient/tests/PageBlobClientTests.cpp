@@ -385,7 +385,7 @@ TEST(PageBlobClientTests, UploadPagesFromUrlAsync_ClientCredentialIsForwardedAsB
     options.SasToken.clear();
     auto credential = std::make_shared<AVEVA::AzureClient::Tests::StaticTokenCredential>("client-token");
     AVEVA::AzureClient::BasicPageBlobClient<FakeHttpClient, AVEVA::AzureClient::Tests::StaticTokenCredential> client{
-        httpClient, options, credential};
+        AVEVA::AzureClient::Tests::Borrowed(httpClient), options, credential};
 
     (void)RunAwaitable(httpClient,
                        client.UploadPagesFromUrlAsync(

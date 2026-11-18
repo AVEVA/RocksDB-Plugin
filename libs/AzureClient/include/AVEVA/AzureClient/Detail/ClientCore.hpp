@@ -7,15 +7,14 @@
 #include <AVEVA/AzureClient/Detail/BlobRequestHelpers.hpp>
 #include <AVEVA/AzureClient/HttpClientLike.hpp>
 
-#include <gsl/pointers>
 #include <memory>
 #include <optional>
 #include <utility>
 
 namespace AVEVA::AzureClient::Private {
 /// <summary>
-/// State shared by the blob and container clients: the HTTP client (borrowed, or co-owned when built from a
-/// shared_ptr) and the immutable target. A plain base class template, so nothing is type-erased.
+/// State shared by the blob and container clients: the co-owned HTTP client and the immutable target. A plain base
+/// class template, so nothing is type-erased.
 /// </summary>
 /// <typeparam name="THttp">The HTTP client type the operations send their requests through.</typeparam>
 /// <typeparam name="TTarget">The immutable description of what the client addresses.</typeparam>
@@ -44,25 +43,17 @@ template <HttpClientLike THttp, class TTarget> class ClientCore {
     [[nodiscard]] AzureRequestOptions Resolve(std::optional<AzureRequestOptions> requestOptions) const {
         return requestOptions ? std::move(*requestOptions) : GetDefaultRequestOptions();
     }
-    /// <summary>Borrows the HTTP client, which the caller must keep alive for as long as this core exists.</summary>
-    /// <param name="httpClient">The HTTP client to send requests through.</param>
-    /// <param name="target">What the client addresses.</param>
-    /// <param name="owner">Shares ownership of the HTTP client when given; leave null to only borrow it.</param>
-    ClientCore(THttp& httpClient, std::shared_ptr<const TTarget> target, std::shared_ptr<THttp> owner = nullptr)
-        : m_httpClient(&httpClient), m_httpOwner(std::move(owner)), m_target(std::move(target)) {}
     /// <summary>
-    /// Shares ownership of the HTTP client for as long as this core or any client made from it exists.
+    /// Shares ownership of the HTTP client for as long as this core, any client made from it, or any operation they
+    /// have in flight exists.
     /// </summary>
     /// <param name="httpClient">The HTTP client to send requests through.</param>
     /// <param name="target">What the client addresses.</param>
     /// <exception cref="std::invalid_argument">Thrown when <paramref name="httpClient"/> is null.</exception>
     ClientCore(std::shared_ptr<THttp> httpClient, std::shared_ptr<const TTarget> target)
-        : m_httpClient(&RequireHttpClient(httpClient)), m_httpOwner(std::move(httpClient)),
-          m_target(std::move(target)) {}
+        : m_httpClient(RequireHttpClient(std::move(httpClient))), m_target(std::move(target)) {}
 
-    gsl::not_null<THttp*> m_httpClient;
-    // Set when the client was given shared ownership of the HTTP client; null when it only borrows it.
-    std::shared_ptr<THttp> m_httpOwner;
+    std::shared_ptr<THttp> m_httpClient;
     std::shared_ptr<const TTarget> m_target;
 };
 } // namespace AVEVA::AzureClient::Private

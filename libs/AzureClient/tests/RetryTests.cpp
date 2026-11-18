@@ -456,7 +456,7 @@ TEST(RetryTests, ReleaseLease409AfterATokenRefreshRepeatStillFails) {
 
     BlobClientOptions options = MakeRetryOptions(RetryCount{3U});
     options.SasToken.clear();
-    BasicBlobClient<FakeHttpClient, ScriptedTokenCredential> client{httpClient, std::move(options), credential};
+    BasicBlobClient<FakeHttpClient, ScriptedTokenCredential> client{AVEVA::AzureClient::Tests::Borrowed(httpClient), std::move(options), credential};
 
     std::optional<ReleaseResult> observed;
     StartInto(httpClient, client.ReleaseLeaseAsync(ReleaseLeaseOptions{.LeaseId = "lease"}), observed);
@@ -573,7 +573,7 @@ TEST(RetryTests, UnauthorizedResponseIsRepeatedOnceWithAFreshToken) {
 
     BlobClientOptions options = MakeRetryOptions(RetryCount{0U});
     options.SasToken.clear();
-    BasicBlobClient<FakeHttpClient, ScriptedTokenCredential> client{httpClient, std::move(options), credential};
+    BasicBlobClient<FakeHttpClient, ScriptedTokenCredential> client{AVEVA::AzureClient::Tests::Borrowed(httpClient), std::move(options), credential};
 
     std::optional<DeleteResult> observed;
     StartInto(httpClient, client.DeleteAsync(), observed);
@@ -596,7 +596,7 @@ TEST(RetryTests, ThrowDuringSecondAttemptCompletesOnceWithAnErrorAndDoesNotEscap
 
     BlobClientOptions options = MakeRetryOptions(RetryCount{0U});
     options.SasToken.clear();
-    BasicBlobClient<FakeHttpClient, ScriptedTokenCredential> client{httpClient, std::move(options), credential};
+    BasicBlobClient<FakeHttpClient, ScriptedTokenCredential> client{AVEVA::AzureClient::Tests::Borrowed(httpClient), std::move(options), credential};
 
     int completions = 0;
     std::optional<DeleteResult> observed;
@@ -625,7 +625,7 @@ TEST(RetryTests, UnauthorizedResponseAfterTheDeadlineDoesNotRefreshTheToken) {
 
     BlobClientOptions options = MakeRetryOptions(RetryCount{0U});
     options.SasToken.clear();
-    BasicBlobClient<FakeHttpClient, ScriptedTokenCredential> client{httpClient, std::move(options), credential};
+    BasicBlobClient<FakeHttpClient, ScriptedTokenCredential> client{AVEVA::AzureClient::Tests::Borrowed(httpClient), std::move(options), credential};
 
     AVEVA::AzureClient::AzureRequestOptions requestOptions;
     // Long enough that a slow machine still sends the request in time; the sleep below safely outlasts it.
@@ -655,7 +655,7 @@ TEST(RetryTests, HungTokenAcquisitionIsBoundedByTheTotalDeadline) {
 
     BlobClientOptions options = MakeRetryOptions(RetryCount{0U});
     options.SasToken.clear();
-    BasicBlobClient<FakeHttpClient, ScriptedTokenCredential> client{httpClient, std::move(options), credential};
+    BasicBlobClient<FakeHttpClient, ScriptedTokenCredential> client{AVEVA::AzureClient::Tests::Borrowed(httpClient), std::move(options), credential};
 
     AVEVA::AzureClient::AzureRequestOptions requestOptions;
     requestOptions.SetTotalDeadline(ShortTotalDeadline);
@@ -683,7 +683,7 @@ TEST(RetryTests, UnauthorizedResponseIsOnlyRefreshedOnce) {
 
     BlobClientOptions options = MakeRetryOptions(RetryCount{0U});
     options.SasToken.clear();
-    BasicBlobClient<FakeHttpClient, ScriptedTokenCredential> client{httpClient, std::move(options), credential};
+    BasicBlobClient<FakeHttpClient, ScriptedTokenCredential> client{AVEVA::AzureClient::Tests::Borrowed(httpClient), std::move(options), credential};
 
     std::optional<DeleteResult> observed;
     StartInto(httpClient, client.DeleteAsync(), observed);

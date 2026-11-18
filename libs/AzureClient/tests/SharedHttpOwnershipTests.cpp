@@ -103,16 +103,6 @@ TEST(SharedHttpOwnershipTests, CredentialsKeepTheTransportAlive) {
     EXPECT_TRUE(managed.Expired());
 }
 
-TEST(SharedHttpOwnershipTests, ReferenceConstructorsDoNotTakeOwnership) {
-    const auto http = std::make_shared<FakeHttpClient>();
-    {
-        BlobContainerClient container{*http, MakeBlobContainerClientOptions()};
-        const auto blob = container.GetPageBlobClient("a.sst");
-        EXPECT_EQ(1, http.use_count());
-    }
-    EXPECT_EQ(1, http.use_count());
-}
-
 TEST(SharedHttpOwnershipTests, NullTransportIsRejected) {
     const std::shared_ptr<FakeHttpClient> none;
 

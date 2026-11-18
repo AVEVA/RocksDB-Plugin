@@ -505,8 +505,8 @@ TEST(BatchDeleteTests, RetriedBatchRebuildsSubrequestsWithAFreshToken) {
     options.SasToken.clear();
     options.Retry.MaxRetries = AVEVA::RetryCount{1U};
     options.Retry.InitialDelay = std::chrono::milliseconds{0};
-    AVEVA::AzureClient::BasicBlobContainerClient<FakeHttpClient, ScriptedTokenCredential> client{http, options,
-                                                                                                 credential};
+    AVEVA::AzureClient::BasicBlobContainerClient<FakeHttpClient, ScriptedTokenCredential> client{
+        AVEVA::AzureClient::Tests::Borrowed(http), options, credential};
 
     const BatchOutcome outcome = RunAwaitable(http, client.DeleteBlobsAsync({"a", "b"}));
 

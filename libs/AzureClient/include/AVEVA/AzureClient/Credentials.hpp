@@ -40,8 +40,7 @@
 
 // Microsoft Entra ID token credentials that request tokens through an HTTP client (any HttpClientLike).
 //
-// Lifetime: a credential built from a THttp& borrows the HTTP client, which must outlive the credential and every
-// in-flight GetTokenAsync coroutine; one built from a shared_ptr shares ownership of it with those coroutines. A
+// Lifetime: a credential shares ownership of the HTTP client with the GetTokenAsync coroutines in flight. A
 // pending GetTokenAsync owns a share of the credential's configuration, so the credential itself may be destroyed
 // while a call is in flight. Each GetTokenAsync is a coroutine that runs on the executor of its awaiting coroutine;
 // cancelling it cancels the token request.
@@ -367,16 +366,6 @@ void ValidateOidcRequestUri(std::string_view uri);
 template <HttpClientLike THttp> class BasicClientSecretCredential final {
   public:
     /// <summary>
-    /// Uses a client the credential does not own, which must outlive it.
-    /// </summary>
-    /// <param name="httpClient">The client to send token requests with.</param>
-    /// <param name="options">The credential's configuration.</param>
-    /// <exception cref="std::invalid_argument">Thrown when the authority host is rejected.</exception>
-    BasicClientSecretCredential(THttp& httpClient, ClientSecretCredentialOptions options) : m_httpClient(&httpClient) {
-        static_cast<void>(Private::NormalizeAuthorityHost(options.AuthorityHost));
-        m_options = std::make_shared<const ClientSecretCredentialOptions>(std::move(options));
-    }
-    /// <summary>
     /// Shares ownership of the HTTP client, so the credential keeps it alive.
     /// </summary>
     /// <param name="httpClient">The client to send token requests with.</param>
@@ -384,8 +373,9 @@ template <HttpClientLike THttp> class BasicClientSecretCredential final {
     /// <exception cref="std::invalid_argument">Thrown when the client is null or the authority host is
     /// rejected.</exception>
     BasicClientSecretCredential(std::shared_ptr<THttp> httpClient, ClientSecretCredentialOptions options)
-        : BasicClientSecretCredential(Private::RequireHttpClient(httpClient), std::move(options)) {
-        m_httpOwner = std::move(httpClient);
+        : m_httpClient(Private::RequireHttpClient(std::move(httpClient))) {
+        static_cast<void>(Private::NormalizeAuthorityHost(options.AuthorityHost));
+        m_options = std::make_shared<const ClientSecretCredentialOptions>(std::move(options));
     }
 
     /// <summary>
@@ -395,17 +385,17 @@ template <HttpClientLike THttp> class BasicClientSecretCredential final {
     /// <returns>The token; <c>std::errc::invalid_argument</c> when the configuration or scopes are unusable (nothing
     /// is sent); otherwise the failure of the token request.</returns>
     [[nodiscard]] boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> scopes) {
-        return GetTokenImpl(m_httpClient, m_httpOwner, m_options, std::move(scopes));
+        return GetTokenImpl(m_httpClient, m_options, std::move(scopes));
     }
 
   private:
     /// <summary>
-    /// The body of <c>GetTokenAsync</c>; its by-value parameters keep the configuration (and a shared HTTP client)
+    /// The body of <c>GetTokenAsync</c>; its by-value parameters keep the configuration and the HTTP client
     /// alive while the request is pending, independent of the credential.
     /// </summary>
     static boost::asio::awaitable<TokenResult>
-    GetTokenImpl(gsl::not_null<THttp*> httpClient, std::shared_ptr<THttp> /*owner*/,
-                 std::shared_ptr<const ClientSecretCredentialOptions> options, std::vector<std::string> scopes) {
+    GetTokenImpl(std::shared_ptr<THttp> httpClient, std::shared_ptr<const ClientSecretCredentialOptions> options,
+                 std::vector<std::string> scopes) {
         if (Private::ValidityOfTenantId(options->TenantId) == Validity::Invalid || options->ClientId.empty() ||
             options->ClientSecret.empty() || scopes.empty()) {
             co_return Private::InvalidArgument();
@@ -420,8 +410,7 @@ template <HttpClientLike THttp> class BasicClientSecretCredential final {
             options->RequestOptions, options->Retry, NotFoundRetry::Fail);
     }
 
-    gsl::not_null<THttp*> m_httpClient;
-    std::shared_ptr<THttp> m_httpOwner;
+    std::shared_ptr<THttp> m_httpClient;
     std::shared_ptr<const ClientSecretCredentialOptions> m_options;
 };
 
@@ -437,17 +426,6 @@ using ClientSecretCredential = BasicClientSecretCredential<HttpClient>;
 template <HttpClientLike THttp> class BasicWorkloadIdentityCredential final {
   public:
     /// <summary>
-    /// Uses a client the credential does not own, which must outlive it.
-    /// </summary>
-    /// <param name="httpClient">The client to send token requests with.</param>
-    /// <param name="options">The credential's configuration.</param>
-    /// <exception cref="std::invalid_argument">Thrown when the authority host is rejected.</exception>
-    BasicWorkloadIdentityCredential(THttp& httpClient, WorkloadIdentityCredentialOptions options)
-        : m_httpClient(&httpClient) {
-        static_cast<void>(Private::NormalizeAuthorityHost(options.AuthorityHost));
-        m_options = std::make_shared<const WorkloadIdentityCredentialOptions>(std::move(options));
-    }
-    /// <summary>
     /// Shares ownership of the HTTP client, so the credential keeps it alive.
     /// </summary>
     /// <param name="httpClient">The client to send token requests with.</param>
@@ -455,8 +433,9 @@ template <HttpClientLike THttp> class BasicWorkloadIdentityCredential final {
     /// <exception cref="std::invalid_argument">Thrown when the client is null or the authority host is
     /// rejected.</exception>
     BasicWorkloadIdentityCredential(std::shared_ptr<THttp> httpClient, WorkloadIdentityCredentialOptions options)
-        : BasicWorkloadIdentityCredential(Private::RequireHttpClient(httpClient), std::move(options)) {
-        m_httpOwner = std::move(httpClient);
+        : m_httpClient(Private::RequireHttpClient(std::move(httpClient))) {
+        static_cast<void>(Private::NormalizeAuthorityHost(options.AuthorityHost));
+        m_options = std::make_shared<const WorkloadIdentityCredentialOptions>(std::move(options));
     }
 
     /// <summary>
@@ -467,17 +446,17 @@ template <HttpClientLike THttp> class BasicWorkloadIdentityCredential final {
     /// is sent); <c>std::errc::no_such_file_or_directory</c> when the file cannot be read; otherwise the failure of
     /// the token request.</returns>
     [[nodiscard]] boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> scopes) {
-        return GetTokenImpl(m_httpClient, m_httpOwner, m_options, std::move(scopes));
+        return GetTokenImpl(m_httpClient, m_options, std::move(scopes));
     }
 
   private:
     /// <summary>
-    /// The body of <c>GetTokenAsync</c>; its by-value parameters keep the configuration (and a shared HTTP client)
+    /// The body of <c>GetTokenAsync</c>; its by-value parameters keep the configuration and the HTTP client
     /// alive while the request is pending, independent of the credential.
     /// </summary>
     static boost::asio::awaitable<TokenResult>
-    GetTokenImpl(gsl::not_null<THttp*> httpClient, std::shared_ptr<THttp> /*owner*/,
-                 std::shared_ptr<const WorkloadIdentityCredentialOptions> options, std::vector<std::string> scopes) {
+    GetTokenImpl(std::shared_ptr<THttp> httpClient, std::shared_ptr<const WorkloadIdentityCredentialOptions> options,
+                 std::vector<std::string> scopes) {
         if (Private::ValidityOfTenantId(options->TenantId) == Validity::Invalid || options->ClientId.empty() ||
             options->TokenFilePath.empty() || scopes.empty()) {
             co_return Private::InvalidArgument();
@@ -498,8 +477,7 @@ template <HttpClientLike THttp> class BasicWorkloadIdentityCredential final {
             options->RequestOptions, options->Retry, NotFoundRetry::Fail);
     }
 
-    gsl::not_null<THttp*> m_httpClient;
-    std::shared_ptr<THttp> m_httpOwner;
+    std::shared_ptr<THttp> m_httpClient;
     std::shared_ptr<const WorkloadIdentityCredentialOptions> m_options;
 };
 
@@ -516,17 +494,6 @@ using WorkloadIdentityCredential = BasicWorkloadIdentityCredential<HttpClient>;
 template <HttpClientLike THttp> class BasicClientAssertionCredential final {
   public:
     /// <summary>
-    /// Uses a client the credential does not own, which must outlive it.
-    /// </summary>
-    /// <param name="httpClient">The client to send token requests with.</param>
-    /// <param name="options">The credential's configuration.</param>
-    /// <exception cref="std::invalid_argument">Thrown when the authority host is rejected.</exception>
-    BasicClientAssertionCredential(THttp& httpClient, ClientAssertionCredentialOptions options)
-        : m_httpClient(&httpClient) {
-        static_cast<void>(Private::NormalizeAuthorityHost(options.AuthorityHost));
-        m_options = std::make_shared<const ClientAssertionCredentialOptions>(std::move(options));
-    }
-    /// <summary>
     /// Shares ownership of the HTTP client, so the credential (and requests it has in flight) keep it alive.
     /// </summary>
     /// <param name="httpClient">The client to send token requests with.</param>
@@ -534,8 +501,9 @@ template <HttpClientLike THttp> class BasicClientAssertionCredential final {
     /// <exception cref="std::invalid_argument">Thrown when the client is null or the authority host is
     /// rejected.</exception>
     BasicClientAssertionCredential(std::shared_ptr<THttp> httpClient, ClientAssertionCredentialOptions options)
-        : BasicClientAssertionCredential(Private::RequireHttpClient(httpClient), std::move(options)) {
-        m_httpOwner = std::move(httpClient);
+        : m_httpClient(Private::RequireHttpClient(std::move(httpClient))) {
+        static_cast<void>(Private::NormalizeAuthorityHost(options.AuthorityHost));
+        m_options = std::make_shared<const ClientAssertionCredentialOptions>(std::move(options));
     }
 
     /// <summary>
@@ -546,17 +514,17 @@ template <HttpClientLike THttp> class BasicClientAssertionCredential final {
     /// (no token request is sent); the provider's error when it fails; otherwise the failure of the token
     /// request.</returns>
     [[nodiscard]] boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> scopes) {
-        return GetTokenImpl(m_httpClient, m_httpOwner, m_options, std::move(scopes));
+        return GetTokenImpl(m_httpClient, m_options, std::move(scopes));
     }
 
   private:
     /// <summary>
-    /// The body of <c>GetTokenAsync</c>; its by-value parameters keep the configuration (and a shared HTTP client)
+    /// The body of <c>GetTokenAsync</c>; its by-value parameters keep the configuration and the HTTP client
     /// alive while the request is pending, independent of the credential.
     /// </summary>
     static boost::asio::awaitable<TokenResult>
-    GetTokenImpl(gsl::not_null<THttp*> httpClient, std::shared_ptr<THttp> /*owner*/,
-                 std::shared_ptr<const ClientAssertionCredentialOptions> options, std::vector<std::string> scopes) {
+    GetTokenImpl(std::shared_ptr<THttp> httpClient, std::shared_ptr<const ClientAssertionCredentialOptions> options,
+                 std::vector<std::string> scopes) {
         if (Private::ValidityOfTenantId(options->TenantId) == Validity::Invalid || options->ClientId.empty() ||
             !options->AssertionProvider || scopes.empty()) {
             co_return Private::InvalidArgument();
@@ -576,8 +544,7 @@ template <HttpClientLike THttp> class BasicClientAssertionCredential final {
             options->RequestOptions, options->Retry, NotFoundRetry::Fail);
     }
 
-    gsl::not_null<THttp*> m_httpClient;
-    std::shared_ptr<THttp> m_httpOwner;
+    std::shared_ptr<THttp> m_httpClient;
     std::shared_ptr<const ClientAssertionCredentialOptions> m_options;
 };
 
@@ -594,23 +561,14 @@ using ClientAssertionCredential = BasicClientAssertionCredential<HttpClient>;
 template <HttpClientLike THttp> class BasicManagedIdentityCredential final {
   public:
     /// <summary>
-    /// Uses a client the credential does not own, which must outlive it.
-    /// </summary>
-    /// <param name="httpClient">The client to send token requests with.</param>
-    /// <param name="options">The credential's configuration.</param>
-    BasicManagedIdentityCredential(THttp& httpClient, ManagedIdentityCredentialOptions options)
-        : m_httpClient(&httpClient),
-          m_options(std::make_shared<const ManagedIdentityCredentialOptions>(std::move(options))) {}
-    /// <summary>
     /// Shares ownership of the HTTP client, so the credential keeps it alive.
     /// </summary>
     /// <param name="httpClient">The client to send token requests with.</param>
     /// <param name="options">The credential's configuration.</param>
     /// <exception cref="std::invalid_argument">Thrown when the client is null.</exception>
     BasicManagedIdentityCredential(std::shared_ptr<THttp> httpClient, ManagedIdentityCredentialOptions options)
-        : BasicManagedIdentityCredential(Private::RequireHttpClient(httpClient), std::move(options)) {
-        m_httpOwner = std::move(httpClient);
-    }
+        : m_httpClient(Private::RequireHttpClient(std::move(httpClient))),
+          m_options(std::make_shared<const ManagedIdentityCredentialOptions>(std::move(options))) {}
 
     /// <summary>
     /// Requests a token from the App Service identity endpoint when one is configured, otherwise from IMDS.
@@ -619,17 +577,17 @@ template <HttpClientLike THttp> class BasicManagedIdentityCredential final {
     /// <returns>The token; <c>std::errc::invalid_argument</c> when the configuration or scopes are unusable (nothing
     /// is sent); otherwise the failure of the token request.</returns>
     [[nodiscard]] boost::asio::awaitable<TokenResult> GetTokenAsync(std::vector<std::string> scopes) {
-        return GetTokenImpl(m_httpClient, m_httpOwner, m_options, std::move(scopes));
+        return GetTokenImpl(m_httpClient, m_options, std::move(scopes));
     }
 
   private:
     /// <summary>
-    /// The body of <c>GetTokenAsync</c>; its by-value parameters keep the configuration (and a shared HTTP client)
+    /// The body of <c>GetTokenAsync</c>; its by-value parameters keep the configuration and the HTTP client
     /// alive while the request is pending, independent of the credential.
     /// </summary>
     static boost::asio::awaitable<TokenResult>
-    GetTokenImpl(gsl::not_null<THttp*> httpClient, std::shared_ptr<THttp> /*owner*/,
-                 std::shared_ptr<const ManagedIdentityCredentialOptions> options, std::vector<std::string> scopes) {
+    GetTokenImpl(std::shared_ptr<THttp> httpClient, std::shared_ptr<const ManagedIdentityCredentialOptions> options,
+                 std::vector<std::string> scopes) {
         enum class IdentitySource : std::uint8_t { Imds, AppService };
         const auto source = options->IdentityEndpoint.empty() ? IdentitySource::Imds : IdentitySource::AppService;
         if (scopes.size() != 1U || scopes.front().empty() ||
@@ -671,8 +629,7 @@ template <HttpClientLike THttp> class BasicManagedIdentityCredential final {
                                                      options->Retry, NotFoundRetry::Retry);
     }
 
-    gsl::not_null<THttp*> m_httpClient;
-    std::shared_ptr<THttp> m_httpOwner;
+    std::shared_ptr<THttp> m_httpClient;
     std::shared_ptr<const ManagedIdentityCredentialOptions> m_options;
 };
 
@@ -719,15 +676,6 @@ struct AzurePipelinesCredentialOptions {
 template <HttpClientLike THttp> class BasicAzurePipelinesCredential final {
   public:
     /// <summary>
-    /// Uses a client the credential does not own, which must outlive it.
-    /// </summary>
-    /// <param name="httpClient">The client to send requests with.</param>
-    /// <param name="options">The credential's configuration.</param>
-    /// <exception cref="std::invalid_argument">Thrown when the authority host or a non-empty OIDC request URI is
-    /// rejected.</exception>
-    BasicAzurePipelinesCredential(THttp& httpClient, AzurePipelinesCredentialOptions options)
-        : m_exchange(httpClient, MakeExchangeOptions(httpClient, nullptr, std::move(options))) {}
-    /// <summary>
     /// Shares ownership of the HTTP client; the OIDC token request keeps it alive too.
     /// </summary>
     /// <param name="httpClient">The client to send requests with.</param>
@@ -735,8 +683,7 @@ template <HttpClientLike THttp> class BasicAzurePipelinesCredential final {
     /// <exception cref="std::invalid_argument">Thrown when the client is null, or the authority host or a non-empty
     /// OIDC request URI is rejected.</exception>
     BasicAzurePipelinesCredential(std::shared_ptr<THttp> httpClient, AzurePipelinesCredentialOptions options)
-        : m_exchange(httpClient,
-                     MakeExchangeOptions(Private::RequireHttpClient(httpClient), httpClient, std::move(options))) {}
+        : m_exchange(httpClient, MakeExchangeOptions(httpClient, std::move(options))) {}
 
     /// <summary>
     /// Obtains the pipeline's OIDC token and exchanges it for an access token.
@@ -769,14 +716,15 @@ template <HttpClientLike THttp> class BasicAzurePipelinesCredential final {
     /// <summary>
     /// Derives the options of the token exchange, whose assertion provider requests the OIDC token.
     /// </summary>
-    /// <param name="httpClient">The client the provider sends the OIDC request with.</param>
-    /// <param name="owner">Keeps the client alive for the provider when ownership is shared; may be null.</param>
+    /// <param name="httpClient">The client the provider sends the OIDC request with, and keeps alive.</param>
     /// <param name="options">The credential's configuration; an empty OIDC request URI defaults from the
     /// environment.</param>
     /// <returns>The options of the exchange credential.</returns>
-    /// <exception cref="std::invalid_argument">Thrown when a non-empty OIDC request URI is rejected.</exception>
-    static ClientAssertionCredentialOptions MakeExchangeOptions(THttp& httpClient, std::shared_ptr<THttp> owner,
+    /// <exception cref="std::invalid_argument">Thrown when the client is null or a non-empty OIDC request URI is
+    /// rejected.</exception>
+    static ClientAssertionCredentialOptions MakeExchangeOptions(std::shared_ptr<THttp> httpClient,
                                                                 AzurePipelinesCredentialOptions options) {
+        httpClient = Private::RequireHttpClient(std::move(httpClient));
         if (options.OidcRequestUri.empty()) {
             options.OidcRequestUri = Private::GetEnvironmentValue("SYSTEM_OIDCREQUESTURI");
         }
@@ -794,9 +742,9 @@ template <HttpClientLike THttp> class BasicAzurePipelinesCredential final {
         exchange.Retry = options.Retry;
         // The provider owns a copy of everything it needs, so in-flight requests do not depend on the credential.
         auto shared = std::make_shared<const AzurePipelinesCredentialOptions>(std::move(options));
-        exchange.AssertionProvider = [&httpClient, owner = std::move(owner),
+        exchange.AssertionProvider = [httpClient = std::move(httpClient),
                                       shared = std::move(shared)]() -> boost::asio::awaitable<AssertionResult> {
-            return RequestOidcToken(httpClient, owner, shared);
+            return RequestOidcToken(httpClient, shared);
         };
         return exchange;
     }
@@ -804,22 +752,20 @@ template <HttpClientLike THttp> class BasicAzurePipelinesCredential final {
     /// <summary>
     /// A static coroutine with by-value parameters, so its frame owns the client and options it uses.
     /// </summary>
-    /// <param name="httpClient">The client to send the OIDC request with.</param>
-    /// <param name="owner">Keeps the client alive for the call when ownership is shared; may be null.</param>
+    /// <param name="httpClient">The client to send the OIDC request with; kept alive by the frame.</param>
     /// <param name="options">The configuration to take the endpoint and secrets from.</param>
     /// <returns>The OIDC token; <c>std::errc::invalid_argument</c> when the configuration is incomplete;
     /// <c>BlobStorageErrorCode::AuthenticationFailed</c> for a non-2xx response;
     /// <c>BlobStorageErrorCode::InvalidResponse</c> when the response holds no oidcToken; otherwise the transport
     /// failure.</returns>
     static boost::asio::awaitable<AssertionResult>
-    RequestOidcToken(THttp& httpClient, std::shared_ptr<THttp> owner,
-                     std::shared_ptr<const AzurePipelinesCredentialOptions> options) {
+    RequestOidcToken(std::shared_ptr<THttp> httpClient, std::shared_ptr<const AzurePipelinesCredentialOptions> options) {
         if (options->OidcRequestUri.empty() || options->ServiceConnectionId.empty() ||
             options->SystemAccessToken.empty()) {
             co_return std::unexpected(std::make_error_code(std::errc::invalid_argument));
         }
         HttpResult result = co_await Private::SendWithRetry(
-            httpClient, Private::RequestAuth{}, std::shared_ptr<NoTokenCredential>{}, options->Retry,
+            *httpClient, Private::RequestAuth{}, std::shared_ptr<NoTokenCredential>{}, options->Retry,
             BuildOidcRequest(*options), options->RequestOptions, NotFoundRetry::Fail);
         if (!result.has_value()) {
             co_return std::unexpected(result.error().Error());
