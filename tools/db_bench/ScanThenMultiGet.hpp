@@ -23,7 +23,7 @@ struct ScanThenMultiGetCounters {
 
 // A DB wrapper that scans before each MultiGet, then does the normal MultiGet.
 // The data has no link between scanned records and fetched keys, so this copies
-// the order of calls, not GraphDB's queries.
+// the order of calls, not real queries.
 class ScanThenMultiGetDB final : public rocksdb::StackableDB {
   public:
     ScanThenMultiGetDB(std::unique_ptr<rocksdb::DB> db, size_t scanLength, ScanThenMultiGetCounters& counters);
