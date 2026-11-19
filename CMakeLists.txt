@@ -21,6 +21,15 @@ endif()
 
 project(aveva-rocksdb-plugin LANGUAGES CXX VERSION 0.2.0)
 option(AVEVA_ROCKSDB_TESTS "Build tests for the plugins and the vendored AzureClient/HttpClient libraries" ON)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    set(_aveva_linux_x64 TRUE)
+else()
+    set(_aveva_linux_x64 FALSE)
+endif()
+option(AVEVA_ROCKSDB_WITH_CACHELIB "Build the CacheLib (Navy) secondary cache backend (Linux x64 only)" ${_aveva_linux_x64})
+if(AVEVA_ROCKSDB_WITH_CACHELIB AND NOT _aveva_linux_x64)
+    message(FATAL_ERROR "AVEVA_ROCKSDB_WITH_CACHELIB is only supported on Linux x64")
+endif()
 list(APPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/infrastructure/cmake")
 
 # Sanitizers instrument the plugin and both vendored libraries (not vcpkg dependencies). Values: "address",

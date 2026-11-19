@@ -3,6 +3,14 @@ add_executable(aveva-rocksdb-plugin-core-tests
     CoreTests.cpp
     FileCacheTests.cpp
 )
+if(AVEVA_ROCKSDB_WITH_CACHELIB)
+    target_sources(aveva-rocksdb-plugin-core-tests PRIVATE
+        CacheLibSecondaryCacheTests.cpp
+        SecondaryCacheContractTests.cpp
+        SecondaryCacheRocksDbTests.cpp
+        SecondaryCacheTestSupport.hpp
+    )
+endif()
 
 target_link_libraries(aveva-rocksdb-plugin-core-tests PRIVATE GTest::gtest GTest::gmock aveva-rocksdb-plugin-core aveva-rocksdb-plugin-core-mocks)
 include(GoogleTest)

@@ -5,7 +5,6 @@ add_library(aveva-rocksdb-plugin-core
     Util.cpp
     LocalFilesystem.cpp
     LocalFile.cpp
-
 )
 add_library(aveva::rocksdb-plugin-core ALIAS aveva-rocksdb-plugin-core)
 set(base-include-dir "${CMAKE_CURRENT_SOURCE_DIR}/../../include")
@@ -24,7 +23,22 @@ target_sources(aveva-rocksdb-plugin-core
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/Util.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/LocalFilesystem.hpp"
     "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/LocalFile.hpp"
+    "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/SecondaryCacheOptions.hpp"
 )
+if(AVEVA_ROCKSDB_WITH_CACHELIB)
+    target_sources(aveva-rocksdb-plugin-core
+      PRIVATE
+        CacheLibSecondaryCache.cpp
+      PUBLIC
+      FILE_SET HEADERS
+      BASE_DIRS "${base-include-dir}"
+      FILES
+        "${base-include-dir}/AVEVA/RocksDB/Plugin/Core/CacheLibSecondaryCache.hpp"
+    )
+    find_package(cachelib-navy CONFIG REQUIRED)
+    target_link_libraries(aveva-rocksdb-plugin-core PRIVATE cachelib-navy::cachelib_navy)
+    target_compile_definitions(aveva-rocksdb-plugin-core PUBLIC AVEVA_ROCKSDB_WITH_CACHELIB=1)
+endif()
 install(TARGETS aveva-rocksdb-plugin-core
     EXPORT
 )

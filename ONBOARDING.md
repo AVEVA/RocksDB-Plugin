@@ -27,8 +27,11 @@ The repo also ships shared building blocks in `src/Core/`:
 
 - A **local filesystem** abstraction (`LocalFilesystem`). Code uses it directly, and
   the caches use it as their backing store.
-- A **file cache with an LRU index** (`FileCache`, `LruFileIndex`). It keeps hot
-  blob content on the local disk.
+- A **file cache** (`FileCache`). It keeps hot blob content on the local disk.
+- A **CacheLib SSD secondary cache** (`CacheLibSecondaryCache`). It is a RocksDB
+  `SecondaryCache` that stores evicted blocks on a local SSD through CacheLib's
+  Navy engine. It is **Linux x64 only** and is built when
+  `AVEVA_ROCKSDB_WITH_CACHELIB=ON` (the default on that platform).
 
 See [`README.md`](README.md) for the product summary. See
 [`ARCHITECTURE.md`](ARCHITECTURE.md) for the component map.
@@ -58,7 +61,10 @@ description. The PR template has a section for breaking changes. Fill it in.
 | `src/Azure/` | Azure Page Blob Filesystem. Blob I/O, directory ops, lock files, logger, and Azure SDK error translation. |
 | `src/Azure/Impl/` | Internal parts of the Azure plugin. Page blob, container client, buffer chunking, log rate limiter, storage account, and configuration. |
 | `src/Azure/Models/` | Value types for credentials and storage info (`ServicePrincipalStorageInfo`, `ChainedCredentialInfo`). |
-| `src/Core/` | shared filesystem, file cache, LRU index, RocksDB helpers, and utilities. |
+| `src/Core/` | shared filesystem, file cache, RocksDB helpers, and utilities. |
+| `src/Core/CacheLibSecondaryCache.cpp` | Navy-backed SSD secondary cache. Compiled only when `AVEVA_ROCKSDB_WITH_CACHELIB` is on. |
+| `tools/db_bench/` | `aveva_db_bench`: RocksDB `db_bench` plus the Azure plugin, the scan-then-MultiGet workload, and the CacheLib registration. Build it with `-DAVEVA_ROCKSDB_BUILD_DB_BENCH=ON`. See its [README](tools/db_bench/README.md). |
+| `infrastructure/vcpkg/ports/cachelib-navy/` | vcpkg overlay port that builds only CacheLib's Navy engine. It carries patches and shims, and is pinned to one CacheLib release. |
 | `include/AVEVA/RocksDB/Plugin/Azure/` | **Public** Azure plugin headers. |
 | `include/AVEVA/RocksDB/Plugin/Core/` | **Public** Core headers. |
 | `tests/AVEVA/RocksDB/Plugin/Azure/Impl/` | Azure plugin unit tests and integration tests. The integration tests need Azurite or a real Azure account. |
@@ -175,6 +181,10 @@ presets use `RelWithDebInfo` and turn on interprocedural optimization.
 The tests split into two groups. Both live under `tests/AVEVA/RocksDB/Plugin/`.
 
 1. **Unit tests.** They use the mocks in `tests/.../Core/Mocks/`. Always run them.
+   The CacheLib suites (`CacheLibSecondaryCacheTests`, `SecondaryCacheContractTests`,
+   `SecondaryCacheRocksDbTests`) exist only in Linux x64 builds. On Windows they
+   are not built, so a green Windows run does not cover CacheLib. Use Linux or
+   WSL for those.
 2. **Integration tests.** The file names end with `IntegrationTests.cpp`. They
    talk to real Azure Blob Storage.
    You need credentials for these to pass.
@@ -383,6 +393,37 @@ errors translate, check the change against this consumer path. If you cannot
 build against a downstream consumer, at least add or update a test in
 `tests/AVEVA/RocksDB/Plugin/Azure/Impl/` that covers the scenario.
 
+### 6.5 Attach the CacheLib SSD secondary cache (Linux x64)
+
+`CacheLibSecondaryCache` is constructed directly. There is no factory or
+backend enum. Guard the use with `#if defined(AVEVA_ROCKSDB_WITH_CACHELIB)`,
+because the class does not exist in other builds.
+
+```cpp
+#include <AVEVA/RocksDB/Plugin/Core/CacheLibSecondaryCache.hpp>
+
+using namespace AVEVA::RocksDB::Plugin::Core;
+
+SecondaryCacheOptions secondary;
+secondary.cacheDir = "/mnt/ssd/rocksdb-secondary";
+secondary.capacity = 512ull * 1024 * 1024;
+secondary.logger = std::make_shared<SecondaryCacheOptions::Logger>();
+
+rocksdb::LRUCacheOptions primary;
+primary.capacity = 64ull * 1024 * 1024;
+primary.secondary_cache = std::make_shared<CacheLibSecondaryCache>(secondary);
+```
+
+Things to know:
+
+- The cache file is **truncated on every open**. Nothing survives a restart.
+- It uses only Navy's block cache. RocksDB's block cache is the primary (DRAM) tier.
+- A single entry cannot exceed `regionSizeBytes`. Larger inserts are dropped.
+- The constructor throws `std::invalid_argument` on invalid options.
+- Counters are available through `VisitCounters()`. `aveva_db_bench` prints
+  them as `CACHELIB_COUNTER name=value` lines before it exits.
+- CacheLib's log level is a process-global folly setting. The last cache constructed wins.
+
 ---
 
 ## 7. Known pitfalls — read this before you debug
@@ -401,6 +442,14 @@ build against a downstream consumer, at least add or update a test in
 - **Integration tests need a backend.** A failed integration test is usually
   a configuration problem: Azurite is not running, or the credentials are not
   valid. Check that first, before you change code.
+- **The first Linux configure is slow.** vcpkg builds about 110 ports, including
+  folly and `cachelib-navy`, so expect tens of minutes. Later builds are cached.
+- **Upgrading CacheLib means re-checking the patches.** The overlay port in
+  `infrastructure/vcpkg/ports/cachelib-navy/` patches the pinned release
+  (gtest/gmock removal, a NUMA shim, `format_as`, libaio guards). Re-verify each
+  patch when you change the version.
+- **ninja says "build.ninja still dirty" under WSL.** The WSL clock has drifted
+  from the files' timestamps. Resync the clock and rerun.
 - **`VCPKG_MANIFEST_FEATURES=testing`.** The presets set this so the test
   dependencies come in. If you configure with a hand-written command line and
   skip the presets, set the variable, or the tests do not link.
