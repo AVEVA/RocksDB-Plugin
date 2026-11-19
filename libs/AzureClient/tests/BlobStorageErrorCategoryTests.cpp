@@ -284,7 +284,7 @@ TEST(BlobStorageErrorCategoryTests, ExtendedErrorCodes_MapToPortableConditions) 
     }
 }
 
-TEST(BlobStorageErrorCategoryTests, EnumeratorValuesArePinned) {
+TEST(BlobStorageErrorCategoryTests, Enumerators_Values_ArePinned) {
     using AVEVA::AzureClient::BlobStorageErrorCode;
     // The numeric values are persisted in logs and compared across versions, so they must never shift.
     constexpr int PinnedBlobNotFound = 11;
@@ -296,14 +296,14 @@ TEST(BlobStorageErrorCategoryTests, EnumeratorValuesArePinned) {
     SUCCEED();
 }
 
-TEST(BlobStorageErrorCategoryTests, TransportFailureHasZeroStatusAndNoServiceFields) {
+TEST(BlobStorageErrorCategoryTests, TransportFailure_HasZeroStatusAndNoServiceFields) {
     const auto failure = AVEVA::AzureClient::Private::DetermineBlobStorageFailure(
         AVEVA::HttpFailure{std::make_error_code(std::errc::connection_reset)}, AVEVA::HttpResponse{});
     EXPECT_EQ(failure.Error, std::make_error_code(std::errc::connection_reset));
     EXPECT_FALSE(failure.Details.has_value());
 }
 
-TEST(BlobStorageErrorCategoryTests, TransportFailureWithCauseCarriesTheCauseInTheMessage) {
+TEST(BlobStorageErrorCategoryTests, TransportFailure_WithCause_CarriesCauseInMessage) {
     const auto failure = AVEVA::AzureClient::Private::DetermineBlobStorageFailure(
         AVEVA::HttpFailure{AVEVA::make_error_code(AVEVA::HttpClientError::ConnectFailed),
                            AVEVA::TransportCause{std::make_error_code(std::errc::connection_refused)}},

@@ -15,7 +15,7 @@ namespace {
 using AVEVA::AzureClient::Tests::Spawn;
 } // namespace
 
-TEST(AsyncBehaviorTests, AwaitableRunsAfterItsClientWasMovedFromAndDestroyed) {
+TEST(AsyncLifetimeTests, Awaitable_ClientMovedFromAndDestroyed_StillRuns) {
     FakeHttpClient httpClient;
     httpClient.DefaultDelivery() = AVEVA::AzureClient::Tests::Delivery::Deferred;
 
@@ -32,7 +32,7 @@ TEST(AsyncBehaviorTests, AwaitableRunsAfterItsClientWasMovedFromAndDestroyed) {
     EXPECT_TRUE(started.Result().has_value());
 }
 
-TEST(AsyncBehaviorTests, ContainerAwaitableRunsAfterItsClientWasDestroyed) {
+TEST(AsyncLifetimeTests, ContainerAwaitable_ClientDestroyed_StillRuns) {
     FakeHttpClient httpClient;
     httpClient.DefaultDelivery() = AVEVA::AzureClient::Tests::Delivery::Deferred;
 
@@ -47,7 +47,7 @@ TEST(AsyncBehaviorTests, ContainerAwaitableRunsAfterItsClientWasDestroyed) {
     EXPECT_TRUE(started.Done());
 }
 
-TEST(AsyncBehaviorTests, BlobClientCanBeDestroyedAfterRequestIsInFlight) {
+TEST(AsyncLifetimeTests, BlobClient_DestroyedWhileRequestInFlight_RequestCompletes) {
     FakeHttpClient httpClient;
     httpClient.DefaultDelivery() = AVEVA::AzureClient::Tests::Delivery::Deferred;
 
@@ -64,7 +64,7 @@ TEST(AsyncBehaviorTests, BlobClientCanBeDestroyedAfterRequestIsInFlight) {
     EXPECT_TRUE(operation->Result().has_value());
 }
 
-TEST(AsyncBehaviorTests, PageBlobClientCanBeDestroyedAfterRequestIsInFlight) {
+TEST(AsyncLifetimeTests, PageBlobClient_DestroyedWhileRequestInFlight_RequestCompletes) {
     FakeHttpClient httpClient;
     httpClient.DefaultDelivery() = AVEVA::AzureClient::Tests::Delivery::Deferred;
 
@@ -81,7 +81,7 @@ TEST(AsyncBehaviorTests, PageBlobClientCanBeDestroyedAfterRequestIsInFlight) {
     EXPECT_TRUE(operation->Result().has_value());
 }
 
-TEST(AsyncBehaviorTests, TokenCredentialRequestCanDestroyClientAfterRequestIsSent) {
+TEST(AsyncLifetimeTests, TokenCredentialRequest_ClientDestroyedAfterSend_Completes) {
     FakeHttpClient httpClient;
     httpClient.DefaultDelivery() = AVEVA::AzureClient::Tests::Delivery::Deferred;
 
@@ -109,7 +109,7 @@ TEST(AsyncBehaviorTests, TokenCredentialRequestCanDestroyClientAfterRequestIsSen
     EXPECT_TRUE(operation.Result().has_value());
 }
 
-TEST(AsyncBehaviorTests, CompletionHandlerCanDestroyClientAfterCompletionBegins) {
+TEST(AsyncLifetimeTests, CompletionHandler_DestroysClient_CompletesSafely) {
     FakeHttpClient httpClient;
     httpClient.DefaultDelivery() = AVEVA::AzureClient::Tests::Delivery::Deferred;
 
@@ -131,7 +131,7 @@ TEST(AsyncBehaviorTests, CompletionHandlerCanDestroyClientAfterCompletionBegins)
 // Destroying the io_context that owns every suspended coroutine must destroy the coroutine frame (releasing everything
 // it owns) without ever resuming it or invoking the completion handler. The sentinel's weak_ptr proves nothing is
 // leaked by a reference cycle; ASan/LSan on CI catch use-after-free or leaks in the teardown.
-TEST(AsyncBehaviorTests, DestroyingTheIoContextWithPendingWorkReleasesTheHandlerWithoutInvokingIt) {
+TEST(AsyncLifetimeTests, IoContext_DestroyedWithPendingWork_ReleasesHandlerUninvoked) {
     auto context = std::make_unique<boost::asio::io_context>();
     auto httpClient = std::make_unique<FakeHttpClient>(*context);
     httpClient->DefaultDelivery() = AVEVA::AzureClient::Tests::Delivery::Deferred;

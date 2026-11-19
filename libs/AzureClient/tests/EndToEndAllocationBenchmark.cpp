@@ -444,7 +444,7 @@ void PrintEnvironment() {
 } // namespace
 
 // Loopback allocation/latency evidence for the end-to-end read path, one data point per read size and concurrency.
-TEST(EndToEndAllocationBenchmark, PooledRangedReadsThroughTheProductionClientAndHttpStack) {
+TEST(EndToEndAllocationBenchmarkTests, PooledRangedReads_ProductionClientAndHttpStack_AreMeasured) {
     PrintEnvironment();
     constexpr std::size_t reads = 200;
     struct Case {
@@ -474,14 +474,14 @@ TEST(EndToEndAllocationBenchmark, PooledRangedReadsThroughTheProductionClientAnd
 }
 
 // The server must stop promptly with no connection ever made.
-TEST(EndToEndAllocationBenchmark, ServerStopsWithNoConnection) {
+TEST(EndToEndAllocationBenchmarkTests, ServerStop_NoConnection_Completes) {
     BlobServer server(IdleServerBlobBytes);
     server.Stop();
     EXPECT_EQ(server.Connections(), 0);
 }
 
 // Idle keep-alive connections that never send a request must not block shutdown.
-TEST(EndToEndAllocationBenchmark, ServerStopsWithIdleKeepAliveConnections) {
+TEST(EndToEndAllocationBenchmarkTests, ServerStop_IdleKeepAliveConnections_Completes) {
     BlobServer server(IdleServerBlobBytes);
     asio::io_context context;
     std::vector<tcp::socket> idle;
@@ -493,7 +493,7 @@ TEST(EndToEndAllocationBenchmark, ServerStopsWithIdleKeepAliveConnections) {
 }
 
 // A stalled response must turn into a reported timeout, never into statistics, and must still shut down cleanly.
-TEST(EndToEndAllocationBenchmark, StalledServerTimesOutWithoutStatistics) {
+TEST(EndToEndAllocationBenchmarkTests, StalledServer_TimesOut_WithoutStatistics) {
     const auto run = Measure(4096, 2, 10, ServerBehavior::Stall, std::chrono::milliseconds{300});
     EXPECT_TRUE(run.timedOut);
     EXPECT_FALSE(run.measurement.has_value());

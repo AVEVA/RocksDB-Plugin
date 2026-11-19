@@ -81,7 +81,7 @@ void ExpectLeaseDurationRejects(std::initializer_list<std::chrono::seconds> dura
 }
 } // namespace
 
-TEST(ModelTests, GetPropertiesParsesExtendedHeaders) {
+TEST(ModelTests, GetProperties_ExtendedHeaders_AreParsed) {
     const HttpResponse response{
         AVEVA::HttpStatus::Ok,
         {AVEVA::HttpHeader(AVEVA::HeaderName{"ETag"}, AVEVA::HeaderValue{"\"0x1\""}),
@@ -117,7 +117,7 @@ TEST(ModelTests, GetPropertiesParsesExtendedHeaders) {
     EXPECT_EQ(properties.SequenceNumber, std::optional<std::uint64_t>{42});
 }
 
-TEST(ModelTests, GetPropertiesLeavesAbsentExtendedFieldsUnset) {
+TEST(ModelTests, GetProperties_AbsentExtendedFields_AreUnset) {
     const auto properties = Private::ParseBlobProperties(HttpResponse{
         AVEVA::HttpStatus::Ok, {AVEVA::HttpHeader(AVEVA::HeaderName{"ETag"}, AVEVA::HeaderValue{"\"0x1\""})}, ""});
 
@@ -128,9 +128,9 @@ TEST(ModelTests, GetPropertiesLeavesAbsentExtendedFieldsUnset) {
     EXPECT_FALSE(properties.SequenceNumber.has_value());
 }
 
-TEST(ModelTests, GetPropertiesRejectsMalformedExtendedHeaders) { ExpectMalformedExtendedHeadersAreRejected(); }
+TEST(ModelTests, GetProperties_MalformedExtendedHeaders_AreRejected) { ExpectMalformedExtendedHeadersAreRejected(); }
 
-TEST(ModelTests, ListBlobsParsesExtendedPropertiesAndVersionSiblings) {
+TEST(ModelTests, ListBlobs_ExtendedPropertiesAndVersionSiblings_AreParsed) {
     const auto result = Private::ParseListBlobsResultXml(R"(<?xml version="1.0" encoding="utf-8"?>
 <EnumerationResults><Blobs><Blob>
   <Name>a.txt</Name>
@@ -163,7 +163,7 @@ TEST(ModelTests, ListBlobsParsesExtendedPropertiesAndVersionSiblings) {
     EXPECT_EQ(properties.ServerEncrypted, std::optional<ServerEncryption>{ServerEncryption::Encrypted});
 }
 
-TEST(ModelTests, SharedKeyStringToSignIncludesContentEncodingAndLanguage) {
+TEST(ModelTests, SharedKeyStringToSign_ContentEncodingAndLanguage_AreIncluded) {
     HttpRequest request;
     request.SetMethod(HttpMethod::Put);
     request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/c/b"});
@@ -178,7 +178,7 @@ TEST(ModelTests, SharedKeyStringToSignIncludesContentEncodingAndLanguage) {
     EXPECT_TRUE(Private::BuildSharedKeyStringToSign("account", plain).starts_with("GET\n\n\n\n\n\n\n"));
 }
 
-TEST(ModelTests, AcquireLeaseDurationIsInfiniteByDefaultAndValidated) {
+TEST(ModelTests, AcquireLease_Duration_DefaultsToInfiniteAndIsValidated) {
     FakeHttpClient httpClient;
     BlobClient client{httpClient, MakeBlobClientOptions()};
 
@@ -198,7 +198,7 @@ TEST(ModelTests, AcquireLeaseDurationIsInfiniteByDefaultAndValidated) {
     EXPECT_EQ(httpClient.RequestCount(), sent);
 }
 
-TEST(ModelTests, ResizeUsesResizePageBlobOptionsConditions) {
+TEST(ModelTests, Resize_Conditions_UseResizePageBlobOptions) {
     FakeHttpClient httpClient;
     PageBlobClient client{httpClient, MakeBlobClientOptions()};
 

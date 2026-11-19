@@ -423,7 +423,7 @@ std::vector<RequestShapeCase> AllCases() {
 class RequestShapeTests : public ::testing::TestWithParam<RequestShapeCase> {};
 } // namespace
 
-TEST_P(RequestShapeTests, FirstRequestHasTheDocumentedShape) {
+TEST_P(RequestShapeTests, Operation_FirstRequest_HasDocumentedShape) {
     const RequestShapeCase& shape = GetParam();
     Clients clients;
     shape.Start(clients);

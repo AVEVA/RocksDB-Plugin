@@ -50,7 +50,7 @@ using AVEVA::AzureClient::Tests::RunAwaitable;
 }
 } // namespace
 
-TEST(MetadataValidationTests, InvalidNamesAreRejectedBeforeSending) {
+TEST(MetadataValidationTests, Metadata_InvalidNames_AreRejectedBeforeSending) {
     for (const std::string name : {"", "1leading", "has-dash", "has space", "dot.ted", "caf\xC3\xA9"}) {
         SCOPED_TRACE(name);
         FakeHttpClient httpClient;
@@ -62,7 +62,7 @@ TEST(MetadataValidationTests, InvalidNamesAreRejectedBeforeSending) {
     }
 }
 
-TEST(MetadataValidationTests, IdentifierNamesAreSent) {
+TEST(MetadataValidationTests, Metadata_IdentifierNames_AreSent) {
     for (const std::string name : {"a", "_", "_private", "Name_42", "ALLCAPS"}) {
         SCOPED_TRACE(name);
         FakeHttpClient httpClient;
@@ -73,7 +73,7 @@ TEST(MetadataValidationTests, IdentifierNamesAreSent) {
     }
 }
 
-TEST(MetadataValidationTests, CaseInsensitiveDuplicateKeysCollapseToOneEntry) {
+TEST(MetadataValidationTests, Metadata_CaseInsensitiveDuplicateKeys_CollapseToOneEntry) {
     MetadataMap metadata;
     metadata.emplace("Owner", "first");
     const bool inserted = metadata.emplace("OWNER", "second").second;
@@ -83,7 +83,7 @@ TEST(MetadataValidationTests, CaseInsensitiveDuplicateKeysCollapseToOneEntry) {
     EXPECT_EQ(metadata.begin()->second, "first");
 }
 
-TEST(MetadataValidationTests, ValidationAppliesToPageBlobAndContainerCreate) {
+TEST(MetadataValidationTests, Metadata_PageBlobAndContainerCreate_AreValidated) {
     FakeHttpClient httpClient;
     PageBlobClient pageBlob{httpClient, MakeBlobClientOptions()};
     BlobContainerClient container{httpClient, MakeBlobContainerClientOptions()};

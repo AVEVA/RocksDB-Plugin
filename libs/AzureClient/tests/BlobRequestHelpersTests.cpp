@@ -792,7 +792,8 @@ TEST(BlobRequestHelpersTests, SharedKeyStringToSign_SupportsEveryHttpMethod) {
     }
 }
 
-TEST(SharedKeyCanonicalizationTests, ReplacedHeadersAndRepeatedQueryParametersAreCanonicalized) {
+TEST(SharedKeyCanonicalizationTests,
+     SharedKeyAuthorization_ReplacedHeadersAndRepeatedQueryParameters_AreCanonicalized) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Get);
     request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/container/blob?b=2&a=z&a=y&comp=list"});
@@ -805,7 +806,7 @@ TEST(SharedKeyCanonicalizationTests, ReplacedHeadersAndRepeatedQueryParametersAr
     EXPECT_NE(toSign.find("/account/container/blob\na:y,z\nb:2\ncomp:list"), std::string::npos) << toSign;
 }
 
-TEST(AS_R12_SharedKeyGoldenTests, EncodedPathPutWithEmptyBodyAndReplacedHeader) {
+TEST(SharedKeyCanonicalizationTests, SharedKeyAuthorization_EncodedPutEmptyBodyReplacedHeader_MatchesGolden) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Put);
     request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/cont/my%20dir%2Fblob?comp=metadata&Z=2&z=1"});
@@ -822,7 +823,7 @@ TEST(AS_R12_SharedKeyGoldenTests, EncodedPathPutWithEmptyBodyAndReplacedHeader) 
               "/account/cont/my%20dir%2Fblob\ncomp:metadata\nz:1,2");
 }
 
-TEST(AS_R06_SharedKeySignerValidationTests, RejectsXMsHeadersThatCouldBeSignedDifferentlyFromTheirWireForm) {
+TEST(BlobRequestHelpersTests, SharedKeySigner_XMsHeadersSignedDifferentlyFromWireForm_AreRejected) {
     for (const auto& [name, value] : std::vector<std::pair<std::string, std::string>>{
              {"x-ms-a", "v\r\nx-ms-b: 1"}, {"x-ms-a\n", "v"}, {"x-ms-a:b", "v"}, {"x-ms-a", std::string("v\0w", 3)}}) {
         AVEVA::HttpRequest request;
@@ -834,7 +835,7 @@ TEST(AS_R06_SharedKeySignerValidationTests, RejectsXMsHeadersThatCouldBeSignedDi
     }
 }
 
-TEST(SharedKeyCanonicalizationTests, UnparseableUrlIsRejectedInsteadOfSigningTheRootPath) {
+TEST(SharedKeyCanonicalizationTests, SharedKeyAuthorization_UnparseableUrl_IsRejected) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Get);
     request.SetUrl(AVEVA::HttpUrl{"not a url"});
@@ -843,7 +844,7 @@ TEST(SharedKeyCanonicalizationTests, UnparseableUrlIsRejectedInsteadOfSigningThe
                  std::invalid_argument);
 }
 
-TEST(SharedKeyCanonicalizationTests, InternalWhitespaceRunsInHeaderValuesAreCollapsed) {
+TEST(SharedKeyCanonicalizationTests, CanonicalizedHeaders_InternalWhitespaceRuns_AreCollapsed) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Get);
     request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/container/blob"});
@@ -853,7 +854,7 @@ TEST(SharedKeyCanonicalizationTests, InternalWhitespaceRunsInHeaderValuesAreColl
     EXPECT_NE(toSign.find("x-ms-meta-k:a b c\n"), std::string::npos) << toSign;
 }
 
-TEST(SharedKeyCanonicalizationTests, StandardHeadersFillTheirSlotsCaseInsensitivelyAndLastOneWins) {
+TEST(SharedKeyCanonicalizationTests, CanonicalizedHeaders_StandardHeaders_FillSlotsCaseInsensitivelyLastWins) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Put);
     request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/container/blob"});
@@ -869,7 +870,7 @@ TEST(SharedKeyCanonicalizationTests, StandardHeadersFillTheirSlotsCaseInsensitiv
         << toSign;
 }
 
-TEST(SharedKeyCanonicalizationTests, HeadersAreOrderedWithCultureAwareRules) {
+TEST(SharedKeyCanonicalizationTests, CanonicalizedHeaders_OrderedWithCultureAwareRules) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Get);
     request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/container/blob"});
@@ -882,7 +883,7 @@ TEST(SharedKeyCanonicalizationTests, HeadersAreOrderedWithCultureAwareRules) {
         << toSign;
 }
 
-TEST(SharedKeyCanonicalizationTests, ResourcePathIsUsedAsSentOnTheWire) {
+TEST(SharedKeyCanonicalizationTests, CanonicalizedResource_Path_IsUsedAsSentOnWire) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Get);
     request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/c/a%2Bb%20c.txt?x=1%202"});
@@ -891,7 +892,7 @@ TEST(SharedKeyCanonicalizationTests, ResourcePathIsUsedAsSentOnTheWire) {
     EXPECT_NE(toSign.find("/account/c/a%2Bb%20c.txt\nx:1 2"), std::string::npos) << toSign;
 }
 
-TEST(SharedKeyCanonicalizationTests, QueryKeysAreLowercasedMergedAndValuesAreDecodedAndSorted) {
+TEST(SharedKeyCanonicalizationTests, CanonicalizedResource_QueryKeys_LowercasedMergedDecodedAndSorted) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Get);
     request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/c/b?Comp=list&COMP=Meta&a=%26b%3Dc"});
@@ -900,7 +901,7 @@ TEST(SharedKeyCanonicalizationTests, QueryKeysAreLowercasedMergedAndValuesAreDec
     EXPECT_TRUE(toSign.ends_with("/account/c/b\na:&b=c\ncomp:Meta,list")) << toSign;
 }
 
-TEST(SharedKeyCanonicalizationTests, QueryParametersWithoutValuesOrWithEmptyValuesAreSignedWithEmptyValues) {
+TEST(SharedKeyCanonicalizationTests, CanonicalizedResource_ValuelessAndEmptyQueryParameters_SignedAsEmpty) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Get);
     request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net/c/b?flag&a="});
@@ -909,7 +910,7 @@ TEST(SharedKeyCanonicalizationTests, QueryParametersWithoutValuesOrWithEmptyValu
     EXPECT_TRUE(toSign.ends_with("/account/c/b\na:\nflag:")) << toSign;
 }
 
-TEST(SharedKeyCanonicalizationTests, EmptyPathIsSignedAsTheRootResource) {
+TEST(SharedKeyCanonicalizationTests, CanonicalizedResource_EmptyPath_SignedAsRoot) {
     AVEVA::HttpRequest request;
     request.SetMethod(HttpMethod::Get);
     request.SetUrl(AVEVA::HttpUrl{"https://account.blob.core.windows.net?comp=list"});
@@ -918,7 +919,7 @@ TEST(SharedKeyCanonicalizationTests, EmptyPathIsSignedAsTheRootResource) {
     EXPECT_TRUE(toSign.ends_with("/account/\ncomp:list")) << toSign;
 }
 
-TEST(SharedKeyCanonicalizationTests, MalformedUrlsAreRejected) {
+TEST(SharedKeyCanonicalizationTests, SharedKeyAuthorization_MalformedUrls_AreRejected) {
     for (const char* url : {"", "/container/blob", "http://[::1/c", "https://account.blob.core.windows.net/c%zz"}) {
         AVEVA::HttpRequest request;
         request.SetMethod(HttpMethod::Get);
@@ -930,7 +931,7 @@ TEST(SharedKeyCanonicalizationTests, MalformedUrlsAreRejected) {
     }
 }
 
-TEST(SharedKeyCanonicalizationTests, AuthorizationSupportsRootContainerUnicodeAndAzuritePathStyleEndpoints) {
+TEST(SharedKeyCanonicalizationTests, SharedKeyAuthorization_RootUnicodeAndAzuritePathStyleEndpoints_AreSupported) {
     HttpRequest pathStyleRequest;
     pathStyleRequest.SetMethod(HttpMethod::Get);
     pathStyleRequest.SetUrl(

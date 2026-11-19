@@ -280,7 +280,7 @@ void DownloadAndVerifyAllBlobs(ThreadPoolBlobService& service, std::vector<PoolP
 }
 } // namespace
 
-TEST(MultiThreadedExecutorTests, ConcurrentChunkedDownloadsOnAThreadPool) {
+TEST(MultiThreadedExecutorTests, ChunkedDownloads_ConcurrentOnThreadPool_Succeed) {
     constexpr std::size_t BlobCount = 8;
     constexpr std::size_t BlobSize = (64U * 1024U) + 123U;
 
@@ -303,7 +303,7 @@ TEST(MultiThreadedExecutorTests, ConcurrentChunkedDownloadsOnAThreadPool) {
     EXPECT_GT(service.Throttled(), 0U) << "the retry path was not exercised";
 }
 
-TEST(MultiThreadedExecutorTests, FileDownloadWithoutAWriterFailsAsNotSupported) {
+TEST(MultiThreadedExecutorTests, FileDownload_WithoutWriter_FailsAsNotSupported) {
     const auto serviceOwner = std::make_shared<ThreadPoolBlobService>();
     ThreadPoolBlobService& service = *serviceOwner;
     const PoolBlobContainerClient container{serviceOwner, SharedKeyContainerOptions()};
@@ -316,7 +316,7 @@ TEST(MultiThreadedExecutorTests, FileDownloadWithoutAWriterFailsAsNotSupported) 
     EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::operation_not_supported));
 }
 
-TEST(MultiThreadedExecutorTests, ClientsAreSafeToInitiateFromManyThreads) {
+TEST(MultiThreadedExecutorTests, Clients_InitiatedFromManyThreads_AreSafe) {
     constexpr std::size_t Threads = 8;
     constexpr std::size_t CallsPerThread = 25;
 

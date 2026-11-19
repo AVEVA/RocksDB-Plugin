@@ -38,7 +38,7 @@ struct SharedTransport {
 };
 } // namespace
 
-TEST(SharedHttpOwnershipTests, BlobClientKeepsTheTransportAliveUntilItIsDestroyed) {
+TEST(SharedHttpOwnershipTests, BlobClient_KeepsTransportAliveUntilDestroyed) {
     SharedTransport transport;
     std::optional<PageBlobClient> client;
     client.emplace(transport.Release(), MakeBlobClientOptions());
@@ -51,7 +51,7 @@ TEST(SharedHttpOwnershipTests, BlobClientKeepsTheTransportAliveUntilItIsDestroye
     EXPECT_TRUE(transport.Expired());
 }
 
-TEST(SharedHttpOwnershipTests, BlobClientsFromAContainerOutliveTheContainer) {
+TEST(SharedHttpOwnershipTests, BlobClientsFromContainer_OutliveContainer) {
     SharedTransport transport;
     std::optional<BlobContainerClient> container;
     container.emplace(transport.Release(), MakeBlobContainerClientOptions());
@@ -64,7 +64,7 @@ TEST(SharedHttpOwnershipTests, BlobClientsFromAContainerOutliveTheContainer) {
     EXPECT_EQ(1U, transport.Weak.lock()->RequestCount());
 }
 
-TEST(SharedHttpOwnershipTests, DroppingEveryClientReleasesTheTransport) {
+TEST(SharedHttpOwnershipTests, AllClients_Dropped_ReleaseTransport) {
     SharedTransport transport;
     {
         BlobContainerClient container{transport.Release(), MakeBlobContainerClientOptions()};
@@ -74,7 +74,7 @@ TEST(SharedHttpOwnershipTests, DroppingEveryClientReleasesTheTransport) {
     EXPECT_TRUE(transport.Expired());
 }
 
-TEST(SharedHttpOwnershipTests, ServiceClientSharesTheTransportWithItsContainers) {
+TEST(SharedHttpOwnershipTests, ServiceClient_SharesTransportWithContainers) {
     SharedTransport transport;
     std::optional<BlobServiceClient> service;
     service.emplace(transport.Release(), MakeBlobServiceClientOptions());
@@ -87,7 +87,7 @@ TEST(SharedHttpOwnershipTests, ServiceClientSharesTheTransportWithItsContainers)
     EXPECT_TRUE(transport.Expired());
 }
 
-TEST(SharedHttpOwnershipTests, CredentialsKeepTheTransportAlive) {
+TEST(SharedHttpOwnershipTests, Credentials_KeepTransportAlive) {
     SharedTransport secret;
     std::optional<ClientSecretCredential> secretCredential;
     secretCredential.emplace(secret.Release(), ClientSecretCredentialOptions{});
@@ -103,7 +103,7 @@ TEST(SharedHttpOwnershipTests, CredentialsKeepTheTransportAlive) {
     EXPECT_TRUE(managed.Expired());
 }
 
-TEST(SharedHttpOwnershipTests, NullTransportIsRejected) {
+TEST(SharedHttpOwnershipTests, Transport_Null_IsRejected) {
     const std::shared_ptr<FakeHttpClient> none;
 
     EXPECT_THROW(PageBlobClient(none, MakeBlobClientOptions()), std::invalid_argument);

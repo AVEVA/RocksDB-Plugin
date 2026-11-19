@@ -76,7 +76,7 @@ const HttpRequest& ReleaseBlobLease(FakeHttpClient& httpClient, BlobClient& clie
 }
 } // namespace
 
-TEST(LeaseTests, BlobRenewReleaseRejectEmptyLeaseIds) {
+TEST(LeaseTests, RenewAndReleaseLease_EmptyLeaseId_IsRejected) {
     FakeHttpClient httpClient;
     BlobClient client{httpClient, MakeBlobClientOptions()};
 
@@ -89,7 +89,7 @@ TEST(LeaseTests, BlobRenewReleaseRejectEmptyLeaseIds) {
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 
-TEST(LeaseTests, BlobRenewAndReleaseSendLeaseActionAndConditions) {
+TEST(LeaseTests, RenewAndReleaseLease_Request_SendsLeaseActionAndConditions) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(LeaseResponse(AVEVA::HttpStatus::Ok, "lease-a"));
     httpClient.EnqueueResponse(HttpResponse{AVEVA::HttpStatus::Ok, MakeCanonicalSuccessHeaders(), ""});
@@ -106,11 +106,11 @@ TEST(LeaseTests, BlobRenewAndReleaseSendLeaseActionAndConditions) {
     EXPECT_EQ(Header(release, "If-Unmodified-Since"), "Fri, 26 Jun 2015 18:59:17 GMT");
 }
 
-TEST(LeaseTests, BlobAcquireLeaseValidatesDuration) {
+TEST(LeaseTests, AcquireLease_Duration_IsValidated) {
     EXPECT_THROW((void)AVEVA::AzureClient::LeaseDuration{5s}, std::invalid_argument);
 }
 
-TEST(LeaseTests, BlobAcquireLeaseRetryReusesGeneratedProposedLeaseId) {
+TEST(LeaseTests, AcquireLease_Retry_ReusesGeneratedProposedLeaseId) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{AVEVA::HttpStatus::ServiceUnavailable, MakeCanonicalSuccessHeaders(), ""});
     httpClient.EnqueueResponse(LeaseResponse(::AVEVA::HttpStatus::Created, "lease-a"));

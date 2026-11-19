@@ -246,7 +246,7 @@ TEST(BlobContainerClientTests, GetPageBlobClient_BuildsBlobScopedClient) {
               "https://storageaccount.blob.core.windows.net/images/disk.vhd?sv=2025-01-05&sig=fakesig");
 }
 
-TEST(BlobContainerClientTests, ListBlobsAsync_OptionsOverloadIncludesSupportedQueryParametersAndParsesPagination) {
+TEST(BlobContainerClientTests, ListBlobsAsync_OptionsOverload_SendsQueryParametersAndParsesPagination) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = HttpResponse{AVEVA::HttpStatus::Ok, MakeCanonicalSuccessHeaders(),
                                                 R"(<?xml version="1.0" encoding="utf-8"?>

@@ -57,7 +57,7 @@ template <class TStart>
 
 } // namespace
 
-TEST(SuppressedErrorResponseTests, OtherFailuresAreStillReported) {
+TEST(SuppressedErrorResponseTests, SuppressedErrors_OtherFailures_AreStillReported) {
     FakeHttpClient httpClient;
     PageBlobClient blockBlob{httpClient, MakeBlobClientOptions()};
     BlobContainerClient container{httpClient, MakeBlobContainerClientOptions()};

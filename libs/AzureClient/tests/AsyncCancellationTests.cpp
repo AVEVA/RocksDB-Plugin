@@ -15,7 +15,7 @@ using AVEVA::AzureClient::Tests::StartAwaitableOn;
 
 // Cancelling before the coroutine has run: the pipeline checks the awaiting coroutine's cancellation state itself, so
 // a credential that would have completed immediately must not lead to a request.
-TEST(AsyncBehaviorTests, CancellingAnAwaitedOperationCancelsTheInFlightRequest) {
+TEST(AsyncCancellationTests, Cancel_AwaitedOperation_CancelsInFlightRequest) {
     FakeHttpClient httpClient;
     httpClient.DefaultDelivery() = AVEVA::AzureClient::Tests::Delivery::Deferred;
     BlobClient client{httpClient, MakeBlobClientOptions()};
@@ -36,7 +36,7 @@ TEST(AsyncBehaviorTests, CancellingAnAwaitedOperationCancelsTheInFlightRequest) 
 // Before send: with a token credential the request is not handed to the transport until the token arrives.
 // Cancellation must complete the operation promptly rather than waiting for (possibly slow) credential I/O, and
 // the late token must be ignored.
-TEST(AsyncBehaviorTests, CancellationDuringTokenAcquisitionCompletesPromptlyAndNeverSends) {
+TEST(AsyncCancellationTests, Cancel_DuringTokenAcquisition_CompletesPromptlyWithoutSending) {
     FakeHttpClient httpClient;
     auto credential = std::make_shared<ScriptedTokenCredential>();
     credential->EnqueueDeferred({}, MakeToken("token-value", std::chrono::hours(1)));
@@ -62,7 +62,7 @@ TEST(AsyncBehaviorTests, CancellationDuringTokenAcquisitionCompletesPromptlyAndN
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 
-TEST(AsyncBehaviorTests, MidFlightCancellationWorksForContainerClients) {
+TEST(AsyncCancellationTests, ContainerClient_MidFlightCancel_CancelsRequest) {
     FakeHttpClient httpClient;
     httpClient.DefaultDelivery() = AVEVA::AzureClient::Tests::Delivery::Deferred;
     BlobContainerClient client{httpClient, MakeBlobContainerClientOptions()};
@@ -80,7 +80,7 @@ TEST(AsyncBehaviorTests, MidFlightCancellationWorksForContainerClients) {
 
 // Supported cancellation pattern: the signal is emitted from the coroutine's executor, so it cannot race with the
 // library clearing the slot when the operation finishes.
-TEST(AsyncBehaviorTests, CancellationEmittedFromTheExecutorCancelsTheOperation) {
+TEST(AsyncCancellationTests, Executor_CancellationEmission_CancelsOperation) {
     FakeHttpClient httpClient;
     httpClient.DefaultDelivery() = AVEVA::AzureClient::Tests::Delivery::Deferred;
     BlobClient client{httpClient, MakeBlobClientOptions()};

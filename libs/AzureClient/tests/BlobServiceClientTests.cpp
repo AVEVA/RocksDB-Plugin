@@ -57,7 +57,7 @@ TEST(BlobServiceClientTests, Constructor_ThrowsForInvalidEndpointSchemeAndPartia
 
 // Blob clients derived from a Shared Key service client sign with the connection's shared signer; the
 // signature must match a fresh one-off signature of the same request.
-TEST(BlobServiceClientTests, DerivedClientsSignWithTheSharedConnectionSigner) {
+TEST(BlobServiceClientTests, DerivedClients_SignWithSharedConnectionSigner) {
     FakeHttpClient httpClient;
     BlobServiceClientOptions serviceOptions;
     serviceOptions.ServiceEndpoint = "https://storageaccount.blob.core.windows.net";
@@ -87,7 +87,7 @@ TEST(BlobServiceClientTests, GetBlobContainerClient_ValidatesTheContainerName) {
     EXPECT_THROW(static_cast<void>(container.GetPageBlobClient("")), std::invalid_argument);
 }
 
-TEST(BlobServiceClientTests, OptionsDefaultApiVersionMatchesSharedDefault) {
+TEST(BlobServiceClientTests, Options_DefaultApiVersion_MatchesSharedDefault) {
     EXPECT_EQ(AVEVA::AzureClient::BlobServiceClientOptions{}.ApiVersion,
               std::string(AVEVA::AzureClient::DefaultApiVersion));
 }

@@ -89,7 +89,7 @@ void ExpectAllParsersRejectDocument(const std::string& xml) {
 }
 } // namespace
 
-TEST(ParserRobustnessTests, MalformedDocumentsThrowStdExceptions) {
+TEST(ParserRobustnessTests, Parsers_MalformedDocuments_ThrowStdExceptions) {
     const std::vector<std::string> malformed{
         "",
         "not xml at all",
@@ -115,7 +115,7 @@ TEST(ParserRobustnessTests, MalformedDocumentsThrowStdExceptions) {
     ExpectMalformedDocumentsThrowForAllParsers(malformed);
 }
 
-TEST(ParserRobustnessTests, ArbitraryBytesNeverEscapeAsNonStdExceptions) {
+TEST(ParserRobustnessTests, Parsers_ArbitraryBytes_NeverEscapeAsNonStdExceptions) {
     // A deterministic stream of bytes biased towards XML punctuation.
     constexpr std::string_view Alphabet = "<>/=\"'&;!?[]-abcXYZ019 \n\t\x80\xFF";
     // A linear congruential generator with the classic C library constants.
@@ -145,7 +145,7 @@ TEST(ParserRobustnessTests, ArbitraryBytesNeverEscapeAsNonStdExceptions) {
     }
 }
 
-TEST(ParserRobustnessTests, ListBlobs_MissingOptionalFieldsUseDefaults) {
+TEST(ParserRobustnessTests, ListBlobs_MissingOptionalFields_UseDefaults) {
     const auto result = ParseListBlobsResultXml(
         "<EnumerationResults><Blobs><Blob><Name>only-name</Name></Blob></Blobs></EnumerationResults>");
     ASSERT_EQ(result.Blobs.size(), 1U);
@@ -159,7 +159,7 @@ TEST(ParserRobustnessTests, ListBlobs_MissingOptionalFieldsUseDefaults) {
     EXPECT_TRUE(empty.Blobs.empty());
 }
 
-TEST(ParserRobustnessTests, ListBlobs_MalformedNumbersAndDatesThrow) {
+TEST(ParserRobustnessTests, ListBlobs_MalformedNumbersAndDates_Throw) {
     for (const std::string_view properties :
          {"<Content-Length>12x</Content-Length>", "<Content-Length>-1</Content-Length>",
           "<Content-Length>99999999999999999999999</Content-Length>", "<Content-Length> 1</Content-Length>",
@@ -168,7 +168,7 @@ TEST(ParserRobustnessTests, ListBlobs_MalformedNumbersAndDatesThrow) {
     }
 }
 
-TEST(ParserRobustnessTests, ListBlobs_NamespacesEntitiesAndCdataAreDecoded) {
+TEST(ParserRobustnessTests, ListBlobs_NamespacesEntitiesAndCdata_AreDecoded) {
     const auto result =
         ParseListBlobsResultXml("<?xml version=\"1.0\" encoding=\"utf-8\"?>"
                                 "<s:EnumerationResults xmlns:s=\"urn:storage\" ServiceEndpoint=\"https://a/\">"
@@ -184,21 +184,21 @@ TEST(ParserRobustnessTests, ListBlobs_NamespacesEntitiesAndCdataAreDecoded) {
     EXPECT_EQ(result.NextMarker, "m&2");
 }
 
-TEST(ParserRobustnessTests, DeeplyNestedDocumentsAreRejectedWithoutExhaustingTheStack) {
+TEST(ParserRobustnessTests, Parsers_DeeplyNestedDocuments_AreRejectedWithoutExhaustingStack) {
     constexpr std::size_t Depth = 100000U;
     const std::string xml = MakeDeeplyNestedEnumerationResults(Depth);
     ExpectAllParsersRejectDocument(xml);
     EXPECT_TRUE(DetermineBlobStorageFailure({}, HttpResponse{AVEVA::HttpStatus::InternalServerError, {}, xml}).Error);
 }
 
-TEST(ParserRobustnessTests, ListBlobs_UnboundNamespacePrefixesAreTolerated) {
+TEST(ParserRobustnessTests, ListBlobs_UnboundNamespacePrefixes_AreTolerated) {
     const auto result = ParseListBlobsResultXml(
         "<s:EnumerationResults><s:Blobs><s:Blob><s:Name>n</s:Name></s:Blob></s:Blobs></s:EnumerationResults>");
     ASSERT_EQ(result.Blobs.size(), 1U);
     EXPECT_EQ(result.Blobs.at(0).Name, "n");
 }
 
-TEST(ParserRobustnessTests, ListBlobs_FullPageOf5000Items) {
+TEST(ParserRobustnessTests, ListBlobs_FullPageOf5000Items_IsParsed) {
     std::string xml = "<EnumerationResults><Blobs>";
     constexpr int fullPage = 5000;
     for (int index = 0; index < fullPage; ++index) {
@@ -215,7 +215,7 @@ TEST(ParserRobustnessTests, ListBlobs_FullPageOf5000Items) {
     EXPECT_EQ(result.NextMarker, "next");
 }
 
-TEST(ParserRobustnessTests, HttpDate_RejectsOutOfRangeAndTrailingInput) {
+TEST(ParserRobustnessTests, HttpDate_OutOfRangeAndTrailingInput_AreRejected) {
     EXPECT_TRUE(ParseHttpDateHeader("Thu, 29 Feb 2024 23:59:59 GMT").has_value());
     for (const std::string_view value :
          {"", "Thu, 29 Feb 2023 00:00:00 GMT", "Tue, 32 Jan 2024 00:00:00 GMT", "Tue, 02 Jan 2024 24:00:00 GMT",
@@ -226,7 +226,7 @@ TEST(ParserRobustnessTests, HttpDate_RejectsOutOfRangeAndTrailingInput) {
     }
 }
 
-TEST(ParserRobustnessTests, Iso8601_RejectsMalformedValues) {
+TEST(ParserRobustnessTests, Iso8601_MalformedValues_AreRejected) {
     const auto parsed = ParseIso8601Utc("2024-01-02T03:04:05.1234567Z");
     ASSERT_TRUE(parsed.has_value());
     EXPECT_EQ(floor<seconds>(*parsed), sys_days{2024y / January / 2} + 3h + 4min + 5s);
@@ -237,7 +237,7 @@ TEST(ParserRobustnessTests, Iso8601_RejectsMalformedValues) {
     }
 }
 
-TEST(ParserRobustnessTests, ContentRange_RejectsMalformedAndOverflowingValues) {
+TEST(ParserRobustnessTests, ContentRange_MalformedAndOverflowingValues_AreRejected) {
     for (const std::string_view value :
          {"", "bytes", "bytes 9-0/10", "bytes 0-9/5", "bytes a-9/10", "bytes 0-99999999999999999999/*", "items 0-9/10",
           "bytes 0-9/10 extra", "bytes -1-9/10"}) {
@@ -249,7 +249,7 @@ TEST(ParserRobustnessTests, ContentRange_RejectsMalformedAndOverflowingValues) {
     EXPECT_FALSE(ValueOrFail(unknownTotal).Total.has_value());
 }
 
-TEST(AS_R08_HttpDateFormsTests, AcceptsRfc1123Rfc850AndAsctime) {
+TEST(ParserRobustnessTests, HttpDate_Rfc1123Rfc850AndAsctime_AreAccepted) {
     const auto expected = sys_days{1994y / November / 6} + 8h + 49min + 37s;
     for (const std::string_view value :
          {"Sun, 06 Nov 1994 08:49:37 GMT", "Sunday, 06-Nov-94 08:49:37 GMT", "Sun Nov  6 08:49:37 1994"}) {
@@ -260,7 +260,7 @@ TEST(AS_R08_HttpDateFormsTests, AcceptsRfc1123Rfc850AndAsctime) {
     }
 }
 
-TEST(AS_A09_DateRangeTests, DatesOutsideTheClockRangeAreRejectedNotWrapped) {
+TEST(ParserRobustnessTests, HttpDate_OutsideClockRange_IsRejectedNotWrapped) {
     const bool clockHoldsYear9999 =
         duration_cast<seconds>(system_clock::duration::max()) > sys_days{9999y / December / 31}.time_since_epoch();
     for (const std::string_view value : {"9999-12-31T23:59:59.9999999Z", "0001-01-01T00:00:00Z"}) {
@@ -279,7 +279,7 @@ TEST(AS_A09_DateRangeTests, DatesOutsideTheClockRangeAreRejectedNotWrapped) {
     EXPECT_TRUE(ParseIso8601Utc("2200-01-01T00:00:00.9999999Z").has_value());
 }
 
-TEST(AS_R07_Iso8601FractionTests, DigitsBeyondTheSeventhAreTruncatedNotRounded) {
+TEST(ParserRobustnessTests, Iso8601_DigitsBeyondSeventh_AreTruncatedNotRounded) {
     const auto seven = ParseIso8601Utc("2024-01-02T03:04:05.1234567Z");
     const auto nine = ParseIso8601Utc("2024-01-02T03:04:05.123456789Z");
     const auto roundingBait = ParseIso8601Utc("2024-01-02T03:04:05.1234569999Z");
@@ -288,7 +288,7 @@ TEST(AS_R07_Iso8601FractionTests, DigitsBeyondTheSeventhAreTruncatedNotRounded) 
     EXPECT_EQ(roundingBait, ParseIso8601Utc("2024-01-02T03:04:05.1234569Z"));
 }
 
-TEST(AS_R04_ContentRangePresenceTests, PresentButInvalidContentRangeIsRejectedAndAbsentFallsBack) {
+TEST(ParserRobustnessTests, ContentRange_PresentButInvalid_IsRejectedAndAbsentFallsBack) {
     HttpResponse invalid{AVEVA::HttpStatus::PartialContent,
                          {AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Range"}, AVEVA::HeaderValue{"bytes 0-9/5"}),
                           AVEVA::HttpHeader(AVEVA::HeaderName{"Content-Length"}, AVEVA::HeaderValue{"10"})},
@@ -312,7 +312,7 @@ TEST(AS_R04_ContentRangePresenceTests, PresentButInvalidContentRangeIsRejectedAn
     EXPECT_EQ(ParseBlobProperties(absent).ContentLength, 42U);
 }
 
-TEST(ParserRobustnessTests, ErrorResponses_MalformedBodiesStillMapToAFailure) {
+TEST(ParserRobustnessTests, ErrorResponses_MalformedBodies_StillMapToFailure) {
     for (const std::string_view body : {"", "<Error>", "not xml", "<Error><Code>ContainerNotFound</Code></Error>",
                                         "<e:Error xmlns:e=\"urn:x\"><e:Code>BlobNotFound</e:Code></e:Error>"}) {
         SCOPED_TRACE(body);

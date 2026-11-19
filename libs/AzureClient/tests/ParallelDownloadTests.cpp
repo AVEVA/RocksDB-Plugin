@@ -201,7 +201,7 @@ void CreateFileWithContents(const std::filesystem::path& path, std::string_view 
 }
 } // namespace
 
-TEST(T11_ParallelDownloadAcceptanceTests, OutOfOrderCompletionIsWrittenInOrderToAFile) {
+TEST(ParallelDownloadTests, Download_OutOfOrderCompletion_IsWrittenInOrderToFile) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(18);
     EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
@@ -225,7 +225,7 @@ TEST(T11_ParallelDownloadAcceptanceTests, OutOfOrderCompletionIsWrittenInOrderTo
     VerifyIfMatchHeaderOnChunkRequests(httpClient, "\"etag-a\"");
 }
 
-TEST(T11_ParallelDownloadAcceptanceTests, FileWritesRunOnTheInjectedWriteScheduler) {
+TEST(ParallelDownloadTests, Download_FileWrites_RunOnInjectedWriteScheduler) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(18);
     EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
@@ -256,7 +256,7 @@ TEST(T11_ParallelDownloadAcceptanceTests, FileWritesRunOnTheInjectedWriteSchedul
     EXPECT_EQ(ReadFile(out.Path), content);
 }
 
-TEST(T11_ParallelDownloadAcceptanceTests, ThrowWhileStartingALaterChunkFailsOnceWithoutEscaping) {
+TEST(ParallelDownloadTests, Download_ThrowWhileStartingLaterChunk_FailsOnceWithoutEscaping) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(18);
     EnqueueChunks(httpClient, content, 3U);
@@ -282,7 +282,7 @@ TEST(T11_ParallelDownloadAcceptanceTests, ThrowWhileStartingALaterChunkFailsOnce
               AVEVA::AzureClient::Tests::WaitOutcome::Done);
 }
 
-TEST(T11_ParallelDownloadAcceptanceTests, ReorderWindowBoundsBufferedChunksToConcurrency) {
+TEST(ParallelDownloadTests, Download_ReorderWindow_BoundsBufferedChunksToConcurrency) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(30);
     EnqueueChunks(httpClient, content, 3U);
@@ -314,7 +314,7 @@ TEST(T11_ParallelDownloadAcceptanceTests, ReorderWindowBoundsBufferedChunksToCon
     EXPECT_EQ(ReadFile(out.Path), content);
 }
 
-TEST(T11_ParallelDownloadAcceptanceTests, ETagChangeMidDownloadReportsConditionNotMet) {
+TEST(ParallelDownloadTests, Download_ETagChangeMidDownload_ReportsConditionNotMet) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(12);
     EnqueueForRange(httpClient, RangeHeader(0, HalfBlobBytes),
@@ -338,7 +338,7 @@ TEST(T11_ParallelDownloadAcceptanceTests, ETagChangeMidDownloadReportsConditionN
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(1).Request, "If-Match"), "\"etagA\"");
 }
 
-TEST(T118_DownloadVersionValidatorTests, FirstResponseWithoutETagRejectsFurtherChunks) {
+TEST(DownloadVersionValidatorTests, FirstResponseWithoutETag_RejectsFurtherChunks) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(12);
     EnqueueForRange(httpClient, RangeHeader(0, HalfBlobBytes),
@@ -360,7 +360,7 @@ TEST(T118_DownloadVersionValidatorTests, FirstResponseWithoutETagRejectsFurtherC
     EXPECT_EQ(httpClient.RequestCount(), 1U);
 }
 
-TEST(T118_DownloadVersionValidatorTests, CallerIfMatchPermitsChunksWhenTheResponseHasNoETag) {
+TEST(DownloadVersionValidatorTests, CallerIfMatch_PermitsChunksWhenResponseHasNoETag) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(12);
     EnqueueForRange(httpClient, RangeHeader(0, HalfBlobBytes),
@@ -383,7 +383,7 @@ TEST(T118_DownloadVersionValidatorTests, CallerIfMatchPermitsChunksWhenTheRespon
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(1).Request, "If-Match"), "\"caller\"");
 }
 
-TEST(T118_DownloadVersionValidatorTests, WildcardIfMatchIsReplacedByTheResponseETagForLaterChunks) {
+TEST(DownloadVersionValidatorTests, WildcardIfMatch_IsReplacedByResponseETagForLaterChunks) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(12);
     EnqueueForRange(httpClient, RangeHeader(0, HalfBlobBytes),
@@ -408,7 +408,7 @@ TEST(T118_DownloadVersionValidatorTests, WildcardIfMatchIsReplacedByTheResponseE
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(httpClient.RequestAt(1).Request, "If-Match"), "\"etagA\"");
 }
 
-TEST(T118_DownloadVersionValidatorTests, WildcardIfMatchWithoutResponseETagRejectsFurtherChunks) {
+TEST(DownloadVersionValidatorTests, WildcardIfMatch_WithoutResponseETag_RejectsFurtherChunks) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(12);
     EnqueueForRange(httpClient, RangeHeader(0, HalfBlobBytes),
@@ -430,7 +430,7 @@ TEST(T118_DownloadVersionValidatorTests, WildcardIfMatchWithoutResponseETagRejec
     EXPECT_EQ(httpClient.RequestCount(), 1U);
 }
 
-TEST(T118_DownloadVersionValidatorTests, SingleResponseWithoutETagStillSucceeds) {
+TEST(DownloadVersionValidatorTests, SingleResponseWithoutETag_Succeeds) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(6);
     EnqueueForRange(httpClient, RangeHeader(0, HalfBlobBytes), RangeResponse(0, content, content.size(), ""));
@@ -448,7 +448,7 @@ TEST(T118_DownloadVersionValidatorTests, SingleResponseWithoutETagStillSucceeds)
     EXPECT_EQ(ReadFile(out.Path), content);
 }
 
-TEST(T11_ParallelDownloadAcceptanceTests, ChunkFailureCancelsInFlightChunksAndReportsOnce) {
+TEST(ParallelDownloadTests, Download_ChunkFailure_CancelsInFlightChunksAndReportsOnce) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(20);
     EnqueueForRange(httpClient, RangeHeader(0, 4), RangeResponse(0, content.substr(0, 4), content.size()));
@@ -479,7 +479,7 @@ TEST(T11_ParallelDownloadAcceptanceTests, ChunkFailureCancelsInFlightChunksAndRe
     EXPECT_EQ(httpClient.RequestCount(), 4U);
 }
 
-TEST(T11_ParallelDownloadAcceptanceTests, ParentCancellationCancelsAllInFlightChunks) {
+TEST(ParallelDownloadTests, Download_ParentCancellation_CancelsAllInFlightChunks) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(40);
     EnqueueChunks(httpClient, content, 4U);
@@ -500,7 +500,7 @@ TEST(T11_ParallelDownloadAcceptanceTests, ParentCancellationCancelsAllInFlightCh
     EXPECT_EQ(httpClient.RequestCount(), 5U);
 }
 
-TEST(T11_ParallelDownloadAcceptanceTests, PartialCancellationDoesNotAbortTheDownload) {
+TEST(ParallelDownloadTests, Download_PartialCancellation_DoesNotAbortDownload) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(18);
     EnqueueChunks(httpClient, content, 3U);
@@ -524,7 +524,7 @@ TEST(T11_ParallelDownloadAcceptanceTests, PartialCancellationDoesNotAbortTheDown
     EXPECT_EQ(ReadFile(out.Path), content);
 }
 
-TEST(T11_ParallelDownloadAcceptanceTests, TerminalCancellationAfterPartialStillAbortsTheDownload) {
+TEST(ParallelDownloadTests, Download_TerminalCancellationAfterPartial_AbortsDownload) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(40);
     EnqueueChunks(httpClient, content, 4U);
@@ -547,7 +547,7 @@ TEST(T11_ParallelDownloadAcceptanceTests, TerminalCancellationAfterPartialStillA
     EXPECT_EQ(httpClient.PendingCount(), 0U);
 }
 
-TEST(T11_ParallelDownloadAcceptanceTests, ParallelFileDownloadReplacesTheTargetOnSuccess) {
+TEST(ParallelDownloadTests, ParallelFileDownload_Success_ReplacesTarget) {
     const TempFile file;
     const auto& target = file.Path;
     CreateFileWithContents(target, "old contents that are longer than the new blob");
@@ -568,7 +568,7 @@ TEST(T11_ParallelDownloadAcceptanceTests, ParallelFileDownloadReplacesTheTargetO
     EXPECT_FALSE(HasPartialFiles(target));
 }
 
-TEST(T11_ParallelDownloadAcceptanceTests, ParallelFileDownloadFailureLeavesTheTargetUntouched) {
+TEST(ParallelDownloadTests, ParallelFileDownload_Failure_LeavesTargetUntouched) {
     const TempFile file;
     const auto& target = file.Path;
     CreateFileWithContents(target, "previous");
@@ -615,19 +615,19 @@ namespace {
 }
 } // namespace
 
-TEST(T08_DownloadContentRangeTests, PartialContentWithoutContentRangeIsInvalidResponse) {
+TEST(DownloadContentRangeTests, PartialContentWithoutContentRange_IsInvalidResponse) {
     const auto result = DownloadAgainstFixed206(MakeContent(10), "");
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().Code, AVEVA::AzureClient::BlobStorageErrorCode::InvalidResponse);
 }
 
-TEST(T08_DownloadContentRangeTests, ContentRangeEndThatDisagreesWithTheBodyIsInvalidResponse) {
+TEST(DownloadContentRangeTests, ContentRangeEndDisagreeingWithBody_IsInvalidResponse) {
     const auto result = DownloadAgainstFixed206(MakeContent(10), "bytes 0-4/10");
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().Code, AVEVA::AzureClient::BlobStorageErrorCode::InvalidResponse);
 }
 
-TEST(AC_R01_DownloadRangeOverflowTests, OffsetWhoseProbeRangeWouldWrapIsRejectedWithoutSendingARequest) {
+TEST(DownloadRangeOverflowTests, Offset_WhoseProbeRangeWraps_IsRejectedWithoutSending) {
     FakeHttpClient httpClient;
     BlobClient client{httpClient, BuildOptions()};
 
@@ -642,7 +642,7 @@ TEST(AC_R01_DownloadRangeOverflowTests, OffsetWhoseProbeRangeWouldWrapIsRejected
     EXPECT_FALSE(std::filesystem::exists(out.Path));
 }
 
-TEST(AC_R01_DownloadRangeOverflowTests, LengthThatOverflowsTheRangeEndIsRejected) {
+TEST(DownloadRangeOverflowTests, Length_OverflowingRangeEnd_IsRejected) {
     FakeHttpClient httpClient;
     BlobClient client{httpClient, BuildOptions()};
 
@@ -712,7 +712,7 @@ class DiscardingSink final {
     }
 };
 
-TEST(AC_R15_DownloadBufferCapTests, ChunksInFlightAreCappedByBytesNotJustByCount) {
+TEST(ParallelDownloadTests, Download_ChunksInFlight_AreCappedByBytesNotJustCount) {
     using AVEVA::AzureClient::NoTokenCredential;
     using AVEVA::AzureClient::Private::BasicBlobTarget;
     constexpr std::size_t chunkBytes = std::size_t{64} * 1024U * 1024U;
@@ -752,25 +752,25 @@ TEST(AC_R15_DownloadBufferCapTests, ChunksInFlightAreCappedByBytesNotJustByCount
     EXPECT_TRUE(operation.Done());
 }
 
-TEST(AC_R05_DownloadSinkExceptionTests, NonStandardExceptionFromAnInlineWriteIsAnIoError) {
+TEST(DownloadSinkExceptionTests, InlineWrite_NonStandardException_IsIoError) {
     const auto result = DownloadIntoThrowingSink<AVEVA::AzureClient::WriteMode::Inline>(false);
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::io_error));
 }
 
-TEST(AC_R05_DownloadSinkExceptionTests, NonStandardExceptionFromAScheduledWriteIsAnIoError) {
+TEST(DownloadSinkExceptionTests, ScheduledWrite_NonStandardException_IsIoError) {
     const auto result = DownloadIntoThrowingSink<AVEVA::AzureClient::WriteMode::Offloaded>(false);
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::io_error));
 }
 
-TEST(AC_R05_DownloadSinkExceptionTests, NonStandardExceptionFromReserveIsAnIoError) {
+TEST(DownloadSinkExceptionTests, Reserve_NonStandardException_IsIoError) {
     const auto result = DownloadIntoThrowingSink<AVEVA::AzureClient::WriteMode::Inline>(true);
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::io_error));
 }
 
-TEST(B05_DownloadIgnoredRangeTests, OffsetRangeAnswered200IsInvalidResponse) {
+TEST(DownloadIgnoredRangeTests, OffsetRangeAnswered200_IsInvalidResponse) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(20);
     httpClient.DefaultResponse() = HttpResponse{AVEVA::HttpStatus::Ok, MakeCanonicalSuccessHeaders(), content};
@@ -786,7 +786,7 @@ TEST(B05_DownloadIgnoredRangeTests, OffsetRangeAnswered200IsInvalidResponse) {
     EXPECT_FALSE(std::filesystem::exists(out.Path));
 }
 
-TEST(B05_DownloadIgnoredRangeTests, LengthRangeAnswered200IsTruncatedToTheRequestedLength) {
+TEST(DownloadIgnoredRangeTests, LengthRangeAnswered200_IsTruncatedToRequestedLength) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(20);
     httpClient.DefaultResponse() = HttpResponse{AVEVA::HttpStatus::Ok, MakeCanonicalSuccessHeaders(), content};
@@ -802,7 +802,7 @@ TEST(B05_DownloadIgnoredRangeTests, LengthRangeAnswered200IsTruncatedToTheReques
     EXPECT_EQ(ReadFile(out.Path), content.substr(0, 5U));
 }
 
-TEST(B05_DownloadIgnoredRangeTests, FullBodyAnswered200IsRejectedWhenOverMaxSize) {
+TEST(DownloadIgnoredRangeTests, FullBodyAnswered200_OverMaxSize_IsRejected) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(20);
     httpClient.DefaultResponse() = HttpResponse{AVEVA::HttpStatus::Ok, MakeCanonicalSuccessHeaders(), content};
@@ -817,7 +817,7 @@ TEST(B05_DownloadIgnoredRangeTests, FullBodyAnswered200IsRejectedWhenOverMaxSize
     EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::file_too_large));
 }
 
-TEST(A3_DownloadIntoSpanTests, FullAndPartialRangesAreWrittenByteForByte) {
+TEST(DownloadIntoSpanTests, FullAndPartialRanges_AreWrittenByteForByte) {
     const std::string content = MakeContent(18);
     for (const auto& [offset, length] : {std::pair{0U, 18U}, std::pair{4U, 7U}}) {
         FakeHttpClient httpClient;
@@ -835,7 +835,7 @@ TEST(A3_DownloadIntoSpanTests, FullAndPartialRangesAreWrittenByteForByte) {
     }
 }
 
-TEST(A3_DownloadIntoSpanTests, RangedDownloadKeepsTheBlobSizeAsContentLength) {
+TEST(DownloadIntoSpanTests, RangedDownload_KeepsBlobSizeAsContentLength) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(18);
     httpClient.EnqueueResponse(RangeResponse(4, content.substr(4, 7), content.size()));
@@ -852,7 +852,7 @@ TEST(A3_DownloadIntoSpanTests, RangedDownloadKeepsTheBlobSizeAsContentLength) {
     EXPECT_EQ(result->Value().Properties.ContentLength, 18U);
 }
 
-TEST(A3_DownloadIntoSpanTests, BlobShorterThanTheRequestedRangeReportsTheBytesWritten) {
+TEST(DownloadIntoSpanTests, BlobShorterThanRange_ReportsBytesWritten) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(18);
     httpClient.EnqueueResponse(RangeResponse(0, content, content.size()));
@@ -869,7 +869,7 @@ TEST(A3_DownloadIntoSpanTests, BlobShorterThanTheRequestedRangeReportsTheBytesWr
     EXPECT_EQ(destination.substr(18), "##");
 }
 
-TEST(A3_DownloadIntoSpanTests, ResponseLargerThanTheDestinationFailsWithoutWritingPastIt) {
+TEST(DownloadIntoSpanTests, ResponseLargerThanDestination_FailsWithoutWritingPastIt) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(18);
     httpClient.EnqueueResponse(RangeResponse(0, content, content.size()));
@@ -886,7 +886,7 @@ TEST(A3_DownloadIntoSpanTests, ResponseLargerThanTheDestinationFailsWithoutWriti
     EXPECT_EQ(storage.substr(10), std::string(8, '#'));
 }
 
-TEST(T11_ParallelDownloadAcceptanceTests, DownloadLargerThanMaxSizeFailsBeforeFetchingAnyChunk) {
+TEST(ParallelDownloadTests, Download_LargerThanMaxSize_FailsBeforeFetchingAnyChunk) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(18);
     EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
@@ -906,7 +906,7 @@ TEST(T11_ParallelDownloadAcceptanceTests, DownloadLargerThanMaxSizeFailsBeforeFe
     EXPECT_FALSE(std::filesystem::exists(out.Path));
 }
 
-TEST(T11_ParallelDownloadAcceptanceTests, DownloadExactlyAtMaxSizeSucceeds) {
+TEST(ParallelDownloadTests, Download_ExactlyAtMaxSize_Succeeds) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(18);
     EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
@@ -924,7 +924,7 @@ TEST(T11_ParallelDownloadAcceptanceTests, DownloadExactlyAtMaxSizeSucceeds) {
     EXPECT_EQ(ReadFile(out.Path), content);
 }
 
-TEST(T11_ParallelDownloadAcceptanceTests, SequentialChunksShareOneAggregateDeadline) {
+TEST(ParallelDownloadTests, Download_SequentialChunks_ShareOneAggregateDeadline) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(9);
     EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
@@ -955,7 +955,7 @@ TEST(T11_ParallelDownloadAcceptanceTests, SequentialChunksShareOneAggregateDeadl
     EXPECT_EQ(operation.Result().error().Code, std::make_error_code(std::errc::timed_out));
 }
 
-TEST(T11_ParallelDownloadAcceptanceTests, FileDownloadDelayedBeforeTheFirstGetStartsNoRequestAfterTheDeadline) {
+TEST(ParallelDownloadTests, FileDownload_DelayedBeforeFirstGet_StartsNoRequestAfterDeadline) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(9);
     EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
@@ -1006,7 +1006,7 @@ struct GatedFileDownload {
 };
 } // namespace
 
-TEST(T11_ParallelDownloadAcceptanceTests, CancellationWhileFilePreparationIsQueuedCompletesCanceledWithoutAGet) {
+TEST(ParallelDownloadTests, FileDownload_CancelledWhilePreparationQueued_CompletesCanceledWithoutGet) {
     GatedFileDownload download;
     download.Start(MakeContent(ThreeChunkBlobBytes));
     download.Download->Cancel();
@@ -1021,7 +1021,7 @@ TEST(T11_ParallelDownloadAcceptanceTests, CancellationWhileFilePreparationIsQueu
     EXPECT_FALSE(HasPartialFiles(download.Out.Path));
 }
 
-TEST(T11_ParallelDownloadAcceptanceTests, CancellationAfterTheLastChunkBeforeFinalizationKeepsTheOriginalFile) {
+TEST(ParallelDownloadTests, FileDownload_CancelledBeforeFinalization_KeepsOriginalFile) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(3);
     EnqueueChunks(httpClient, content, 3U, "\"etag-a\"");
@@ -1096,6 +1096,6 @@ void ExpectDeadlinePassingInLastDiskWorkTimesOut() {
 }
 } // namespace
 
-TEST(T11_ParallelDownloadAcceptanceTests, DeadlinePassingDuringTheLastWriteTimesOutAndKeepsTheDestination) {
+TEST(ParallelDownloadTests, FileDownload_DeadlineDuringLastWrite_TimesOutAndKeepsDestination) {
     ExpectDeadlinePassingInLastDiskWorkTimesOut();
 }

@@ -46,7 +46,7 @@ constexpr std::uint64_t ListBodyLimit = 6;
 }
 } // namespace
 
-TEST(RequestOptionsTests, ClientDefaultRequestOptionsApplyWhenNoneAreGiven) {
+TEST(RequestOptionsTests, RequestOptions_NoneGiven_ClientDefaultsApply) {
     FakeHttpClient httpClient;
     auto options = MakeBlobClientOptions();
     options.DefaultRequestOptions = MakeRequestOptions(ClientTimeout, ClientBodyLimit);
@@ -60,7 +60,7 @@ TEST(RequestOptionsTests, ClientDefaultRequestOptionsApplyWhenNoneAreGiven) {
     EXPECT_EQ(client.GetDefaultRequestOptions().GetTimeout().Value(), ClientTimeout);
 }
 
-TEST(RequestOptionsTests, WithoutClientDefaultsTheHttpRequestOptionsDefaultsApply) {
+TEST(RequestOptionsTests, RequestOptions_NoClientDefaults_HttpRequestOptionsDefaultsApply) {
     FakeHttpClient httpClient;
     BlobClient client{httpClient, MakeBlobClientOptions()};
 
@@ -70,7 +70,7 @@ TEST(RequestOptionsTests, WithoutClientDefaultsTheHttpRequestOptionsDefaultsAppl
     EXPECT_EQ(httpClient.LastRequestOptions().GetResponseBodyLimit(), HttpRequestOptions{}.GetResponseBodyLimit());
 }
 
-TEST(RequestOptionsTests, ExplicitTrailingRequestOptionsReplaceTheClientDefault) {
+TEST(RequestOptionsTests, RequestOptions_ExplicitTrailing_ReplaceClientDefault) {
     FakeHttpClient httpClient;
     auto options = MakeBlobClientOptions();
     options.DefaultRequestOptions = MakeRequestOptions(ClientTimeout, ClientBodyLimit);
@@ -82,7 +82,7 @@ TEST(RequestOptionsTests, ExplicitTrailingRequestOptionsReplaceTheClientDefault)
     EXPECT_EQ(httpClient.LastRequestOptions().GetResponseBodyLimit(), AVEVA::ByteCount{CallBodyLimit});
 }
 
-TEST(RequestOptionsTests, ContainerDefaultsApplyToContainerAndChildBlobOperations) {
+TEST(RequestOptionsTests, RequestOptions_ContainerDefaults_ApplyToContainerAndChildBlobOperations) {
     FakeHttpClient httpClient;
     auto options = MakeBlobContainerClientOptions();
     options.DefaultRequestOptions = MakeRequestOptions(ContainerTimeout, ContainerBodyLimit);

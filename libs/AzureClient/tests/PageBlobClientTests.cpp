@@ -160,7 +160,7 @@ void StartDownloadToPathAsyncAndVerify(FakeHttpClient& httpClient, PageBlobClien
 
 } // namespace
 
-TEST(StringSinkTests, SingleChunkCoveringExpectedSizeIsMovedNotCopied) {
+TEST(StringSinkTests, Append_SingleChunkCoveringExpectedSize_IsMovedNotCopied) {
     AVEVA::AzureClient::Private::StringSink sink;
     std::string body(SinkBodyBytes, 'x');
     const char* original = body.data();
@@ -171,7 +171,7 @@ TEST(StringSinkTests, SingleChunkCoveringExpectedSizeIsMovedNotCopied) {
     EXPECT_EQ(result.size(), SinkBodyBytes);
 }
 
-TEST(StringSinkTests, MultipleChunksAreAppended) {
+TEST(StringSinkTests, Append_MultipleChunks_AreAppended) {
     AVEVA::AzureClient::Private::StringSink sink;
     constexpr std::size_t twoWrites = 6;
     sink.Reserve(twoWrites);
@@ -668,7 +668,7 @@ TEST(PageBlobClientTests, DeleteAsync_UnrecognizedStorageCodeFallsBackToServiceE
     StartDeleteAsyncExpectingUnrecognizedServiceError(httpClient, client);
 }
 
-TEST(PageBlobClientTests, DownloadAsyncAndDownloadToAsyncParseContentAndProperties) {
+TEST(PageBlobClientTests, DownloadAsync_AndDownloadToAsync_ParseContentAndProperties) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{
         AVEVA::HttpStatus::Ok,
@@ -700,7 +700,7 @@ TEST(PageBlobClientTests, DownloadAsyncAndDownloadToAsyncParseContentAndProperti
     std::filesystem::remove(fsPath, ignored);
 }
 
-TEST(PageBlobClientTests, DownloadAsyncReturnsContent) {
+TEST(PageBlobClientTests, DownloadAsync_ReturnsContent) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() =
         HttpResponse{AVEVA::HttpStatus::Ok,
@@ -713,7 +713,7 @@ TEST(PageBlobClientTests, DownloadAsyncReturnsContent) {
     EXPECT_EQ(std::string(content.data(), content.size()), "hello");
 }
 
-TEST(PageBlobClientTests, UploadPagesAsyncReportsServiceFailure) {
+TEST(PageBlobClientTests, UploadPagesAsync_ServiceFailure_IsReported) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(
         MakeAzureErrorResponse(::AVEVA::HttpStatus::Conflict, "BlobAlreadyExists", "conflict", "upload-pages-request"));

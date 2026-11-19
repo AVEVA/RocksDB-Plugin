@@ -67,7 +67,7 @@ std::vector<ValidationCase> MakeCases() {
 
 class OptionValidationTests : public ::testing::TestWithParam<ValidationCase> {};
 
-TEST_P(OptionValidationTests, RejectsInvalidOptionsBeforeSendingAnyRequest) {
+TEST_P(OptionValidationTests, Options_InvalidValues_AreRejectedBeforeSending) {
     FakeHttpClient httpClient;
     const std::error_code error = GetParam().Start(httpClient);
 
@@ -135,7 +135,7 @@ template <class TOptions> void ApplyCase(TOptions& options, const TokenTransport
 
 class TokenTransportTests : public ::testing::TestWithParam<TokenTransportCase> {};
 
-TEST_P(TokenTransportTests, TokenCredentialsRequireHttpsUnlessLoopback) {
+TEST_P(TokenTransportTests, TokenCredentials_PlainHttp_RequiresLoopback) {
     FakeHttpClient httpClient;
     const TokenTransportCase& testCase = GetParam();
     const auto credential = testCase.UseTokenCredential
@@ -165,7 +165,7 @@ INSTANTIATE_TEST_SUITE_P(Matrix, TokenTransportTests, ::testing::ValuesIn(MakeTo
                              return paramInfo.param.Name;
                          });
 
-TEST(InsecureHttpTests, HttpEndpointIsRejectedUnlessExplicitlyAllowed) {
+TEST(InsecureHttpTests, HttpEndpoint_WithoutOptIn_IsRejected) {
     FakeHttpClient httpClient;
     auto options = MakeBlobClientOptions();
     options.SasToken.clear();
@@ -178,7 +178,7 @@ TEST(InsecureHttpTests, HttpEndpointIsRejectedUnlessExplicitlyAllowed) {
     }
 }
 
-TEST(InsecureHttpTests, HttpsEndpointNeedsNoOptIn) {
+TEST(InsecureHttpTests, HttpsEndpoint_WithoutOptIn_IsAccepted) {
     FakeHttpClient httpClient;
     auto options = MakeBlobClientOptions();
     options.ServiceEndpoint = "https://account.blob.core.windows.net";
@@ -186,7 +186,7 @@ TEST(InsecureHttpTests, HttpsEndpointNeedsNoOptIn) {
     EXPECT_NO_THROW((BlobClient{httpClient, options}));
 }
 
-TEST(SasTokenValidationTests, ControlCharactersFragmentsAndEmbeddedQuestionMarksAreRejected) {
+TEST(SasTokenValidationTests, SasToken_ControlCharactersFragmentsOrEmbeddedQuestionMarks_AreRejected) {
     FakeHttpClient httpClient;
     for (const std::string& token : {std::string{"sv=1&sig=a\r\nx-ms-evil: 1"}, std::string{"sv=1#frag"},
                                     std::string{"sv=1?sig=x"}, std::string{"sv=1 &sig=x"}, std::string{"sv=1\0x", 6}}) {
@@ -196,7 +196,7 @@ TEST(SasTokenValidationTests, ControlCharactersFragmentsAndEmbeddedQuestionMarks
     }
 }
 
-TEST(SasTokenValidationTests, MalformedPairsAreRejected) {
+TEST(SasTokenValidationTests, SasToken_MalformedPairs_AreRejected) {
     FakeHttpClient httpClient;
     for (const std::string& token : {std::string{"sv"}, std::string{"sv=1&&sig=x"}, std::string{"=1&sig=x"},
                                     std::string{"sv=1&sig"}, std::string{"sv=1&"}}) {
@@ -206,7 +206,7 @@ TEST(SasTokenValidationTests, MalformedPairsAreRejected) {
     }
 }
 
-TEST(SasTokenValidationTests, OrdinaryTokenWithOneLeadingQuestionMarkIsAccepted) {
+TEST(SasTokenValidationTests, SasToken_SingleLeadingQuestionMark_IsAccepted) {
     FakeHttpClient httpClient;
     auto options = MakeBlobClientOptions();
     options.SasToken = "?sv=2023-11-03&sig=abc%2Bdef%3D";

@@ -39,7 +39,7 @@ using AVEVA::AzureClient::Tests::RunAwaitable;
 
 } // namespace
 
-TEST(T06_DownloadToFileTests, SuccessRenamesAtomic) {
+TEST(DownloadToFileTests, DownloadToFile_Success_RenamesAtomically) {
     FakeHttpClient httpClient;
     // Prepare a single successful response containing "downloaded"
     httpClient.DefaultResponse() =
@@ -66,7 +66,7 @@ TEST(T06_DownloadToFileTests, SuccessRenamesAtomic) {
     EXPECT_EQ(contents, "downloaded");
 }
 
-TEST(T06_DownloadToFileTests, DirectoryTargetReportsIsADirectory) {
+TEST(DownloadToFileTests, DownloadToFile_DirectoryTarget_ReportsIsADirectory) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() =
         HttpResponse{AVEVA::HttpStatus::Ok, MakeCanonicalSuccessHeaders({{"Content-Length", "10"}}), "downloaded"};
@@ -82,7 +82,7 @@ TEST(T06_DownloadToFileTests, DirectoryTargetReportsIsADirectory) {
     EXPECT_TRUE(std::filesystem::is_directory(dir));
 }
 
-TEST(T06_DownloadToFileTests, HttpFailureRemovesPartialAndLeavesTargetUntouched) {
+TEST(DownloadToFileTests, DownloadToFile_HttpFailure_RemovesPartialAndLeavesTargetUntouched) {
     FakeHttpClient httpClient;
     // Simulate a transport failure for the request
     httpClient.EnqueueResponse(HttpResponse{}, std::make_error_code(std::errc::connection_reset));

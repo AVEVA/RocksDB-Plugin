@@ -15,7 +15,7 @@ using AVEVA::AzureClient::Private::BuildBlobUrl;
 using AVEVA::AzureClient::Tests::MakeBlobClientOptions;
 } // namespace
 
-TEST(T07_ValidateEndpointTests, PathStyleServiceEndpoint_AppendsAccountPath) {
+TEST(EndpointValidationTests, ValidateEndpoint_PathStyleServiceEndpoint_AppendsAccountPath) {
     BlobClientOptions opts = MakeBlobClientOptions();
     opts.ServiceEndpoint = "http://127.0.0.1:10000/devstoreaccount1"; // Azurite-style
     opts.InsecureHttp = AVEVA::AzureClient::InsecureHttpPolicy::Allow;

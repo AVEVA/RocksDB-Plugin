@@ -40,7 +40,7 @@ template <class TResult> void ExpectRejected(FakeHttpClient& httpClient, const T
 }
 } // namespace
 
-TEST(HeaderInjectionTests, MetadataValueWithCrLfIsRejected) {
+TEST(HeaderInjectionTests, MetadataValue_CrLf_IsRejected) {
     FakeHttpClient httpClient;
     BlobClient client{httpClient, MakeBlobClientOptions()};
     SetBlobMetadataOptions options;
@@ -49,7 +49,7 @@ TEST(HeaderInjectionTests, MetadataValueWithCrLfIsRejected) {
     ExpectRejected(httpClient, RunAwaitable(httpClient, client.SetMetadataAsync(std::move(options))));
 }
 
-TEST(HeaderInjectionTests, LeaseIdWithCrLfIsRejected) {
+TEST(HeaderInjectionTests, LeaseId_CrLf_IsRejected) {
     FakeHttpClient httpClient;
     BlobClient client{httpClient, MakeBlobClientOptions()};
     SetBlobMetadataOptions options;
@@ -58,7 +58,7 @@ TEST(HeaderInjectionTests, LeaseIdWithCrLfIsRejected) {
     ExpectRejected(httpClient, RunAwaitable(httpClient, client.SetMetadataAsync(std::move(options))));
 }
 
-TEST(HeaderInjectionTests, NulInHeaderValueIsRejected) {
+TEST(HeaderInjectionTests, HeaderValue_Nul_IsRejected) {
     FakeHttpClient httpClient;
     BlobClient client{httpClient, MakeBlobClientOptions()};
     SetBlobMetadataOptions options;
@@ -67,7 +67,7 @@ TEST(HeaderInjectionTests, NulInHeaderValueIsRejected) {
     ExpectRejected(httpClient, RunAwaitable(httpClient, client.SetMetadataAsync(std::move(options))));
 }
 
-TEST(HeaderInjectionTests, ManagedIdentityHeaderWithCrLfIsRejected) {
+TEST(HeaderInjectionTests, ManagedIdentityHeader_CrLf_IsRejected) {
     FakeHttpClient httpClient;
     ManagedIdentityCredentialOptions options;
     options.IdentityEndpoint = "https://identity.example/msi/token";
@@ -81,7 +81,7 @@ TEST(HeaderInjectionTests, ManagedIdentityHeaderWithCrLfIsRejected) {
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 
-TEST(HeaderInjectionTests, OtherControlCharactersAreRejectedButTabIsAllowed) {
+TEST(HeaderInjectionTests, HeaderValue_OtherControlCharacters_AreRejectedButTabAllowed) {
     using AVEVA::AzureClient::ControlCharacters;
     using AVEVA::AzureClient::Private::ControlCharactersIn;
     for (const char c : {'\0', '\x01', '\x08', '\x0b', '\x0c', '\x1f', '\x7f', '\r', '\n'}) {
@@ -91,7 +91,7 @@ TEST(HeaderInjectionTests, OtherControlCharactersAreRejectedButTabIsAllowed) {
     EXPECT_EQ(ControlCharactersIn(""), ControlCharacters::Absent);
 }
 
-TEST(HeaderInjectionTests, NonAsciiMetadataValueIsRejected) {
+TEST(HeaderInjectionTests, MetadataValue_NonAscii_IsRejected) {
     FakeHttpClient httpClient;
     BlobClient client{httpClient, MakeBlobClientOptions()};
     SetBlobMetadataOptions options;

@@ -40,7 +40,7 @@
 namespace AVEVA::AzureClient::Tests {
 using AVEVA::HttpResponse;
 
-TEST(RetryTests, NoRetries_DoesNotRetryOnTransientFailure) {
+TEST(RetryTests, NoRetries_TransientFailure_IsNotRetried) {
     FakeHttpClient httpClient;
     // Single immediate 503 response
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable, {}, ""});
@@ -56,7 +56,7 @@ TEST(RetryTests, NoRetries_DoesNotRetryOnTransientFailure) {
     EXPECT_FALSE(result.has_value());
 }
 
-TEST(RetryTests, MaxRetriesAtTheLargestCountDoesNotOverflow) {
+TEST(RetryTests, MaxRetries_AtLargestCount_DoesNotOverflow) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable, {}, ""});
     httpClient.EnqueueResponse(HttpResponse{HttpStatus::Ok, {}, ""});
@@ -73,7 +73,7 @@ TEST(RetryTests, MaxRetriesAtTheLargestCountDoesNotOverflow) {
     EXPECT_TRUE(result.has_value());
 }
 
-TEST(RetryTests, Retries_OnTransientThenSucceeds) {
+TEST(RetryTests, Retries_TransientThenSuccess_Succeeds) {
     FakeHttpClient httpClient;
     // First respond 503, then 200
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable, {}, ""});
@@ -91,7 +91,7 @@ TEST(RetryTests, Retries_OnTransientThenSucceeds) {
     EXPECT_TRUE(result.has_value());
 }
 
-TEST(RetryTests, FirstAttemptSuccessDoesNotConstructABackoffTimer) {
+TEST(RetryTests, FirstAttemptSuccess_DoesNotConstructBackoffTimer) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{HttpStatus::Ok, {}, ""});
 
@@ -107,7 +107,7 @@ TEST(RetryTests, FirstAttemptSuccessDoesNotConstructABackoffTimer) {
     EXPECT_EQ(FakeHttpClient::RetryTimersConstructed(), before);
 }
 
-TEST(RetryTests, EachRetryConstructsExactlyOneBackoffTimer) {
+TEST(RetryTests, Retry_EachRetry_ConstructsExactlyOneBackoffTimer) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable, {}, ""});
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable, {}, ""});
@@ -184,7 +184,7 @@ void StartUploadAsync(FakeHttpClient& httpClient, PageBlobClient& client, const 
 }
 } // namespace
 
-TEST(RetryTests, RetriesEveryTransientStatus) {
+TEST(RetryTests, Retry_EveryTransientStatus_IsRetried) {
     // The upload is a plain overwrite, so it is safe to replay after any transient status.
     for (const unsigned status : {408U, 429U, 500U, 502U, 503U, 504U}) {
         FakeHttpClient httpClient;
@@ -201,7 +201,7 @@ TEST(RetryTests, RetriesEveryTransientStatus) {
     }
 }
 
-TEST(RetryTests, UnsafeRequestIsRetriedOnlyAfterStatusesThatSayItWasNotProcessed) {
+TEST(RetryTests, UnsafeRequest_RetriedOnlyAfterStatusesMeaningNotProcessed) {
     // A delete cannot be replayed safely when the service may have applied it (a replay answers 404), so 500, 502, 504
     // and 408 are surfaced; 429 and 503 mean the request was rejected before being processed.
     for (const unsigned status : {408U, 429U, 500U, 502U, 503U, 504U}) {
@@ -221,7 +221,7 @@ TEST(RetryTests, UnsafeRequestIsRetriedOnlyAfterStatusesThatSayItWasNotProcessed
     }
 }
 
-TEST(RetryTests, DoesNotRetryNonTransientStatus) {
+TEST(RetryTests, Retry_NonTransientStatus_IsNotRetried) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(
         HttpResponse{HttpStatus::NotFound,
@@ -239,7 +239,7 @@ TEST(RetryTests, DoesNotRetryNonTransientStatus) {
     EXPECT_EQ(ValueOrFail(observed).error().StatusCode, HttpStatus::NotFound);
 }
 
-TEST(RetryTests, RetriesTransientTransportErrors) {
+TEST(RetryTests, Retry_TransientTransportErrors_AreRetried) {
     // The upload is a plain overwrite, so it is safe to replay after any transport failure.
     for (const std::error_code error :
          {std::error_code{AVEVA::HttpClientError::TimedOut}, std::error_code{AVEVA::HttpClientError::ConnectFailed},
@@ -258,7 +258,7 @@ TEST(RetryTests, RetriesTransientTransportErrors) {
     }
 }
 
-TEST(RetryTests, DeleteIsRetriedAfterFailuresThatHappenedBeforeAnythingWasSent) {
+TEST(RetryTests, Delete_FailureBeforeAnythingSent_IsRetried) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{}, AVEVA::HttpClientError::ConnectFailed);
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::Accepted, {}, ""});
@@ -272,7 +272,7 @@ TEST(RetryTests, DeleteIsRetriedAfterFailuresThatHappenedBeforeAnythingWasSent) 
     EXPECT_TRUE(ValueOrFail(observed).has_value());
 }
 
-TEST(RetryTests, DeleteIsNotReplayedAfterAnAmbiguousTransportErrorBecauseItsOutcomeIsUnknown) {
+TEST(RetryTests, Delete_AmbiguousTransportError_IsNotReplayed) {
     for (const std::error_code error :
          {std::error_code{AVEVA::HttpClientError::TimedOut}, std::error_code{AVEVA::HttpClientError::ReadFailed},
           std::make_error_code(std::errc::connection_reset)}) {
@@ -332,7 +332,7 @@ Models::BlobRequestConditions IfMatchConditions() {
 }
 } // namespace
 
-TEST(RetryTests, ConditionalMutationsAreNotReplayedAfterAnAmbiguousTransportError) {
+TEST(RetryTests, ConditionalMutation_AmbiguousTransportError_IsNotReplayed) {
     const std::error_code error{AVEVA::HttpClientError::ReadFailed};
     const auto upload = [](PageBlobClient& client) {
         UploadPagesOptions options;
@@ -360,7 +360,7 @@ TEST(RetryTests, ConditionalMutationsAreNotReplayedAfterAnAmbiguousTransportErro
     ExpectConditionalMutationSentOnceOrRetried(error, false, unmodifiedSince);
 }
 
-TEST(RetryTests, ConditionalMutationsAreStillRetriedWhenNothingWasSent) {
+TEST(RetryTests, ConditionalMutation_NothingSent_IsRetried) {
     ExpectConditionalMutationSentOnceOrRetried(
         std::error_code{AVEVA::HttpClientError::ConnectFailed}, true, [](PageBlobClient& client) {
             UploadPagesOptions options;
@@ -369,7 +369,7 @@ TEST(RetryTests, ConditionalMutationsAreStillRetriedWhenNothingWasSent) {
         });
 }
 
-TEST(RetryTests, WildcardIfMatchMutationIsStillReplayedAfterAnAmbiguousTransportError) {
+TEST(RetryTests, WildcardIfMatchMutation_AmbiguousTransportError_IsReplayed) {
     ExpectConditionalMutationSentOnceOrRetried(
         std::error_code{AVEVA::HttpClientError::ReadFailed}, true, [](PageBlobClient& client) {
             UploadPagesOptions options;
@@ -380,7 +380,7 @@ TEST(RetryTests, WildcardIfMatchMutationIsStillReplayedAfterAnAmbiguousTransport
 
 using CreateResult = std::expected<Response<Models::CreatePageBlobResult>, BlobStorageError>;
 
-TEST(RetryTests, ConditionalCreateIfNotExistsIsReplayedAfterAnAmbiguousTransportErrorBecauseTheReplayIsAbsorbed) {
+TEST(RetryTests, ConditionalCreateIfNotExists_AmbiguousTransportError_IsReplayed) {
     for (const std::error_code error :
          {std::error_code{AVEVA::HttpClientError::TimedOut}, std::error_code{AVEVA::HttpClientError::ReadFailed},
           std::make_error_code(std::errc::connection_reset)}) {
@@ -402,7 +402,7 @@ TEST(RetryTests, ConditionalCreateIfNotExistsIsReplayedAfterAnAmbiguousTransport
     }
 }
 
-TEST(RetryTests, DeleteIfExistsIsReplayedAfterAnAmbiguousTransportErrorBecauseTheReplayIsAbsorbed) {
+TEST(RetryTests, DeleteIfExists_AmbiguousTransportError_IsReplayed) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{}, AVEVA::HttpClientError::ReadFailed);
     httpClient.EnqueueResponse(
@@ -421,7 +421,7 @@ TEST(RetryTests, DeleteIfExistsIsReplayedAfterAnAmbiguousTransportErrorBecauseTh
 
 using ReleaseResult = std::expected<Response<Models::ReleaseBlobLeaseResult>, BlobStorageError>;
 
-TEST(RetryTests, ReleaseLeaseReplayedAfterAnAmbiguousErrorAbsorbsTheLeaseAlreadyReleased409) {
+TEST(RetryTests, ReleaseLease_ReplayAfterAmbiguousError_AbsorbsAlreadyReleased409) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{}, AVEVA::HttpClientError::ReadFailed);
     httpClient.EnqueueResponse(
@@ -442,7 +442,7 @@ TEST(RetryTests, ReleaseLeaseReplayedAfterAnAmbiguousErrorAbsorbsTheLeaseAlready
     EXPECT_EQ(value->Error()->StatusCode, ::AVEVA::HttpStatus::Conflict);
 }
 
-TEST(RetryTests, ReleaseLeaseFirstAttempt409StillFails) {
+TEST(RetryTests, ReleaseLease_FirstAttempt409_StillFails) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(
         HttpResponse{::AVEVA::HttpStatus::Conflict,
@@ -459,7 +459,7 @@ TEST(RetryTests, ReleaseLeaseFirstAttempt409StillFails) {
     EXPECT_FALSE(ValueOrFail(observed).has_value());
 }
 
-TEST(RetryTests, ReleaseLease409AfterATokenRefreshRepeatStillFails) {
+TEST(RetryTests, ReleaseLease_409AfterTokenRefreshRepeat_StillFails) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{
         HttpStatus::Unauthorized,
@@ -487,7 +487,7 @@ TEST(RetryTests, ReleaseLease409AfterATokenRefreshRepeatStillFails) {
     EXPECT_EQ(ValueOrFail(observed).error().StatusCode, ::AVEVA::HttpStatus::Conflict);
 }
 
-TEST(RetryTests, RenewLeaseReplayedAfterAnAmbiguousErrorSurfacesTheSubsequent409) {
+TEST(RetryTests, RenewLease_ReplayAfterAmbiguousError_SurfacesSubsequent409) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{}, AVEVA::HttpClientError::ReadFailed);
     httpClient.EnqueueResponse(
@@ -507,7 +507,7 @@ TEST(RetryTests, RenewLeaseReplayedAfterAnAmbiguousErrorSurfacesTheSubsequent409
     EXPECT_EQ(observed->error().StatusCode, ::AVEVA::HttpStatus::Conflict);
 }
 
-TEST(RetryTests, AcquireLeaseReplayedAfterAnAmbiguousErrorSurfacesTheSubsequent409) {
+TEST(RetryTests, AcquireLease_ReplayAfterAmbiguousError_SurfacesSubsequent409) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{}, AVEVA::HttpClientError::ReadFailed);
     httpClient.EnqueueResponse(HttpResponse{
@@ -530,7 +530,7 @@ TEST(RetryTests, AcquireLeaseReplayedAfterAnAmbiguousErrorSurfacesTheSubsequent4
     EXPECT_EQ(observed->error().StatusCode, ::AVEVA::HttpStatus::Conflict);
 }
 
-TEST(RetryTests, ConditionalUploadPagesAfterAnAmbiguousErrorIsNotReplayedAndKeepsTheTransportError) {
+TEST(RetryTests, ConditionalUploadPages_AmbiguousError_IsNotReplayedAndKeepsTransportError) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{}, AVEVA::HttpClientError::ReadFailed);
     httpClient.EnqueueResponse(
@@ -552,7 +552,7 @@ TEST(RetryTests, ConditionalUploadPagesAfterAnAmbiguousErrorIsNotReplayedAndKeep
     EXPECT_NE(observed->error().StatusCode, ::AVEVA::HttpStatus::PreconditionFailed);
 }
 
-TEST(RetryTests, ConditionalCreateIsRetriedAfterFailuresThatHappenedBeforeAnythingWasSent) {
+TEST(RetryTests, ConditionalCreate_FailureBeforeAnythingSent_IsRetried) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{}, AVEVA::HttpClientError::ConnectFailed);
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::Created, {}, ""});
@@ -566,7 +566,7 @@ TEST(RetryTests, ConditionalCreateIsRetriedAfterFailuresThatHappenedBeforeAnythi
     EXPECT_TRUE(ValueOrFail(observed).has_value());
 }
 
-TEST(RetryTests, UnconditionalCreateOverwriteIsReplayedAfterAnAmbiguousTransportError) {
+TEST(RetryTests, UnconditionalCreateOverwrite_AmbiguousTransportError_IsReplayed) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{}, AVEVA::HttpClientError::ReadFailed);
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::Created, {}, ""});
@@ -580,7 +580,7 @@ TEST(RetryTests, UnconditionalCreateOverwriteIsReplayedAfterAnAmbiguousTransport
     EXPECT_TRUE(ValueOrFail(observed).has_value());
 }
 
-TEST(RetryTests, UnauthorizedResponseIsRepeatedOnceWithAFreshToken) {
+TEST(RetryTests, Unauthorized_Response_IsRepeatedOnceWithFreshToken) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{
         HttpStatus::Unauthorized,
@@ -606,7 +606,7 @@ TEST(RetryTests, UnauthorizedResponseIsRepeatedOnceWithAFreshToken) {
     EXPECT_TRUE(ValueOrFail(observed).has_value());
 }
 
-TEST(RetryTests, ThrowDuringSecondAttemptCompletesOnceWithAnErrorAndDoesNotEscape) {
+TEST(RetryTests, Retry_ThrowDuringSecondAttempt_CompletesOnceWithErrorWithoutEscaping) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{HttpStatus::Unauthorized, {}, ""});
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::Accepted, {}, ""});
@@ -634,7 +634,7 @@ TEST(RetryTests, ThrowDuringSecondAttemptCompletesOnceWithAnErrorAndDoesNotEscap
     EXPECT_EQ(httpClient.RequestCount(), 1U);
 }
 
-TEST(RetryTests, UnauthorizedResponseAfterTheDeadlineDoesNotRefreshTheToken) {
+TEST(RetryTests, Unauthorized_AfterDeadline_DoesNotRefreshToken) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{HttpStatus::Unauthorized, {}, ""}, {},
                                AVEVA::AzureClient::Tests::Delivery::Deferred);
@@ -667,7 +667,7 @@ TEST(RetryTests, UnauthorizedResponseAfterTheDeadlineDoesNotRefreshTheToken) {
     EXPECT_EQ(httpClient.RequestCount(), 1U);
 }
 
-TEST(RetryTests, HungTokenAcquisitionIsBoundedByTheTotalDeadline) {
+TEST(RetryTests, TokenAcquisition_Hung_IsBoundedByTotalDeadline) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::Accepted, {}, ""});
     auto credential = std::make_shared<ScriptedTokenCredential>();
@@ -692,7 +692,7 @@ TEST(RetryTests, HungTokenAcquisitionIsBoundedByTheTotalDeadline) {
     httpClient.Poll();
 }
 
-TEST(RetryTests, UnauthorizedResponseIsOnlyRefreshedOnce) {
+TEST(RetryTests, Unauthorized_Repeated_IsRefreshedOnlyOnce) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{HttpStatus::Unauthorized, {}, ""});
     httpClient.EnqueueResponse(HttpResponse{HttpStatus::Unauthorized, {}, ""});
@@ -714,7 +714,7 @@ TEST(RetryTests, UnauthorizedResponseIsOnlyRefreshedOnce) {
     EXPECT_EQ(ValueOrFail(observed).error().StatusCode, HttpStatus::Unauthorized);
 }
 
-TEST(RetryTests, GivesUpAfterMaxRetriesAndReportsLastResponse) {
+TEST(RetryTests, Retry_MaxRetriesExhausted_ReportsLastResponse) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(
         HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable,
@@ -741,7 +741,7 @@ TEST(RetryTests, GivesUpAfterMaxRetriesAndReportsLastResponse) {
     EXPECT_EQ(ValueOrFail(observed).error().RequestId, "last");
 }
 
-TEST(RetryTests, HonorsServerRetryAfterHeadersOverLongBackoff) {
+TEST(RetryTests, RetryAfter_ServerHeaders_OverrideLongBackoff) {
     for (const std::string_view header : {"x-ms-retry-after-ms", "Retry-After"}) {
         FakeHttpClient httpClient;
         httpClient.EnqueueResponse(
@@ -764,7 +764,7 @@ TEST(RetryTests, HonorsServerRetryAfterHeadersOverLongBackoff) {
     }
 }
 
-TEST(RetryTests, RetryAfterHttpDateInThePastRetriesImmediately) {
+TEST(RetryTests, RetryAfter_HttpDateInPast_RetriesImmediately) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{
         ::AVEVA::HttpStatus::ServiceUnavailable,
@@ -780,7 +780,7 @@ TEST(RetryTests, RetryAfterHttpDateInThePastRetriesImmediately) {
     EXPECT_EQ(httpClient.RequestCount(), 2U);
 }
 
-TEST(RetryTests, RetryAfterHttpDateIsRelativeToTheResponseDateHeader) {
+TEST(RetryTests, RetryAfter_HttpDate_IsRelativeToResponseDateHeader) {
     FakeHttpClient httpClient;
     // The server clock is an hour ahead of ours: against the local clock this would be a one hour wait.
     const auto serverNow = std::chrono::system_clock::now() + std::chrono::hours{1};
@@ -799,7 +799,7 @@ TEST(RetryTests, RetryAfterHttpDateIsRelativeToTheResponseDateHeader) {
     ASSERT_EQ(PollUntil(httpClient, [&] { return observed.has_value(); }, std::chrono::seconds{2}), WaitOutcome::Done);
     EXPECT_EQ(httpClient.RequestCount(), 2U);
 }
-TEST(RetryTests, RetryAfterFutureHttpDateDelaysTheRetry) {
+TEST(RetryTests, RetryAfter_FutureHttpDate_DelaysRetry) {
     FakeHttpClient httpClient;
     FakeHttpClient::ClearRetryDelays();
     const FakeHttpClient::InstantRetryTimers instantTimers;
@@ -825,7 +825,7 @@ TEST(RetryTests, RetryAfterFutureHttpDateDelaysTheRetry) {
     EXPECT_LE(delays[0], std::chrono::milliseconds{2000});
 }
 
-TEST(RetryTests, XMsRetryAfterMsTakesPrecedenceOverRetryAfter) {
+TEST(RetryTests, XMsRetryAfterMs_TakesPrecedenceOverRetryAfter) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{
         ::AVEVA::HttpStatus::ServiceUnavailable,
@@ -843,7 +843,7 @@ TEST(RetryTests, XMsRetryAfterMsTakesPrecedenceOverRetryAfter) {
     EXPECT_TRUE(ValueOrFail(observed).has_value());
 }
 
-TEST(RetryTests, ComputedBackoffIsCappedByMaxDelay) {
+TEST(RetryTests, Backoff_ComputedDelay_IsCappedByMaxDelay) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable, {}, ""});
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::Accepted, {}, ""});
@@ -859,7 +859,7 @@ TEST(RetryTests, ComputedBackoffIsCappedByMaxDelay) {
     EXPECT_TRUE(ValueOrFail(observed).has_value());
 }
 
-TEST(RetryTests, MalformedOrNegativeRetryAfterHintsAreTreatedAsAbsent) {
+TEST(RetryTests, RetryAfter_MalformedOrNegativeHints_AreTreatedAsAbsent) {
     for (const std::string_view value : {"-5", "-0", "+3", "abc", "1.5", "5 seconds", "", "99999999999999999999"}) {
         const HttpResponse response{
             ::AVEVA::HttpStatus::ServiceUnavailable,
@@ -875,7 +875,7 @@ TEST(RetryTests, MalformedOrNegativeRetryAfterHintsAreTreatedAsAbsent) {
     EXPECT_FALSE(AVEVA::AzureClient::Private::ParseRetryAfter(negativeMs).has_value());
 }
 
-TEST(RetryTests, RetryAfterTrimsOnlySpaceAndTab) {
+TEST(RetryTests, RetryAfter_Whitespace_TrimsOnlySpaceAndTab) {
     using AVEVA::AzureClient::Private::ParseRetryAfter;
     for (const std::string_view value : {" \t7\t ", "7", "\t7"}) {
         const HttpResponse response{
@@ -895,7 +895,7 @@ TEST(RetryTests, RetryAfterTrimsOnlySpaceAndTab) {
     }
 }
 
-TEST(RetryTests, RetryAfterHintsAreNeverNegative) {
+TEST(RetryTests, RetryAfter_Hints_AreNeverNegative) {
     const HttpResponse pastDate{
         ::AVEVA::HttpStatus::ServiceUnavailable,
         {AVEVA::HttpHeader(AVEVA::HeaderName{"Retry-After"}, AVEVA::HeaderValue{"Wed, 21 Oct 2015 07:28:00 GMT"})},
@@ -905,7 +905,7 @@ TEST(RetryTests, RetryAfterHintsAreNeverNegative) {
     EXPECT_GE(*hint, std::chrono::milliseconds{0});
 }
 
-TEST(RetryTests, NegativeRetryAfterFallsBackToTheComputedBackoff) {
+TEST(RetryTests, RetryAfter_Negative_FallsBackToComputedBackoff) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(
         HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable,
@@ -922,7 +922,7 @@ TEST(RetryTests, NegativeRetryAfterFallsBackToTheComputedBackoff) {
     EXPECT_TRUE(ValueOrFail(observed).has_value());
 }
 
-TEST(RetryTests, ServerRetryAfterHintIsNotClampedToMaxDelay) {
+TEST(RetryTests, RetryAfter_ServerHint_IsNotClampedToMaxDelay) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(
         HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable,
@@ -942,7 +942,7 @@ TEST(RetryTests, ServerRetryAfterHintIsNotClampedToMaxDelay) {
     httpClient.Poll();
 }
 
-TEST(RetryTests, CancellationDuringBackoffCompletesWithOperationCanceledAndSendsNothingMore) {
+TEST(RetryTests, Cancel_DuringBackoff_CompletesCanceledAndSendsNothingMore) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable, {}, ""});
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::Accepted, {}, ""});
@@ -960,7 +960,7 @@ TEST(RetryTests, CancellationDuringBackoffCompletesWithOperationCanceledAndSends
     EXPECT_EQ(httpClient.RequestCount(), 1U);
 }
 
-TEST(RetryTests, PartialCancellationDoesNotAbortTheOperationButTerminalDoes) {
+TEST(RetryTests, Cancel_Partial_DoesNotAbortButTerminalDoes) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable, {}, ""});
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::Accepted, {}, ""});
@@ -979,7 +979,7 @@ TEST(RetryTests, PartialCancellationDoesNotAbortTheOperationButTerminalDoes) {
     EXPECT_EQ(operation.Result().error().Code, std::make_error_code(std::errc::operation_canceled));
 }
 
-TEST(RetryTests, CancellationOfInFlightAttemptIsNotRetried) {
+TEST(RetryTests, Cancel_InFlightAttempt_IsNotRetried) {
     FakeHttpClient httpClient;
     httpClient.DefaultDelivery() = AVEVA::AzureClient::Tests::Delivery::Deferred;
     BlobClient client{httpClient, MakeRetryOptions(RetryCount{3U})};
@@ -995,7 +995,7 @@ TEST(RetryTests, CancellationOfInFlightAttemptIsNotRetried) {
     EXPECT_EQ(httpClient.RequestCount(), 1U);
 }
 
-TEST(RetryTests, MaxRetriesOverrideReplacesClientPolicy) {
+TEST(RetryTests, MaxRetriesOverride_ReplacesClientPolicy) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable, {}, ""});
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::Accepted, {}, ""});
@@ -1012,7 +1012,7 @@ TEST(RetryTests, MaxRetriesOverrideReplacesClientPolicy) {
     EXPECT_EQ(ValueOrFail(observed).error().StatusCode, ::AVEVA::HttpStatus::ServiceUnavailable);
 }
 
-TEST(RetryTests, MaxRetriesOverrideCanEnableRetriesDisabledOnTheClient) {
+TEST(RetryTests, MaxRetriesOverride_CanEnableRetriesDisabledOnClient) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable, {}, ""});
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::Accepted, {}, ""});
@@ -1028,7 +1028,7 @@ TEST(RetryTests, MaxRetriesOverrideCanEnableRetriesDisabledOnTheClient) {
     EXPECT_TRUE(ValueOrFail(observed).has_value());
 }
 
-TEST(RetryTests, RetryOptionsOverrideReplacesClientPolicy) {
+TEST(RetryTests, RetryOptionsOverride_ReplacesClientPolicy) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable, {}, ""});
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::Accepted, {}, ""});
@@ -1044,7 +1044,7 @@ TEST(RetryTests, RetryOptionsOverrideReplacesClientPolicy) {
     EXPECT_TRUE(ValueOrFail(observed).has_value());
 }
 
-TEST(RetryTests, MaxRetriesOverrideTakesPrecedenceOverRetryOptionsCount) {
+TEST(RetryTests, MaxRetriesOverride_TakesPrecedenceOverRetryOptionsCount) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable, {}, ""});
     BlobClient client{httpClient, MakeRetryOptions(RetryCount{3U})};
@@ -1059,7 +1059,7 @@ TEST(RetryTests, MaxRetriesOverrideTakesPrecedenceOverRetryOptionsCount) {
     EXPECT_EQ(httpClient.RequestCount(), 1U);
 }
 
-TEST(RetryTests, TotalDeadlineEndsRetryBackoffWithTimedOut) {
+TEST(RetryTests, TotalDeadline_EndsRetryBackoffWithTimedOut) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable, {}, ""});
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::Accepted, {}, ""});
@@ -1076,7 +1076,7 @@ TEST(RetryTests, TotalDeadlineEndsRetryBackoffWithTimedOut) {
     EXPECT_EQ(httpClient.RequestCount(), 1U);
 }
 
-TEST(RetryTests, TotalDeadlineFailsImmediatelyWhenTheBackoffWouldOutlastIt) {
+TEST(RetryTests, TotalDeadline_BackoffWouldOutlastIt_FailsImmediately) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable, {}, ""});
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::Accepted, {}, ""});
@@ -1094,7 +1094,7 @@ TEST(RetryTests, TotalDeadlineFailsImmediatelyWhenTheBackoffWouldOutlastIt) {
     EXPECT_EQ(httpClient.RequestCount(), 1U);
 }
 
-TEST(RetryTests, TotalDeadlineClampsAttemptTimeoutAndDoesNotFireAfterSuccess) {
+TEST(RetryTests, TotalDeadline_ClampsAttemptTimeoutAndDoesNotFireAfterSuccess) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::Accepted, {}, ""});
     BlobClient client{httpClient, MakeRetryOptions(RetryCount{3U})};
@@ -1118,14 +1118,14 @@ TEST(RetryTests, TotalDeadlineClampsAttemptTimeoutAndDoesNotFireAfterSuccess) {
     EXPECT_EQ(completions, 1);
 }
 
-TEST(RetryTests, RequestOptionsWithoutOverridesKeepClientPolicy) {
+TEST(RetryTests, RequestOptions_WithoutOverrides_KeepClientPolicy) {
     const AVEVA::AzureClient::AzureRequestOptions defaults;
     EXPECT_FALSE(defaults.GetTotalDeadline().has_value());
     EXPECT_FALSE(defaults.GetMaxRetries().has_value());
     EXPECT_FALSE(defaults.GetRetryOptions().has_value());
 }
 
-TEST(RetryTests, ExtremeTotalDeadlinesAreSaturated) {
+TEST(RetryTests, TotalDeadline_Extreme_IsSaturated) {
     AVEVA::AzureClient::AzureRequestOptions options;
     options.SetTotalDeadline(std::chrono::milliseconds::max());
     EXPECT_EQ(options.GetTotalDeadline(), AVEVA::AzureClient::AzureRequestOptions::MaxTotalDeadline);
@@ -1146,13 +1146,13 @@ TEST(RetryTests, ExtremeTotalDeadlinesAreSaturated) {
     EXPECT_EQ(spent.State(), DeadlineState::Expired);
 }
 
-TEST(RetryTests, ZeroRetryCountOverrideIsKept) {
+TEST(RetryTests, MaxRetriesOverride_Zero_IsKept) {
     AVEVA::AzureClient::AzureRequestOptions options;
     options.SetMaxRetries(RetryCount{0U});
     EXPECT_EQ(options.GetMaxRetries(), RetryCount{0U});
 }
 
-TEST(RetryTests, RetryReSignsSharedKeyAndRefreshesDateHeader) {
+TEST(RetryTests, Retry_SharedKey_ReSignsAndRefreshesDateHeader) {
     FakeHttpClient httpClient;
     // A 1.1 s server hint guarantees the second attempt crosses an x-ms-date (1 s resolution) boundary.
     httpClient.EnqueueResponse(
@@ -1190,7 +1190,7 @@ TEST(RetryTests, RetryReSignsSharedKeyAndRefreshesDateHeader) {
               FakeHttpClient::FindHeaderValue(second.Request, "Authorization"));
 }
 
-TEST(RetryTests, EveryAttemptOfARetriedUploadCarriesTheFullBody) {
+TEST(RetryTests, Retry_Upload_EveryAttemptCarriesFullBody) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable, {}, ""});
     httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::ServiceUnavailable, {}, ""});
@@ -1220,7 +1220,7 @@ struct FixedGenerator {
 };
 } // namespace
 
-TEST(BackoffTests, InjectedGeneratorMakesTheJitterDeterministic) {
+TEST(BackoffTests, InjectedGenerator_MakesJitterDeterministic) {
     AVEVA::RetryOptions retry;
     retry.InitialDelay = AVEVA::AzureClient::Tests::JitterInitialDelay;
     retry.MaxDelay = AVEVA::AzureClient::Tests::JitterMaxDelay;
@@ -1232,7 +1232,7 @@ TEST(BackoffTests, InjectedGeneratorMakesTheJitterDeterministic) {
     EXPECT_EQ(first, std::chrono::milliseconds{80});   // 100 ms * lowest jitter (0.8)
     EXPECT_EQ(second, std::chrono::milliseconds{160}); // doubled per retry
 }
-TEST(BackoffTests, ExtremeDelaysAreClampedBeforeFloatingPointConversion) {
+TEST(BackoffTests, ExtremeDelays_AreClampedBeforeFloatingPointConversion) {
     AVEVA::RetryOptions retry;
     retry.InitialDelay = std::chrono::milliseconds::max();
     retry.MaxDelay = std::chrono::milliseconds::max();
@@ -1249,7 +1249,7 @@ TEST(BackoffTests, ExtremeDelaysAreClampedBeforeFloatingPointConversion) {
     EXPECT_EQ(AVEVA::ComputeBackoff(retry, 3, generator), std::chrono::milliseconds{0});
 }
 
-TEST(RetryTests, WidelySeparatedRetryAfterAndServerDatesAreBounded) {
+TEST(RetryTests, RetryAfter_WidelySeparatedServerDates_AreBounded) {
     constexpr std::chrono::milliseconds Day{std::chrono::hours{24}};
     const AVEVA::HttpResponse farFuture{
         AVEVA::HttpStatus::ServiceUnavailable,

@@ -25,7 +25,7 @@ using AVEVA::AzureClient::BlobStorageError;
 using AVEVA::AzureClient::Response;
 } // namespace
 
-TEST(ResponseTests, DefaultConstructedResponseHasDefaultState) {
+TEST(ResponseTests, Response_DefaultConstructed_HasDefaultState) {
     Response<std::string> response;
 
     EXPECT_TRUE(response.Value().empty());
@@ -33,7 +33,7 @@ TEST(ResponseTests, DefaultConstructedResponseHasDefaultState) {
     EXPECT_FALSE(response.Error().has_value());
 }
 
-TEST(ResponseTests, MoveConstructionPreservesValueRawResponseAndError) {
+TEST(ResponseTests, Response_MoveConstruction_PreservesValueRawResponseAndError) {
     Response<std::vector<int>> original{
         std::vector<int>{1, 2, 3},
         HttpResponse{AVEVA::HttpStatus::PartialContent,
@@ -53,7 +53,7 @@ TEST(ResponseTests, MoveConstructionPreservesValueRawResponseAndError) {
     EXPECT_EQ(ValueOrFail(moved.Error()).ErrorCode, "Conflict");
 }
 
-TEST(ResponseTests, RvalueQualifiedValueMovesOutLargePayloads) {
+TEST(ResponseTests, Response_RvalueValue_MovesOutLargePayloads) {
     constexpr int Payload = 42;
     Response<std::unique_ptr<int>> response{std::make_unique<int>(Payload),
                                             HttpResponse{AVEVA::HttpStatus::Ok, {}, ""}};
@@ -64,7 +64,7 @@ TEST(ResponseTests, RvalueQualifiedValueMovesOutLargePayloads) {
     EXPECT_EQ(*value, Payload);
 }
 
-TEST(ResponseTests, RvalueQualifiedRawResponseAndErrorMoveOutWithoutRelyingOnSource) {
+TEST(ResponseTests, Response_RvalueRawResponseAndError_MoveOutWithoutRelyingOnSource) {
     const auto makeResponse = [] {
         return Response<std::string>{
             "value",
@@ -88,7 +88,7 @@ TEST(ResponseTests, RvalueQualifiedRawResponseAndErrorMoveOutWithoutRelyingOnSou
     EXPECT_EQ(ValueOrFail(error).ErrorCode, "Conflict");
 }
 
-TEST(ResponseTests, MutableLvalueAccessorsAllowInPlaceModificationAndMoveOut) {
+TEST(ResponseTests, Response_MutableLvalueAccessors_AllowInPlaceModificationAndMoveOut) {
     Response<std::string> response{
         "value",
         HttpResponse{AVEVA::HttpStatus::PartialContent,
@@ -107,7 +107,7 @@ TEST(ResponseTests, MutableLvalueAccessorsAllowInPlaceModificationAndMoveOut) {
     EXPECT_EQ(moved.GetBody(), "body");
 }
 
-TEST(ResponseTests, ErrorCodesCompareEqualToDocumentedPortableConditions) {
+TEST(ResponseTests, Response_ErrorCodes_CompareEqualToDocumentedPortableConditions) {
     using AVEVA::AzureClient::BlobStorageErrorCode;
 
     struct Row {
@@ -137,7 +137,7 @@ TEST(ResponseTests, ErrorCodesCompareEqualToDocumentedPortableConditions) {
     }
 }
 
-TEST(ResponseTests, MovingMembersOutInDifferentOrdersLeavesEachIntact) {
+TEST(ResponseTests, Response_MembersMovedOutInDifferentOrders_LeaveEachIntact) {
     const auto makeResponse = [] {
         return Response<std::string>{
             "value",

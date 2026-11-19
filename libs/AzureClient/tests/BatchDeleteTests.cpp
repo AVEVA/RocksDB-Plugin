@@ -134,7 +134,7 @@ void DeferBatchResponses(FakeHttpClient& http) {
 }
 } // namespace
 
-TEST(BatchDeleteTests, BuildsMultipartPostWithOneDeletePerBlob) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_Names_BuildsMultipartPostWithOneDeletePerBlob) {
     FakeHttpClient http;
     RespondToBatches(http);
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
@@ -180,7 +180,7 @@ TEST(BatchDeleteTests, BuildsMultipartPostWithOneDeletePerBlob) {
     EXPECT_EQ(result.AllSucceeded(), Completion::Complete);
 }
 
-TEST(BatchDeleteTests, SharedKeyAuthorizesTheRequestAndEverySubrequest) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_SharedKey_AuthorizesRequestAndEverySubrequest) {
     FakeHttpClient http;
     RespondToBatches(http);
     auto options = MakeBlobContainerClientOptions();
@@ -199,7 +199,7 @@ TEST(BatchDeleteTests, SharedKeyAuthorizesTheRequestAndEverySubrequest) {
     EXPECT_EQ(CountOccurrences(record.Body, "Authorization: SharedKey storageaccount:"), 2U);
 }
 
-TEST(BatchDeleteTests, SplitsMoreThan256NamesIntoSeveralRequestsAndKeepsOrder) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_MoreThan256Names_SplitsIntoSeveralRequestsInOrder) {
     FakeHttpClient http;
     RespondToBatches(http);
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
@@ -224,7 +224,7 @@ TEST(BatchDeleteTests, SplitsMoreThan256NamesIntoSeveralRequestsAndKeepsOrder) {
     }
 }
 
-TEST(BatchDeleteTests, ExactlyOneFullBatchIsASingleRequest) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_Exactly256Names_SendsSingleRequest) {
     FakeHttpClient http;
     RespondToBatches(http);
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
@@ -236,7 +236,7 @@ TEST(BatchDeleteTests, ExactlyOneFullBatchIsASingleRequest) {
     EXPECT_EQ(outcome->Value().Items.size(), BatchSize);
 }
 
-TEST(BatchDeleteTests, ReportsEachBlobOutcomeAndTreatsNotFoundAsAlreadyDeleted) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_MixedOutcomes_ReportsEachBlobAndTreatsNotFoundAsDeleted) {
     FakeHttpClient http;
     RespondToBatches(http, [](const std::string& url) {
         if (url.contains("missing")) {
@@ -267,7 +267,7 @@ TEST(BatchDeleteTests, ReportsEachBlobOutcomeAndTreatsNotFoundAsAlreadyDeleted) 
     EXPECT_EQ(result.AllSucceeded(), Completion::Incomplete);
 }
 
-TEST(BatchDeleteTests, WholeRequestFailureCompletesAsError) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_WholeRequestFailure_CompletesWithError) {
     FakeHttpClient http;
     http.DefaultResponse() = HttpResponse{
         ::AVEVA::HttpStatus::Forbidden,
@@ -284,7 +284,7 @@ TEST(BatchDeleteTests, WholeRequestFailureCompletesAsError) {
     EXPECT_EQ(outcome.error().RequestId, "req-9");
 }
 
-TEST(BatchDeleteTests, TransportFailureCompletesAsError) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_TransportFailure_CompletesWithError) {
     FakeHttpClient http;
     http.EnqueueResponse(HttpResponse{}, std::make_error_code(std::errc::connection_reset));
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
@@ -295,7 +295,7 @@ TEST(BatchDeleteTests, TransportFailureCompletesAsError) {
     EXPECT_EQ(outcome.error().Code, std::errc::connection_reset);
 }
 
-TEST(BatchDeleteTests, FailedRequestStopsLaterChunksAndReportsTheFirstFailure) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_FailedChunk_StopsLaterChunksAndReportsFirstFailure) {
     FakeHttpClient http;
     http.DefaultResponse() =
         HttpResponse{AVEVA::HttpStatus::InternalServerError,
@@ -311,7 +311,7 @@ TEST(BatchDeleteTests, FailedRequestStopsLaterChunksAndReportsTheFirstFailure) {
     EXPECT_EQ(http.RequestCount(), 1U);
 }
 
-TEST(BatchDeleteTests, LimitsRequestsInFlight) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_ManyChunks_LimitsRequestsInFlight) {
     FakeHttpClient http;
     DeferBatchResponses(http);
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
@@ -333,7 +333,7 @@ TEST(BatchDeleteTests, LimitsRequestsInFlight) {
     EXPECT_EQ(op.Result().value().Value().Items.size(), 768U);
 }
 
-TEST(BatchDeleteTests, CancelAbortsEveryChunkInFlightAndStartsNoMore) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_Cancel_AbortsInFlightChunksAndStartsNoMore) {
     FakeHttpClient http;
     DeferBatchResponses(http);
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
@@ -359,7 +359,7 @@ TEST(BatchDeleteTests, CancelAbortsEveryChunkInFlightAndStartsNoMore) {
     EXPECT_EQ(http.RequestCount(), 3U);
 }
 
-TEST(BatchDeleteTests, PartialCancellationDoesNotAbortTheBatchButTerminalDoes) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_PartialCancellation_DoesNotAbortButTerminalDoes) {
     FakeHttpClient http;
     DeferBatchResponses(http);
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
@@ -387,7 +387,7 @@ TEST(BatchDeleteTests, PartialCancellationDoesNotAbortTheBatchButTerminalDoes) {
     EXPECT_EQ(http.RequestCount(), 2U);
 }
 
-TEST(BatchDeleteTests, PartialCancellationLetsTheBatchSucceed) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_PartialCancellation_BatchSucceeds) {
     FakeHttpClient http;
     DeferBatchResponses(http);
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
@@ -404,7 +404,7 @@ TEST(BatchDeleteTests, PartialCancellationLetsTheBatchSucceed) {
     EXPECT_EQ(op.Result().value().Value().Items.size(), FewBlobs);
 }
 
-TEST(BatchDeleteTests, CancelRightAfterInitiationOfManyChunksAlwaysCompletesCanceled) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_CancelRightAfterInitiation_AlwaysCompletesCanceled) {
     for (int iteration = 0; iteration < CancelRaceIterations; ++iteration) {
         FakeHttpClient http;
         DeferBatchResponses(http);
@@ -422,7 +422,7 @@ TEST(BatchDeleteTests, CancelRightAfterInitiationOfManyChunksAlwaysCompletesCanc
     }
 }
 
-TEST(BatchDeleteTests, EmptyListSucceedsWithoutSendingAnything) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_EmptyList_SucceedsWithoutSending) {
     FakeHttpClient http;
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
@@ -434,7 +434,7 @@ TEST(BatchDeleteTests, EmptyListSucceedsWithoutSendingAnything) {
     EXPECT_EQ(http.RequestCount(), 0U);
 }
 
-TEST(BatchDeleteTests, RejectsInvalidNamesBeforeSendingAnything) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_InvalidNames_AreRejectedBeforeSending) {
     FakeHttpClient http;
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
 
@@ -449,7 +449,7 @@ TEST(BatchDeleteTests, RejectsInvalidNamesBeforeSendingAnything) {
     EXPECT_EQ(http.RequestCount(), 0U);
 }
 
-TEST(BatchDeleteTests, MalformedBatchResponseIsAnInvalidResponse) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_MalformedBatchResponse_ReportsInvalidResponse) {
     FakeHttpClient http;
     http.SetResponder([](const FakeHttpClient::RequestRecord&) -> std::optional<FakeHttpClient::ScriptedResult> {
         return FakeHttpClient::ScriptedResult{
@@ -466,7 +466,7 @@ TEST(BatchDeleteTests, MalformedBatchResponseIsAnInvalidResponse) {
     EXPECT_EQ(outcome.error().Code, BlobStorageErrorCode::InvalidResponse);
 }
 
-TEST(BatchDeleteTests, ResponseMissingASubrequestIsAnInvalidResponse) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_ResponseMissingSubrequest_ReportsInvalidResponse) {
     FakeHttpClient http;
     http.SetResponder([](const FakeHttpClient::RequestRecord&) -> std::optional<FakeHttpClient::ScriptedResult> {
         return FakeHttpClient::ScriptedResult{
@@ -486,7 +486,7 @@ TEST(BatchDeleteTests, ResponseMissingASubrequestIsAnInvalidResponse) {
 
 // A retried batch must not replay the sub-requests of the failed attempt: their bearer tokens are re-acquired and the
 // body is rebuilt for every attempt.
-TEST(BatchDeleteTests, RetriedBatchRebuildsSubrequestsWithAFreshToken) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_Retry_RebuildsSubrequestsWithFreshToken) {
     FakeHttpClient http;
     http.SetResponder([](const FakeHttpClient::RequestRecord& record) -> std::optional<FakeHttpClient::ScriptedResult> {
         if (record.Body.find("token-one") != std::string::npos) {
@@ -520,7 +520,7 @@ TEST(BatchDeleteTests, RetriedBatchRebuildsSubrequestsWithAFreshToken) {
     EXPECT_EQ(CountOccurrences(second.Body, "token-one"), 0U);
     EXPECT_EQ(FakeHttpClient::FindHeaderValue(second.Request, "Authorization"), "Bearer token-two");
 }
-TEST(BatchDeleteTests, AppendBatchDeletePartRejectsUrlsWithoutSchemeOrPath) {
+TEST(BatchDeleteTests, AppendBatchDeletePart_UrlWithoutSchemeOrPath_IsRejected) {
     for (const char* url : {"no-scheme/container/blob", "https://account.blob.core.windows.net"}) {
         AVEVA::HttpRequest subrequest;
         subrequest.SetMethod(HttpMethod::Delete);
@@ -557,7 +557,7 @@ void ExpectBatchRejected(const std::string& body, const std::string& contentType
 }
 } // namespace
 
-TEST(AS_R01_BatchStatusLineTests, RejectsTrailingGarbageWrongPrefixAndOutOfRangeCodes) {
+TEST(BatchDeleteTests, BatchStatusLine_TrailingGarbageWrongPrefixOrBadCode_IsRejected) {
     ExpectBatchRejected(OnePart("HTTP/1.1 202junk"));
     ExpectBatchRejected(OnePart("HTTP/1.1 20"));
     ExpectBatchRejected(OnePart("HTTP/1.1 2020 Accepted"));
@@ -567,7 +567,7 @@ TEST(AS_R01_BatchStatusLineTests, RejectsTrailingGarbageWrongPrefixAndOutOfRange
     ExpectBatchRejected(OnePart("HTTP/1.1 +20 Accepted"));
 }
 
-TEST(AS_R02_BatchBoundaryTests, ParsesMediaTypeParametersStrictly) {
+TEST(BatchDeleteTests, BatchBoundary_MediaTypeParameters_AreParsedStrictly) {
     const std::string body = OnePart("HTTP/1.1 202 Accepted");
     const std::vector<std::string> names{"a"};
     const auto parse = [&](const std::string& contentType) {
@@ -587,7 +587,7 @@ TEST(AS_R02_BatchBoundaryTests, ParsesMediaTypeParametersStrictly) {
     ExpectBatchRejected(body, "multipart/mixed; boundary=" + std::string(OverlongBoundaryLength, 'b'));
 }
 
-TEST(AS_R03_BatchClosingDelimiterTests, RequiresALineEndAfterTheClosingDelimiter) {
+TEST(BatchDeleteTests, BatchClosingDelimiter_WithoutLineEnd_IsRejected) {
     ExpectBatchRejected(OnePart("HTTP/1.1 202 Accepted", "--b--garbage"));
     ExpectBatchRejected(OnePart("HTTP/1.1 202 Accepted", "--b--  x\r\n"));
     const std::vector<std::string> names{"a"};
@@ -600,7 +600,7 @@ TEST(AS_R03_BatchClosingDelimiterTests, RequiresALineEndAfterTheClosingDelimiter
     }
 }
 
-TEST(AS_R05_BatchSubrequestHeaderTests, RejectsLineBreaksInSubrequestHeaders) {
+TEST(BatchDeleteTests, BatchSubrequestHeader_LineBreak_IsRejected) {
     for (const auto& [name, value] : std::vector<std::pair<std::string, std::string>>{
              {"x-ms-a", "v\r\nInjected: 1"}, {"x-ms-a", "v\nx"}, {"x-ms-a\r\nb", "v"}, {"", "v"}, {"a:b", "v"}}) {
         AVEVA::HttpRequest subrequest;
@@ -614,7 +614,7 @@ TEST(AS_R05_BatchSubrequestHeaderTests, RejectsLineBreaksInSubrequestHeaders) {
     }
 }
 
-TEST(AS_R12_BatchBoundaryLineTests, ABoundaryLikeLineInsideAPartBodyIsNotASplitPoint) {
+TEST(BatchDeleteTests, BatchBoundaryLine_InsidePartBody_IsNotSplitPoint) {
     const std::vector<std::string> names{"a"};
     const std::string body = "--b\r\nContent-Type: application/http\r\nContent-ID: 0\r\n\r\nHTTP/1.1 404 Not Found\r\n"
                              "x-ms-error-code: BlobNotFound\r\n\r\nnote --b inline and --bb\r\n--b--\r\n";
@@ -627,7 +627,7 @@ TEST(AS_R12_BatchBoundaryLineTests, ABoundaryLikeLineInsideAPartBodyIsNotASplitP
     EXPECT_EQ(items[0].Prior, PriorState::AlreadyAbsent);
 }
 
-TEST(BatchDeleteTests, ABatchRejectedAsAWholeReportsTheServiceErrorOfItsSingleUnnumberedPart) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_WholeBatchRejected_ReportsErrorOfUnnumberedPart) {
     // The documented shape of a batch the service rejects as a whole: the batch itself is answered with 202, and its
     // only part carries no Content-ID and the real error.
     const std::vector<std::string> names{"a", "b"};
@@ -650,11 +650,11 @@ TEST(BatchDeleteTests, ABatchRejectedAsAWholeReportsTheServiceErrorOfItsSingleUn
     EXPECT_EQ(outcome.error().RequestId, "r-batch");
 }
 
-TEST(BatchDeleteTests, AnUnnumberedPartWithASuccessStatusIsStillMalformed) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_UnnumberedPartWithSuccessStatus_IsMalformed) {
     ExpectBatchRejected("--b\r\nContent-Type: application/http\r\n\r\nHTTP/1.1 202 Accepted\r\n\r\n\r\n--b--\r\n");
 }
 
-TEST(BatchDeleteTests, SuccessfulPartsNeedNoHeaderParsingAndFailedPartsKeepTheirErrorDetails) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_MixedParts_FailedPartsKeepErrorDetails) {
     const std::vector<std::string> names{"ok", "gone", "denied"};
     const std::string body =
         "--b\r\nContent-Type: application/http\r\nContent-ID: 0\r\n\r\nHTTP/1.1 202 Accepted\r\nx-ms-request-id: "
@@ -680,7 +680,7 @@ TEST(BatchDeleteTests, SuccessfulPartsNeedNoHeaderParsingAndFailedPartsKeepTheir
     EXPECT_EQ(items[2].Error->RequestId, "r2");
 }
 
-TEST(BatchDeleteTests, SequentialBatchesShareOneAggregateDeadline) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_SequentialBatches_ShareOneAggregateDeadline) {
     FakeHttpClient http;
     DeferBatchResponses(http);
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
@@ -711,7 +711,7 @@ TEST(BatchDeleteTests, SequentialBatchesShareOneAggregateDeadline) {
     EXPECT_EQ(outcome.error().Code, std::make_error_code(std::errc::timed_out));
 }
 
-TEST(BatchDeleteTests, ChildInitiationFailureAfterACompletedChunkCompletesOnceWithTheFailure) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_LateChildInitiationFailure_CompletesOnceWithFailure) {
     FakeHttpClient http;
     DeferBatchResponses(http);
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};
@@ -732,7 +732,7 @@ TEST(BatchDeleteTests, ChildInitiationFailureAfterACompletedChunkCompletesOnceWi
     EXPECT_EQ(http.PendingCount(), 0U);
 }
 
-TEST(BatchDeleteTests, ChildInitiationFailureCancelsAndDrainsTheChunksAlreadyAdmitted) {
+TEST(BatchDeleteTests, DeleteBlobsAsync_ChildInitiationFailure_CancelsAndDrainsAdmittedChunks) {
     FakeHttpClient http;
     DeferBatchResponses(http);
     BlobContainerClient client{http, MakeBlobContainerClientOptions()};

@@ -116,7 +116,7 @@ template <class TCred>
 }
 } // namespace
 
-TEST(CredentialsTests, ClientSecretCredentialPostsClientCredentialsGrant) {
+TEST(CredentialsTests, ClientSecretCredential_Request_PostsClientCredentialsGrant) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(
         Json(AVEVA::HttpStatus::Ok, R"({"token_type":"Bearer","expires_in":3599,"access_token":"tok-1"})"));
@@ -140,7 +140,7 @@ TEST(CredentialsTests, ClientSecretCredentialPostsClientCredentialsGrant) {
               "&scope=https%3A%2F%2Fstorage.azure.com%2F.default%20offline_access");
 }
 
-TEST(CredentialsTests, ClientSecretCredentialAcceptsFloatingPointExpiresIn) {
+TEST(CredentialsTests, ClientSecretCredential_FloatingPointExpiresIn_IsAccepted) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(Json(AVEVA::HttpStatus::Ok, R"({"expires_in":3599.0,"access_token":"tok"})"));
     ClientSecretCredential credential{httpClient, SecretOptions()};
@@ -150,7 +150,7 @@ TEST(CredentialsTests, ClientSecretCredentialAcceptsFloatingPointExpiresIn) {
     EXPECT_GE(result.Token.ExpiresOn, Clock::now() + std::chrono::seconds{3500});
 }
 
-TEST(CredentialsTests, ClientSecretCredentialHonoursAuthorityHost) {
+TEST(CredentialsTests, ClientSecretCredential_AuthorityHost_IsHonoured) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(Json(AVEVA::HttpStatus::Ok, R"({"expires_in":"60","access_token":"tok"})"));
     ClientSecretCredentialOptions options = SecretOptions();
@@ -162,7 +162,7 @@ TEST(CredentialsTests, ClientSecretCredentialHonoursAuthorityHost) {
               "https://login.microsoftonline.us/72f988bf-86f1-41af-91ab-2d7cd011db47/oauth2/v2.0/token");
 }
 
-TEST(CredentialsTests, InvalidConfigurationFailsWithoutSendingARequest) {
+TEST(CredentialsTests, Credentials_InvalidConfiguration_FailsWithoutSendingRequest) {
     FakeHttpClient httpClient;
     const auto expectInvalid = [&](auto& credential, std::vector<std::string> scopes = StorageScope()) {
         EXPECT_EQ(GetToken(httpClient, credential, std::move(scopes)).Error,
@@ -206,7 +206,7 @@ TEST(CredentialsTests, InvalidConfigurationFailsWithoutSendingARequest) {
     EXPECT_TRUE(httpClient.Requests().empty());
 }
 
-TEST(CredentialsTests, TokenEndpointFailuresMapToErrorCodes) {
+TEST(CredentialsTests, TokenEndpoint_Failures_MapToErrorCodes) {
     FakeHttpClient httpClient;
     ClientSecretCredential credential{httpClient, SecretOptions()};
 
@@ -233,7 +233,7 @@ TEST(CredentialsTests, TokenEndpointFailuresMapToErrorCodes) {
     EXPECT_EQ(GetToken(httpClient, credential).Error, transport);
 }
 
-TEST(CredentialsTests, WorkloadIdentityCredentialSendsFederatedTokenAsClientAssertion) {
+TEST(CredentialsTests, WorkloadIdentityCredential_FederatedToken_SentAsClientAssertion) {
     const std::filesystem::path tokenFile = std::filesystem::temp_directory_path() / "azc-federated-token.txt";
     {
         std::ofstream file{tokenFile, std::ios::binary | std::ios::trunc};
@@ -270,7 +270,7 @@ AssertionOptions(std::function<boost::asio::awaitable<AssertionResult>()> provid
     return options;
 }
 
-TEST(CredentialsTests, ClientAssertionCredentialSendsTheProvidedAssertion) {
+TEST(CredentialsTests, ClientAssertionCredential_Assertion_IsSentAsProvided) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(Json(AVEVA::HttpStatus::Ok, R"({"expires_in":3600,"access_token":"ca-token"})"));
     int calls = 0;
@@ -292,7 +292,7 @@ TEST(CredentialsTests, ClientAssertionCredentialSendsTheProvidedAssertion) {
               "&client_assertion=a.b%2Bc&scope=https%3A%2F%2Fstorage.azure.com%2F.default");
 }
 
-TEST(CredentialsTests, ClientAssertionCredentialRequestsAFreshAssertionEachTime) {
+TEST(CredentialsTests, ClientAssertionCredential_EachRequest_RequestsFreshAssertion) {
     FakeHttpClient httpClient;
     httpClient.DefaultResponse() = Json(AVEVA::HttpStatus::Ok, R"({"expires_in":3600,"access_token":"t"})");
     int calls = 0;
@@ -309,7 +309,7 @@ TEST(CredentialsTests, ClientAssertionCredentialRequestsAFreshAssertionEachTime)
               std::string::npos);
 }
 
-TEST(CredentialsTests, ClientAssertionProviderErrorIsPassedThroughWithoutARequest) {
+TEST(CredentialsTests, ClientAssertionCredential_ProviderError_PassesThroughWithoutRequest) {
     FakeHttpClient httpClient;
     const auto providerError = make_error_code(BlobStorageErrorCode::AuthenticationFailed);
     ClientAssertionCredential credential{httpClient,
@@ -321,7 +321,7 @@ TEST(CredentialsTests, ClientAssertionProviderErrorIsPassedThroughWithoutAReques
     EXPECT_EQ(httpClient.Requests().size(), 0U);
 }
 
-TEST(CredentialsTests, ClientAssertionInvalidConfigurationFailsWithoutARequest) {
+TEST(CredentialsTests, ClientAssertionCredential_InvalidConfiguration_FailsWithoutRequest) {
     FakeHttpClient httpClient;
     const auto provider = []() -> boost::asio::awaitable<AssertionResult> { co_return "assertion"; };
     const auto invalid = std::make_error_code(std::errc::invalid_argument);
@@ -346,7 +346,7 @@ TEST(CredentialsTests, ClientAssertionInvalidConfigurationFailsWithoutARequest) 
     badAuthority.AuthorityHost = "http://login.example/";
     EXPECT_THROW((ClientAssertionCredential{httpClient, badAuthority}), std::invalid_argument);
 }
-TEST(CredentialsTests, ManagedIdentityCredentialUsesImds) {
+TEST(CredentialsTests, ManagedIdentityCredential_Default_UsesImds) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(Json(
         AVEVA::HttpStatus::Ok,
@@ -374,7 +374,7 @@ TEST(CredentialsTests, ManagedIdentityCredentialUsesImds) {
                                                  "&msi_res_id=%2Fsubscriptions%2Fs%2Frg%2Fid");
 }
 
-TEST(CredentialsTests, ManagedIdentityCredentialUsesAppServiceEndpointWhenConfigured) {
+TEST(CredentialsTests, ManagedIdentityCredential_AppServiceEndpoint_IsUsedWhenConfigured) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(Json(AVEVA::HttpStatus::Ok, ExpiresOnBody("as", std::chrono::hours{1})));
     ManagedIdentityCredential credential{
@@ -388,7 +388,7 @@ TEST(CredentialsTests, ManagedIdentityCredentialUsesAppServiceEndpointWhenConfig
     EXPECT_EQ(Header(request, "Metadata"), "");
 }
 
-TEST(CredentialsTests, ExpiresInOutOfRangeIsRejectedAndNormalAccepted) {
+TEST(CredentialsTests, ExpiresIn_OutOfRange_IsRejectedAndNormalAccepted) {
     FakeHttpClient httpClient;
     ClientSecretCredential credential{httpClient, SecretOptions()};
     for (const std::string value : {"0", "-1"}) {
@@ -400,7 +400,7 @@ TEST(CredentialsTests, ExpiresInOutOfRangeIsRejectedAndNormalAccepted) {
     EXPECT_FALSE(GetToken(httpClient, credential).Error);
 }
 
-TEST(CredentialsTests, ExpiresInBeyondMaximumIsClampedNotRejected) {
+TEST(CredentialsTests, ExpiresIn_BeyondMaximum_IsClampedNotRejected) {
     FakeHttpClient httpClient;
     ClientSecretCredential credential{httpClient, SecretOptions()};
     for (const std::string value : {"86401", "9223372036854775807"}) {
@@ -411,7 +411,7 @@ TEST(CredentialsTests, ExpiresInBeyondMaximumIsClampedNotRejected) {
     }
 }
 
-TEST(CredentialsTests, ExpiresOnOutOfRangeIsRejectedAndNormalAccepted) {
+TEST(CredentialsTests, ExpiresOn_OutOfRange_IsRejectedAndNormalAccepted) {
     FakeHttpClient httpClient;
     ManagedIdentityCredential credential{httpClient, ManagedIdentityCredentialOptions{}};
     const auto now = std::chrono::duration_cast<std::chrono::seconds>(Clock::now().time_since_epoch()).count();
@@ -427,7 +427,7 @@ TEST(CredentialsTests, ExpiresOnOutOfRangeIsRejectedAndNormalAccepted) {
     EXPECT_GT(valid.Token.ExpiresOn, Clock::now() + std::chrono::minutes{59});
 }
 
-TEST(CredentialsTests, ExpiresOnBeyondMaximumIsClampedNotRejected) {
+TEST(CredentialsTests, ExpiresOn_BeyondMaximum_IsClampedNotRejected) {
     FakeHttpClient httpClient;
     ManagedIdentityCredential credential{httpClient, ManagedIdentityCredentialOptions{}};
     httpClient.EnqueueResponse(
@@ -437,7 +437,7 @@ TEST(CredentialsTests, ExpiresOnBeyondMaximumIsClampedNotRejected) {
     EXPECT_LE(result.Token.ExpiresOn, Clock::now() + std::chrono::days{1});
 }
 
-TEST(CredentialsTests, TransientTokenEndpointFailuresAreRetried) {
+TEST(CredentialsTests, TokenEndpoint_TransientFailures_AreRetried) {
     FakeHttpClient httpClient;
     ClientSecretCredentialOptions options = SecretOptions();
     options.Retry = {.MaxRetries = AVEVA::RetryCount{2U},
@@ -453,7 +453,7 @@ TEST(CredentialsTests, TransientTokenEndpointFailuresAreRetried) {
     EXPECT_EQ(httpClient.RequestCount(), 2U);
 }
 
-TEST(CredentialsTests, BadRequestTokenFailureIsNotRetried) {
+TEST(CredentialsTests, TokenEndpoint_BadRequest_IsNotRetried) {
     FakeHttpClient httpClient;
     ClientSecretCredentialOptions options = SecretOptions();
     options.Retry = {.MaxRetries = AVEVA::RetryCount{3U},
@@ -467,12 +467,12 @@ TEST(CredentialsTests, BadRequestTokenFailureIsNotRetried) {
     EXPECT_EQ(httpClient.RequestCount(), 1U);
 }
 
-TEST(CredentialsTests, TokenEndpointErrorIsNeverFalsy) {
+TEST(CredentialsTests, TokenEndpointError_AnyValue_IsNeverFalsy) {
     EXPECT_TRUE(static_cast<bool>(MakeTokenEndpointError(AVEVA::HttpStatus::NoResponse, "")));
     EXPECT_TRUE(static_cast<bool>(MakeTokenEndpointError(AVEVA::HttpStatus::NoResponse, "invalid_request")));
 }
 
-TEST(CredentialsTests, ManagedIdentityRetriesNotFoundAndGone) {
+TEST(CredentialsTests, ManagedIdentityCredential_NotFoundAndGone_AreRetried) {
     FakeHttpClient httpClient;
     ManagedIdentityCredentialOptions options = ManagedOptions({}, {});
     options.Retry = {.MaxRetries = AVEVA::RetryCount{3U},
@@ -487,7 +487,7 @@ TEST(CredentialsTests, ManagedIdentityRetriesNotFoundAndGone) {
     EXPECT_EQ(httpClient.RequestCount(), 3U);
 }
 
-TEST(CredentialsTests, InvalidAuthorityHostThrowsFromConstructor) {
+TEST(CredentialsTests, Credentials_InvalidAuthorityHost_ThrowsFromConstructor) {
     FakeHttpClient httpClient;
     for (const std::string host :
          {"http://login.microsoftonline.com", "https://login.microsoftonline.com?x=1",
@@ -511,7 +511,7 @@ TEST(CredentialsTests, InvalidAuthorityHostThrowsFromConstructor) {
     }
 }
 
-TEST(CredentialsTests, FederatedTokenFileWhitespaceHandling) {
+TEST(CredentialsTests, FederatedTokenFile_Whitespace_IsHandled) {
     const std::filesystem::path tokenFile = std::filesystem::temp_directory_path() / "azc-federated-ws.txt";
     const auto run = [&](std::string_view content) {
         {
@@ -537,7 +537,7 @@ TEST(CredentialsTests, FederatedTokenFileWhitespaceHandling) {
     std::filesystem::remove(tokenFile);
 }
 
-TEST(CredentialsTests, AllCredentialsRejectErrorStatusesAndLeaveTokenEmpty) {
+TEST(CredentialsTests, Credentials_ErrorStatuses_AreRejectedAndLeaveTokenEmpty) {
     const std::filesystem::path tokenFile = std::filesystem::temp_directory_path() / "azc-federated-status.txt";
     {
         std::ofstream file{tokenFile, std::ios::binary | std::ios::trunc};
@@ -563,7 +563,7 @@ TEST(CredentialsTests, AllCredentialsRejectErrorStatusesAndLeaveTokenEmpty) {
     std::filesystem::remove(tokenFile);
 }
 
-TEST(CredentialsTests, AllCredentialsAreCancelledWhileTheRequestIsInFlight) {
+TEST(CredentialsTests, Credentials_RequestInFlight_CanBeCancelled) {
     const std::filesystem::path tokenFile = std::filesystem::temp_directory_path() / "azc-federated-cancel.txt";
     {
         std::ofstream file{tokenFile, std::ios::binary | std::ios::trunc};
@@ -613,7 +613,7 @@ void SetEnvironmentValue(const char* name, const char* value) {
 }
 } // namespace
 
-TEST(CredentialsTests, ClientSecretOptionsFromEnvironmentReadsTheStandardVariables) {
+TEST(CredentialsTests, ClientSecretOptions_FromEnvironment_ReadsStandardVariables) {
     SetEnvironmentValue("AZURE_TENANT_ID", "tenant-env");
     SetEnvironmentValue("AZURE_CLIENT_ID", "client-env");
     SetEnvironmentValue("AZURE_CLIENT_SECRET", "secret-env");
@@ -648,7 +648,7 @@ namespace {
 }
 } // namespace
 
-TEST(CredentialsTests, AzurePipelinesCredentialExchangesTheOidcTokenAsClientAssertion) {
+TEST(CredentialsTests, AzurePipelinesCredential_OidcToken_ExchangedAsClientAssertion) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(Json(AVEVA::HttpStatus::Ok, R"({"oidcToken":"oidc-jwt"})"));
     httpClient.EnqueueResponse(Json(AVEVA::HttpStatus::Ok, R"({"access_token":"tok","expires_in":3600})"));
@@ -667,7 +667,7 @@ TEST(CredentialsTests, AzurePipelinesCredentialExchangesTheOidcTokenAsClientAsse
     EXPECT_NE(exchangeBody.find("client_assertion=oidc-jwt"), std::string::npos);
 }
 
-TEST(CredentialsTests, AzurePipelinesCredentialAppendsToAnExistingQueryString) {
+TEST(CredentialsTests, AzurePipelinesCredential_ExistingQueryString_IsAppendedTo) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(Json(AVEVA::HttpStatus::Unauthorized, ""));
     auto options = PipelinesOptions();
@@ -681,7 +681,7 @@ TEST(CredentialsTests, AzurePipelinesCredentialAppendsToAnExistingQueryString) {
               "https://pipelines.example/oidc?x=1&api-version=7.1&serviceConnectionId=conn%26id");
 }
 
-TEST(CredentialsTests, AzurePipelinesCredentialRejectsMissingConfigurationWithoutSendingRequests) {
+TEST(CredentialsTests, AzurePipelinesCredential_MissingConfiguration_RejectedWithoutRequests) {
     FakeHttpClient httpClient;
     for (const auto clear :
          {+[](AVEVA::AzureClient::AzurePipelinesCredentialOptions& o) { o.OidcRequestUri.clear(); },
@@ -696,7 +696,7 @@ TEST(CredentialsTests, AzurePipelinesCredentialRejectsMissingConfigurationWithou
     EXPECT_TRUE(httpClient.Requests().empty());
 }
 
-TEST(CredentialsTests, AzurePipelinesCredentialRejectsAnUnsafeOidcRequestUri) {
+TEST(CredentialsTests, AzurePipelinesCredential_UnsafeOidcRequestUri_IsRejected) {
     FakeHttpClient httpClient;
     for (const char* uri : {"http://pipelines.example/oidc", "ftp://pipelines.example/oidc", "https:///oidc",
                             "https://pipelines.example/oidc#fragment", "https://user:pw@pipelines.example/oidc",
@@ -708,7 +708,7 @@ TEST(CredentialsTests, AzurePipelinesCredentialRejectsAnUnsafeOidcRequestUri) {
     EXPECT_TRUE(httpClient.Requests().empty());
 }
 
-TEST(CredentialsTests, AzurePipelinesCredentialRejectsAnUnsafeOidcRequestUriFromTheEnvironment) {
+TEST(CredentialsTests, AzurePipelinesCredential_UnsafeOidcRequestUriFromEnvironment_IsRejected) {
     SetEnvironmentValue("SYSTEM_OIDCREQUESTURI", "http://env.example/oidc");
     FakeHttpClient httpClient;
     auto options = PipelinesOptions();
@@ -717,7 +717,7 @@ TEST(CredentialsTests, AzurePipelinesCredentialRejectsAnUnsafeOidcRequestUriFrom
     SetEnvironmentValue("SYSTEM_OIDCREQUESTURI", "");
 }
 
-TEST(CredentialsTests, AzurePipelinesCredentialDefaultsTheOidcUriFromTheEnvironment) {
+TEST(CredentialsTests, AzurePipelinesCredential_OidcUri_DefaultsFromEnvironment) {
     SetEnvironmentValue("SYSTEM_OIDCREQUESTURI", "https://env.example/oidc");
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(Json(AVEVA::HttpStatus::Unauthorized, ""));
@@ -732,7 +732,7 @@ TEST(CredentialsTests, AzurePipelinesCredentialDefaultsTheOidcUriFromTheEnvironm
     EXPECT_TRUE(httpClient.Requests().front().Request.GetUrl().starts_with("https://env.example/oidc?api-version=7.1"));
 }
 
-TEST(CredentialsTests, AzurePipelinesCredentialMapsOidcFailuresToErrorCodes) {
+TEST(CredentialsTests, AzurePipelinesCredential_OidcFailures_MapToErrorCodes) {
     FakeHttpClient httpClient;
     AzurePipelinesCredential credential{httpClient, PipelinesOptions()};
 
@@ -751,7 +751,7 @@ TEST(CredentialsTests, AzurePipelinesCredentialMapsOidcFailuresToErrorCodes) {
     EXPECT_EQ(httpClient.Requests().size(), 6U);
 }
 
-TEST(CredentialsTests, AzurePipelinesCredentialHonorsRetryAfterOnTheOidcRequest) {
+TEST(CredentialsTests, AzurePipelinesCredential_OidcRetryAfter_IsHonored) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(
         HttpResponse{AVEVA::HttpStatus::TooManyRequests,
@@ -772,7 +772,7 @@ TEST(CredentialsTests, AzurePipelinesCredentialHonorsRetryAfterOnTheOidcRequest)
     EXPECT_EQ(FakeHttpClient::RetryDelays(), (std::vector<std::chrono::milliseconds>{std::chrono::seconds{1}}));
 }
 
-TEST(CredentialsTests, AzurePipelinesCredentialDoesNotRetryNonTransientOidcFailures) {
+TEST(CredentialsTests, AzurePipelinesCredential_NonTransientOidcFailures_AreNotRetried) {
     FakeHttpClient httpClient;
     httpClient.EnqueueResponse(Json(AVEVA::HttpStatus::Unauthorized, ""));
     auto options = PipelinesOptions();
