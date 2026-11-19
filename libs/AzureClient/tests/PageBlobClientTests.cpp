@@ -348,6 +348,31 @@ TEST(PageBlobClientTests, UploadPagesAsync_ReportsUnalignedContentViaCompletion)
     EXPECT_EQ(httpClient.RequestCount(), 0U);
 }
 
+TEST(PageBlobClientTests, UploadPagesAsync_RejectsContentOverFourMiBBeforeSending) {
+    FakeHttpClient httpClient;
+    PageBlobClient client{httpClient, BuildOptions()};
+
+    const auto result = RunAwaitable(
+        httpClient,
+        client.UploadPagesAsync(PageOffset{0U}, HttpBody{std::string(AVEVA::AzureClient::MaxUploadPagesBytes +
+                                                                         PageBlobPageSize, 'x')}));
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().Code, std::make_error_code(std::errc::invalid_argument));
+    EXPECT_EQ(httpClient.RequestCount(), 0U);
+}
+
+TEST(PageBlobClientTests, UploadPagesAsync_AcceptsExactlyFourMiB) {
+    FakeHttpClient httpClient;
+    PageBlobClient client{httpClient, BuildOptions()};
+
+    const auto result = RunAwaitable(
+        httpClient,
+        client.UploadPagesAsync(PageOffset{0U}, HttpBody{std::string(AVEVA::AzureClient::MaxUploadPagesBytes, 'x')}));
+    EXPECT_EQ(httpClient.RequestCount(), 1U);
+    EXPECT_NE(result.has_value() ? std::error_code{} : result.error().Code,
+              std::make_error_code(std::errc::invalid_argument));
+}
+
 TEST(PageBlobClientTests, UploadPagesAsync_ReportsZeroLengthContentViaCompletion) {
     FakeHttpClient httpClient;
     PageBlobClient client{httpClient, BuildOptions()};

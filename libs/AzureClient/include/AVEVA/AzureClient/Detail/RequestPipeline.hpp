@@ -497,6 +497,16 @@ template <HttpClientLike THttp, TokenCredentialLike TCred, class TRebuild> class
             return std::nullopt;
         }
 
+        // The same holds for a 5xx/408 answer: 500, 502, 504 and 408 do not say whether the service applied the
+        // request (a gateway or the server may have timed out after committing it). Only 503 (ServerBusy) and 429
+        // state that the request was rejected before being processed, so those stay retriable for unsafe requests.
+        const bool ambiguousResponse = !error && (response.GetStatus().Class() == HttpStatusClass::ServerError ||
+                                                  response.GetStatus() == HttpStatus::RequestTimeout) &&
+                                       response.GetStatus() != HttpStatus::ServiceUnavailable;
+        if (ambiguousResponse && m_replaySafety == ReplaySafety::Unsafe) {
+            return std::nullopt;
+        }
+
         // Remembered for the rebuild hook: only a replay that follows an unknown outcome can see its own earlier
         // effect (a token-refresh repeat after a 401 cannot).
         if (error ? DeliveryCertaintyOfTransportError(error) == DeliveryCertainty::Ambiguous

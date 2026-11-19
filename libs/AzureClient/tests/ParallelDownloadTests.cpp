@@ -835,6 +835,23 @@ TEST(A3_DownloadIntoSpanTests, FullAndPartialRangesAreWrittenByteForByte) {
     }
 }
 
+TEST(A3_DownloadIntoSpanTests, RangedDownloadKeepsTheBlobSizeAsContentLength) {
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(18);
+    httpClient.EnqueueResponse(RangeResponse(4, content.substr(4, 7), content.size()));
+    PageBlobClient client{httpClient, BuildOptions()};
+
+    std::string destination(7, '\0');
+    AVEVA::AzureClient::DownloadBlobOptions options;
+    options.Range = AVEVA::AzureClient::Models::BlobByteRange{.Offset = 4, .Length = 7};
+    const auto result = RunAwaitable(httpClient, client.DownloadToAsync(std::span<char>(destination), options));
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->Value().BytesWritten, 7U);
+    // ContentLength is the size of the blob (from the Content-Range total), not the bytes written for the range.
+    EXPECT_EQ(result->Value().Properties.ContentLength, 18U);
+}
+
 TEST(A3_DownloadIntoSpanTests, BlobShorterThanTheRequestedRangeReportsTheBytesWritten) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(18);

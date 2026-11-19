@@ -699,7 +699,6 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
             return std::unexpected(std::move(*m_failure));
         }
         m_summary.BytesWritten = m_written;
-        m_summary.Properties.ContentLength = m_written;
         if (m_ranging == Ranging::Ranged) {
             m_summary.ContentRange = Models::BlobByteRange{.Offset = m_begin, .Length = m_written};
         }

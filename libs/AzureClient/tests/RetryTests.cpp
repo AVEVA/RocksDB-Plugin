@@ -185,7 +185,27 @@ void StartUploadAsync(FakeHttpClient& httpClient, PageBlobClient& client, const 
 } // namespace
 
 TEST(RetryTests, RetriesEveryTransientStatus) {
+    // The upload is a plain overwrite, so it is safe to replay after any transient status.
     for (const unsigned status : {408U, 429U, 500U, 502U, 503U, 504U}) {
+        FakeHttpClient httpClient;
+        httpClient.EnqueueResponse(HttpResponse{HttpStatusCode{status}, {}, ""});
+        httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::Created, {}, ""});
+        PageBlobClient client{httpClient, MakeRetryOptions(RetryCount{1U})};
+
+        UploadState state;
+        StartUploadAsync(httpClient, client, std::string(OnePage, 'p'), state);
+
+        ASSERT_EQ(PollUntil(httpClient, [&] { return state.Done; }), WaitOutcome::Done) << "status " << status;
+        EXPECT_EQ(httpClient.RequestCount(), 2U) << "status " << status;
+        EXPECT_TRUE(state.Succeeded) << "status " << status;
+    }
+}
+
+TEST(RetryTests, UnsafeRequestIsRetriedOnlyAfterStatusesThatSayItWasNotProcessed) {
+    // A delete cannot be replayed safely when the service may have applied it (a replay answers 404), so 500, 502, 504
+    // and 408 are surfaced; 429 and 503 mean the request was rejected before being processed.
+    for (const unsigned status : {408U, 429U, 500U, 502U, 503U, 504U}) {
+        const bool expectReplay = status == 429U || status == 503U;
         FakeHttpClient httpClient;
         httpClient.EnqueueResponse(HttpResponse{HttpStatusCode{status}, {}, ""});
         httpClient.EnqueueResponse(HttpResponse{::AVEVA::HttpStatus::Accepted, {}, ""});
@@ -196,8 +216,8 @@ TEST(RetryTests, RetriesEveryTransientStatus) {
 
         ASSERT_EQ(PollUntil(httpClient, [&] { return observed.has_value(); }), WaitOutcome::Done)
             << "status " << status;
-        EXPECT_EQ(httpClient.RequestCount(), 2U) << "status " << status;
-        EXPECT_TRUE(ValueOrFail(observed).has_value()) << "status " << status;
+        EXPECT_EQ(httpClient.RequestCount(), expectReplay ? 2U : 1U) << "status " << status;
+        EXPECT_EQ(ValueOrFail(observed).has_value(), expectReplay) << "status " << status;
     }
 }
 

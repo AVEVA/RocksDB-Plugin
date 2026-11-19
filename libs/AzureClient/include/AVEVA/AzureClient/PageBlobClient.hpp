@@ -37,6 +37,9 @@ namespace AVEVA::AzureClient {
 /// <summary>Largest range one Put Page From URL request can copy.</summary>
 inline constexpr std::uint64_t MaxPagesFromUrlBytes = std::uint64_t{4} * 1024U * 1024U;
 
+/// <summary>Largest range one Put Page request can write.</summary>
+inline constexpr std::uint64_t MaxUploadPagesBytes = std::uint64_t{4} * 1024U * 1024U;
+
 namespace Private {
 /// <summary>The value of the x-ms-blob-type header that makes Put Blob create a page blob.</summary>
 constexpr std::string_view PageBlobTypeValue = "PageBlob";
@@ -155,7 +158,8 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     /// from a span and its owner to send them without a copy.
     /// </summary>
     /// <param name="offset">The first byte to write.</param>
-    /// <param name="content">The bytes to write; its size must be a multiple of PageBlobPageSize.</param>
+    /// <param name="content">The bytes to write; its size must be a multiple of PageBlobPageSize and at most
+    /// MaxUploadPagesBytes (4 MiB).</param>
     /// <param name="options">The request conditions of the write.</param>
     /// <param name="requestOptions">Per-request options; the client's defaults apply when empty.</param>
     /// <returns>The ETag and last-modified time after the write, or the error that failed the request.</returns>
@@ -320,6 +324,9 @@ class BasicPageBlobClient : public BasicBlobClient<THttp, TCred> {
     /// <returns>The request, or the validation message when the content size is misaligned or out of range.</returns>
     [[nodiscard]] Prepared BuildUploadPages(PageOffset offset, std::uint64_t contentSize,
                                             const UploadPagesOptions& options) const {
+        if (contentSize > MaxUploadPagesBytes) {
+            return std::unexpected(std::string("content size must not exceed 4 MiB."));
+        }
         if (auto message = Private::ValidatePageAligned(contentSize, "content size")) {
             return std::unexpected(std::move(*message));
         }
