@@ -92,13 +92,13 @@ $exe = ".\build\WindowsRelease\tools\db_bench\RelWithDebInfo\db_bench.exe"
 & $exe `
     --benchmarks=fillseq,readrandom `
     --num=10000 `
-    --compression_type=zlib `
+    --compression_type=lz4 --block_size=16384 `
     --fs_uri="azblobfs$($env:AVEVA_DB_BENCH_CONTAINER)" `
     --db="$($env:AZURE_STORAGE_ACCOUNT_NAME)+$($env:AVEVA_DB_BENCH_CONTAINER)/bench-db"
 ```
 
-Always add `--compression_type=zlib`. This build enables only the `zlib`
-vcpkg feature for `rocksdb` (see the root `vcpkg.json`). This build does not
+Always add `--compression_type=lz4`. The `db-bench` vcpkg feature builds
+`rocksdb` with `lz4` (see the root `vcpkg.json`). This build does not
 link the `snappy` compression that `db_bench` uses by default. Without this
 flag, `db_bench` exits with the error `Compression type Snappy is not linked
 with the binary`.
@@ -123,7 +123,7 @@ Do not read the console output by hand to check this line. Capture stderr
 and search it instead.
 
 ```powershell
-$out = & $exe --benchmarks=fillseq --num=10 --compression_type=zlib `
+$out = & $exe --benchmarks=fillseq --num=10 --compression_type=lz4 --block_size=16384 `
     --fs_uri="azblobfs$($env:AVEVA_DB_BENCH_CONTAINER)" `
     --db="$($env:AZURE_STORAGE_ACCOUNT_NAME)+$($env:AVEVA_DB_BENCH_CONTAINER)/bench-db" 2>&1
 # Search the captured output for the registration message.
@@ -156,7 +156,7 @@ Run `fillseq`. Then reopen the same `--db` path with `readrandom`, in a
 keys only if it downloads them back from Azure.
 
 ```powershell
-& $exe --benchmarks=readrandom --num=10000 --use_existing_db=1 --compression_type=zlib `
+& $exe --benchmarks=readrandom --num=10000 --use_existing_db=1 --compression_type=lz4 --block_size=16384 `
     --fs_uri="azblobfs$($env:AVEVA_DB_BENCH_CONTAINER)" `
     --db="$($env:AZURE_STORAGE_ACCOUNT_NAME)+$($env:AVEVA_DB_BENCH_CONTAINER)/bench-db"
 ```
@@ -168,7 +168,7 @@ Add these flags to get latency percentiles and RocksDB's internal counters.
 
 ```powershell
 & $exe --benchmarks=fillrandom,readrandom --num=50000 --value_size=1024 `
-    --compression_type=zlib --statistics=1 --histogram=1 `
+    --compression_type=lz4 --block_size=16384 --statistics=1 --histogram=1 `
     --fs_uri="azblobfs$($env:AVEVA_DB_BENCH_CONTAINER)" `
     --db="$($env:AZURE_STORAGE_ACCOUNT_NAME)+$($env:AVEVA_DB_BENCH_CONTAINER)/bench-db" `
     *>&1 | Tee-Object -FilePath C:\temp\dbbench_output.txt
@@ -219,6 +219,45 @@ Check these `--statistics=1` counters:
   use that code path. For example, a short `fillseq`-only run shows no
   compaction stats. This result is not an error.
 
+## Custom Scan + MultiGet
+
+Stock db_bench has no benchmark that scans and then does a MultiGet. This
+wrapper adds one to imitate a query that reads a range and then looks up keys.
+
+Turn it on with `--aveva_scan_before_multiread=N`, plus
+`--benchmarks=multireadrandom --multiread_batched=0 --async_io=0`
+(for example `--batch_size=2000`). Before each MultiGet, the tool scans up
+to `N` records. If the flag is left out or set to 0, it runs a normal MultiGet with no scan.
+
+- The scan starts at the first key of the random batch and stops after `N`
+  records or at the end of the database. It then looks up the original
+  random keys.
+- Only the normal Open is supported. The tool exits with an error if the flag
+  is set but the scan never ran.
+- This is a rough imitation, not a real application query. The scanned records and
+  the looked-up keys are not linked the way an index and its nodes would be.
+
+When the run ends, the tool prints a `SCAN_THEN_MULTIGET` line with the counts
+of queries, scanned records and bytes, and keys fetched and found. db_bench
+counts each fetched key as one operation, and its elapsed time includes the
+scans. To get queries per second, divide the query count by the run time. Don't
+compare this rate to plain `multireadrandom`, which has no scans.
+
+## Recommended settings and logging
+
+16 KiB blocks and LZ4 compression. The wrapper does not set
+these for you; it keeps upstream db_bench's defaults. To use them, pass
+`--block_size=16384 --compression_type=lz4` yourself (the `db-bench` vcpkg
+feature builds RocksDB with LZ4). These settings do not change SST files that
+already exist in a reused database.
+
+Set the plugin's log level with `--aveva_log_level`
+(`trace|debug|info|warning|error|fatal`, default `info`). Debug logging slows
+down write-heavy runs.
+
+`--aveva_log_level` and `--aveva_scan_before_multiread` only exist in this
+wrapper. They are gflags, so they also work in a `--flagfile`.
+
 ## Where to look for performance improvements
 
 Compare an Azure-backed run against an equivalent local-disk run with the
@@ -227,11 +266,11 @@ same flags.
 ```powershell
 # Baseline: local disk.
 & $exe --benchmarks=fillrandom,readrandom --num=200000 --value_size=1024 `
-    --compression_type=zlib --statistics=1 --histogram=1 --db=C:\temp\baseline
+    --compression_type=lz4 --block_size=16384 --statistics=1 --histogram=1 --db=C:\temp\baseline
 
 # Plugin: Azure-backed.
 & $exe --benchmarks=fillrandom,readrandom --num=200000 --value_size=1024 `
-    --compression_type=zlib --statistics=1 --histogram=1 `
+    --compression_type=lz4 --block_size=16384 --statistics=1 --histogram=1 `
     --fs_uri="azblobfs$($env:AVEVA_DB_BENCH_CONTAINER)" `
     --db="$($env:AZURE_STORAGE_ACCOUNT_NAME)+$($env:AVEVA_DB_BENCH_CONTAINER)/bench-db"
 ```

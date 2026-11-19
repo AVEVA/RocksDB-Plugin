@@ -3,14 +3,34 @@
 find_package(gflags CONFIG REQUIRED)
 find_package(RocksDB CONFIG REQUIRED)
 
+add_library(aveva-rocksdb-plugin-db-bench-scan STATIC
+    ScanThenMultiGet.cpp
+    ScanThenMultiGet.hpp
+)
+add_library(aveva::rocksdb-plugin-db-bench-scan ALIAS aveva-rocksdb-plugin-db-bench-scan)
+target_compile_features(aveva-rocksdb-plugin-db-bench-scan PUBLIC cxx_std_23)
+target_include_directories(aveva-rocksdb-plugin-db-bench-scan PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(aveva-rocksdb-plugin-db-bench-scan PUBLIC RocksDB::rocksdb RocksDB::db_bench_tool)
+
 add_executable(aveva_db_bench BenchmarkRunner.cpp)
 target_compile_features(aveva_db_bench PRIVATE cxx_std_23)
 target_link_libraries(aveva_db_bench PRIVATE
+    aveva::rocksdb-plugin-db-bench-scan
     aveva::rocksdb-plugin-azure
     RocksDB::rocksdb
     RocksDB::db_bench_tool
+    gflags::gflags
 )
 
 # Match the RocksDB executable naming so users familiar with upstream
 # db_bench can invoke this wrapper the same way.
 set_target_properties(aveva_db_bench PROPERTIES OUTPUT_NAME "db_bench")
+
+if(AVEVA_ROCKSDB_TESTS)
+    find_package(GTest CONFIG REQUIRED)
+    add_executable(aveva_db_bench_tests ScanThenMultiGetTests.cpp)
+    target_compile_features(aveva_db_bench_tests PRIVATE cxx_std_23)
+    target_link_libraries(aveva_db_bench_tests PRIVATE GTest::gtest_main aveva::rocksdb-plugin-db-bench-scan)
+    include(GoogleTest)
+    gtest_discover_tests(aveva_db_bench_tests)
+endif()
