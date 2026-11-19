@@ -9,7 +9,7 @@ This is the **AVEVA RocksDB Plugin** — a C++ library providing AVEVA-specific 
 | Path | Purpose |
 |------|---------|
 | `src/Azure/` | Azure Page Blob Filesystem plugin (blob storage integration, file read/write, directory ops, error translation) |
-| `src/Core/` | Filesystem abstractions: local filesystem, compressed secondary cache, file cache with LRU index, utilities |
+| `src/Core/` | Filesystem abstractions: local filesystem, file cache with LRU index, utilities |
 | `include/AVEVA/RocksDB/Plugin/` | Public C++ headers |
 | `tests/` | C++ test suites |
 | `infrastructure/` | Build and CI infrastructure |
