@@ -114,10 +114,10 @@ target_link_libraries(aveva-azure-client
     PUBLIC
         aveva::http-client
         Boost::asio
+        Boost::url
         Microsoft.GSL::GSL
     PRIVATE
         Boost::json
-        Boost::url
         OpenSSL::Crypto
         Boost::uuid
         LibXml2::LibXml2
