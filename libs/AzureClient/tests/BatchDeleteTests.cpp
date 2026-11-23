@@ -295,6 +295,27 @@ TEST(BatchDeleteTests, DeleteBlobsAsync_TransportFailure_CompletesWithError) {
     EXPECT_EQ(outcome.error().Code, std::errc::connection_reset);
 }
 
+// The batch is a POST, but its deletes are not safe to repeat when the first attempt's outcome is unknown.
+TEST(BatchDeleteTests, DeleteBlobsAsync_AmbiguousFailure_IsNotRetried) {
+    FakeHttpClient http;
+    http.DefaultResponse() = HttpResponse{AVEVA::HttpStatus::InternalServerError, {}, ""};
+    http.EnqueueResponse(HttpResponse{}, std::make_error_code(std::errc::connection_reset));
+    auto options = MakeBlobContainerClientOptions();
+    options.Retry.MaxRetries = AVEVA::RetryCount{3U};
+    options.Retry.InitialDelay = std::chrono::milliseconds{0};
+    BlobContainerClient client{http, options};
+
+    const BatchOutcome reset = DeleteAll(http, client, {"a"});
+
+    ASSERT_FALSE(reset.has_value());
+    EXPECT_EQ(http.RequestCount(), 1U);
+
+    const BatchOutcome serverError = DeleteAll(http, client, {"a"});
+
+    ASSERT_FALSE(serverError.has_value());
+    EXPECT_EQ(http.RequestCount(), 2U);
+}
+
 TEST(BatchDeleteTests, DeleteBlobsAsync_FailedChunk_StopsLaterChunksAndReportsFirstFailure) {
     FakeHttpClient http;
     http.DefaultResponse() =

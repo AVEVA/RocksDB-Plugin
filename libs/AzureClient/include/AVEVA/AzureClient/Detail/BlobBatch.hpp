@@ -255,13 +255,16 @@ template <HttpClientLike THttp, TokenCredentialLike TCred> class BatchDeleteRun 
         }
 
         // The bearer token for each attempt comes from the pipeline's rebuild hook, so a retry never replays stale
-        // sub-request dates, signatures or tokens.
+        // sub-request dates, signatures or tokens. The batch is a POST, but the deletes inside it are not safe to
+        // repeat when the first attempt's outcome is unknown: a lost response may hide deletes that were applied,
+        // and a replay could remove a blob recreated under the same name.
         std::vector<std::string> urls;
         HttpResult sent = co_await SendAuthorizedRequest(
             *m_httpClient, *m_target, std::move(request), std::move(chunkOptions),
             [&](HttpRequest& attempt, std::string_view token) {
                 attempt.SetBody(AVEVA::HttpBody{BuildChunkBody(begin, end, boundary, token, urls)});
-            });
+            },
+            ReplaySafety::NeverReplay);
 
         const std::span<const std::string> names = std::span{m_names}.subspan(begin, end - begin);
         auto outcome = ParseOutcome<std::expected<std::vector<Models::DeleteBlobItemResult>, BlobStorageError>>(

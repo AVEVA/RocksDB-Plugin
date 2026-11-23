@@ -36,8 +36,12 @@ enum class EmptyValue : std::uint8_t { Reject, Allow };
 /// <summary>Whether a client has a credential of some kind to authorize with.</summary>
 enum class CredentialPresence : std::uint8_t { Absent, Present };
 
-/// <summary>Whether a request may be sent again after a failure that leaves its outcome unknown.</summary>
-enum class ReplaySafety : std::uint8_t { Unsafe, Safe };
+/// <summary>
+/// Whether a request may be sent again after a failure that leaves its outcome unknown. <c>Unsafe</c> lets the
+/// request's own method and headers decide; <c>Safe</c> allows the replay; <c>NeverReplay</c> forbids it even when
+/// the request looks repeatable (a batch is a POST, but the deletes inside it are not repeatable).
+/// </summary>
+enum class ReplaySafety : std::uint8_t { Unsafe, Safe, NeverReplay };
 
 /// <summary>Whether an attempt follows one whose outcome is unknown.</summary>
 enum class AttemptKind : std::uint8_t { Initial, AfterAmbiguousFailure };
