@@ -15,29 +15,23 @@
 
 namespace AVEVA::RocksDB::Plugin::Core {
 /// <summary>
-/// RocksDB secondary cache backed by CacheLib's flash engine (Navy BlockCache)
-/// without a CacheLib DRAM tier. Designed for the classic
-/// <c>LRUCacheOptions::secondary_cache</c> integration:
-/// <list type="bullet">
-/// <item>Entries stay on SSD after a hit (<c>SupportForceErase()</c> is false, <c>kept_in_sec_cache</c> is true),
-/// so RocksDB never writes the same block to SSD twice.</item>
-/// <item>Once full, the oldest region is evicted to admit new entries.</item>
-/// <item>The cache records no RocksDB statistics; the adapter records SECONDARY_CACHE_* ticks.</item>
-/// <item>Contents do not survive a restart; the cache file is reset on construction.</item>
-/// </list>
-/// Only available when built with <c>AVEVA_ROCKSDB_WITH_CACHELIB</c> (Linux).
+/// RocksDB secondary cache backed by CacheLib's SSD engine (Navy BlockCache)
 /// </summary>
-class CacheLibSecondaryCache final : public rocksdb::SecondaryCache {
+/// <remarks>
+/// - Reading a block back from the SSD does not remove it. Entries are only removed when the cache is full.
+/// - This cache does not record RocksDB statistics. RocksDB's wrapper around it records the
+/// <c>SECONDARY_CACHE_*</c> counters instead.
+/// </remarks>
+class CacheLibSecondaryCache : public rocksdb::SecondaryCache {
   public:
     /// <summary>Per-entry header: CompressionType and CacheTier bytes.</summary>
     static constexpr size_t kEntryHeaderSize = 2;
 
     /// <summary>Creates the cache.</summary>
-    /// <exception cref="std::invalid_argument">Invalid options.</exception>
-    /// <exception cref="std::runtime_error">The cache file could not be created.</exception>
     explicit CacheLibSecondaryCache(const SecondaryCacheOptions& options);
 
     ~CacheLibSecondaryCache() override;
+
     CacheLibSecondaryCache(const CacheLibSecondaryCache&) = delete;
     CacheLibSecondaryCache& operator=(const CacheLibSecondaryCache&) = delete;
     CacheLibSecondaryCache(CacheLibSecondaryCache&&) = delete;
@@ -66,7 +60,7 @@ class CacheLibSecondaryCache final : public rocksdb::SecondaryCache {
 
     void WaitAll(std::vector<rocksdb::SecondaryCacheResultHandle*> handles) noexcept override;
 
-    /// <summary>Not supported: the cache file size is fixed at construction.</summary>
+    /// <summary>Not supported: the cache file size is fixed at construction and can't be resized at runtime.</summary>
     rocksdb::Status SetCapacity(size_t capacity) noexcept override;
 
     /// <summary>Returns the usable size of the cache file.</summary>
@@ -79,9 +73,6 @@ class CacheLibSecondaryCache final : public rocksdb::SecondaryCache {
     rocksdb::Status Inflate(size_t increase) noexcept override;
 
     std::string GetPrintableOptions() const override;
-
-    /// <summary>Approximate number of bytes currently occupied on SSD.</summary>
-    rocksdb::Status GetUsage(size_t& usage) const noexcept;
 
     /// <summary>Visits every CacheLib (Navy) counter, e.g. "navy_bc_inserts".</summary>
     void VisitCounters(const std::function<void(std::string_view name, double value)>& visitor) const;

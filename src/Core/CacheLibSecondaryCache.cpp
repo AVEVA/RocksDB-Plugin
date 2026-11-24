@@ -338,8 +338,9 @@ class CacheLibSecondaryCache::Impl {
                                                                 rocksdb::Cache::CreateContext* createContext, bool wait,
                                                                 bool& keptInSecCache) noexcept {
         // Reports whether the entry is still in this cache after the lookup. It stays false on a miss and is
-        // set to true on a hit, because hits never remove the entry. That lets RocksDB skip re-inserting the
-        // block when the primary cache evicts it again.
+        // set to true on a synchronous hit, because hits never remove the entry. An asynchronous lookup sets it
+        // up front, before the outcome is known. That is harmless: RocksDB only reads it for a non-null result.
+        // It lets RocksDB skip re-inserting the block when the primary cache evicts it again.
         keptInSecCache = false;
         try {
             if (!helper || !helper->IsSecondaryCacheCompatible() || key.size() > kMaxKeySize) {
@@ -393,16 +394,6 @@ class CacheLibSecondaryCache::Impl {
     }
 
     size_t GetCapacity() const noexcept { return m_navy->getUsableSize(); }
-
-    size_t GetUsage() const {
-        double used = 0;
-        m_navy->getCounters(navy::CounterVisitor{[&used](folly::StringPiece name, double value) {
-            if (name == "navy_bc_used_size_bytes") {
-                used = value;
-            }
-        }});
-        return static_cast<size_t>(used);
-    }
 
     void VisitCounters(const std::function<void(std::string_view, double)>& visitor) const {
         m_navy->getCounters(navy::CounterVisitor{[&visitor](folly::StringPiece name, double value) {
@@ -529,15 +520,6 @@ rocksdb::Status CacheLibSecondaryCache::Inflate(size_t /*increase*/) noexcept {
 }
 
 std::string CacheLibSecondaryCache::GetPrintableOptions() const { return m_impl->PrintableOptions(); }
-
-rocksdb::Status CacheLibSecondaryCache::GetUsage(size_t& usage) const noexcept {
-    try {
-        usage = m_impl->GetUsage();
-        return rocksdb::Status::OK();
-    } catch (...) {
-        return CurrentExceptionToStatus();
-    }
-}
 
 void CacheLibSecondaryCache::VisitCounters(
     const std::function<void(std::string_view name, double value)>& visitor) const {
