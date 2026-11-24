@@ -4,6 +4,10 @@ This project contains AVEVA's plugins for the [RocksDB](https://rocksdb.org/) da
 
 ## Plugin List
 
+Plugins are compiled with RocksDB and can be optionally enabled at runtime. To learn more about RocksDB
+plugins, please check out RocksDB's documentation on [building plugins](https://github.com/facebook/rocksdb/blob/main/plugin/README.md)
+and the list of [known plugins](https://github.com/facebook/rocksdb/blob/main/PLUGINS.md) that are being developed. Below is the list of plugins that exist in this repository and are actively being developed and maintained by AVEVA.
+
 ### [Azure Page Blob Filesystem](src/AVEVA/RocksDB/Plugin/Azure)
 
 This plugin uses the [Azure SDK for C++](https://github.com/Azure/azure-sdk-for-cpp) for interacting with page blobs
@@ -95,13 +99,17 @@ Before using the AVEVA RocksDB Azure Plugin, ensure you have:
 
 For detailed configuration examples and advanced usage patterns, see the [Azure Plugin Documentation](src/AVEVA/RocksDB/Plugin/Azure/README.md).
 
-### SSD secondary cache
+### Secondary cache
 
-On Linux x64, `CacheLibSecondaryCache` uses CacheLib's Navy BlockCache to retain
-blocks evicted from RocksDB's primary cache. It has no CacheLib DRAM tier, supports
-region FIFO/LRU eviction, and keeps entries after cache hits. The cache file is
-reset on construction; restart persistence and runtime capacity resizing are not
-supported.
+On Linux x64, CacheLib's Navy BlockCache can be used as a secondary cache (`CacheLibSecondaryCache`).
+Blocks evicted from RocksDB's primary cache can be stored in the secondary cache, adding another layer before hitting the
+file cache or an expensive Azure read. It uses only CacheLib's SSD engine (Navy), with no CacheLib memory tier, because
+RocksDB's block cache already serves as the in-memory tier. Supports region FIFO (default) or LRU eviction.
+
+#### Usage
+Set `AVEVA_ROCKSDB_WITH_CACHELIB=ON`, guarding its use with `#if defined(AVEVA_ROCKSDB_WITH_CACHELIB)`.
+The constructor throws `std::invalid_argument` on invalid options. Since CacheLib is only supported on linux, 
+there is no fallback secondary cache option for Windows.
 
 ```cpp
 #include <AVEVA/RocksDB/Plugin/Core/CacheLibSecondaryCache.hpp>
@@ -118,20 +126,8 @@ primary.secondary_cache = std::make_shared<CacheLibSecondaryCache>(secondary);
 table_options.block_cache = primary.MakeSharedCache();
 ```
 
-`CacheLibSecondaryCache` only exists in builds with `AVEVA_ROCKSDB_WITH_CACHELIB=ON` (Linux x64);
-guard its use with `#if defined(AVEVA_ROCKSDB_WITH_CACHELIB)`. The constructor throws
-`std::invalid_argument` on invalid options. There is no compressed cache fallback.
-
-Default request-ordering bookkeeping is approximately 4.5 MiB on Linux x64
-(`72 * 2^16` bytes), plus 8 MiB of region buffers (`2 * cleanRegions * regionSizeBytes`).
-The index, thread stacks and pending inserts consume additional memory; the 32 MiB
-parcel limit bounds queued insert payloads, not total RAM or an upfront allocation.
-See [SecondaryCacheOptions.hpp](include/AVEVA/RocksDB/Plugin/Core/SecondaryCacheOptions.hpp)
-and the [Navy overlay port](infrastructure/vcpkg/ports/cachelib-navy/README.md).
-
-Plugins are compiled with RocksDB and can be optionally enabled at runtime. To learn more about RocksDB
-plugins, please check out RocksDB's documentation on [building plugins](https://github.com/facebook/rocksdb/blob/main/plugin/README.md)
-and the list of [known plugins](https://github.com/facebook/rocksdb/blob/main/PLUGINS.md) that are being developed. Below is the list of plugins that exist in this repository and are actively being developed and maintained by AVEVA.
+Memory use is small, but it grows with the number of cached entries. See [SecondaryCacheOptions.hpp](include/AVEVA/RocksDB/Plugin/Core/SecondaryCacheOptions.hpp)
+for tuning and the [Navy overlay port](infrastructure/vcpkg/ports/cachelib-navy/README.md#memory-use) for a breakdown.
 
 ## Building
 
