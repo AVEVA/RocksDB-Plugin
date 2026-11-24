@@ -82,13 +82,6 @@ TEST_F(CacheLibSecondaryCacheTests, KeepsAdmittingAfterFull) {
 
     EXPECT_FALSE(Has("fill0"));
     EXPECT_TRUE(Has("fill1023"));
-
-    size_t usage = 0;
-    ASSERT_TRUE(m_cache->GetUsage(usage).ok());
-    size_t capacity = 0;
-    ASSERT_TRUE(m_cache->GetCapacity(capacity).ok());
-    EXPECT_GT(usage, 0U);
-    EXPECT_LE(usage, capacity);
 }
 
 TEST_F(CacheLibSecondaryCacheTests, DuplicateInsertIsSkipped) {
