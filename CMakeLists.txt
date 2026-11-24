@@ -32,6 +32,17 @@ if(AVEVA_ROCKSDB_WITH_CACHELIB AND NOT _aveva_linux_x64)
 endif()
 list(APPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/infrastructure/cmake")
 
+# azure-storage-blobs-cpp pulls in nanoarrow, whose exported target links a bare "flatccrt". vcpkg's flatcc ships no
+# CMake config, so on Linux the linker gets no -L path and fails with "cannot find -lflatccrt". Defining the target
+# here makes CMake link the vcpkg-installed library by full path. Windows resolves it without help.
+if(UNIX AND NOT TARGET flatccrt)
+    find_library(AVEVA_FLATCCRT_LIBRARY NAMES flatccrt flatccrt_d)
+    if(AVEVA_FLATCCRT_LIBRARY)
+        add_library(flatccrt STATIC IMPORTED GLOBAL)
+        set_target_properties(flatccrt PROPERTIES IMPORTED_LOCATION "${AVEVA_FLATCCRT_LIBRARY}")
+    endif()
+endif()
+
 # Sanitizers instrument the plugin and both vendored libraries (not vcpkg dependencies). Values: "address",
 # "undefined", "address;undefined" or "thread" (thread cannot be combined with address).
 set(AVEVA_ROCKSDB_SANITIZER "" CACHE STRING "Sanitizers to build the plugin and in-tree libraries with")
