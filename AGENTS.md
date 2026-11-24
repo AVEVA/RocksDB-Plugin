@@ -9,10 +9,10 @@ This is the **AVEVA RocksDB Plugin** — a C++ library providing AVEVA-specific 
 | Path | Purpose |
 |------|---------|
 | `src/Azure/` | Azure Page Blob Filesystem plugin (blob storage integration, file read/write, directory ops, error translation) |
-| `src/Core/` | Filesystem abstractions: local filesystem, file cache with LRU index, utilities |
+| `src/Core/` | Filesystem abstractions: local filesystem, CacheLib secondary cache (Linux x64), file cache with LRU index, utilities |
 | `include/AVEVA/RocksDB/Plugin/` | Public C++ headers |
 | `tests/` | C++ test suites |
-| `infrastructure/` | Build and CI infrastructure |
+| `infrastructure/` | Build and CI infrastructure, including the `cachelib-navy` vcpkg overlay port |
 
 ## Procedure
 1. Classify whether the change is in the Azure storage layer (`src/Azure/`) or the Core abstractions (`src/Core/`).

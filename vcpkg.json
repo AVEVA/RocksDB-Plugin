@@ -19,6 +19,10 @@
     "boost-unordered",
     "boost-url",
     "boost-uuid",
+    {
+      "name": "cachelib-navy",
+      "platform": "linux & x64"
+    },
     "ms-gsl",
     "openssl",
     "rocksdb",

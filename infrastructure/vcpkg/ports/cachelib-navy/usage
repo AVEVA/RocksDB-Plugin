@@ -1,0 +1,4 @@
+cachelib-navy provides CMake targets:
+
+    find_package(cachelib-navy CONFIG REQUIRED)
+    target_link_libraries(main PRIVATE cachelib-navy::cachelib_navy)
