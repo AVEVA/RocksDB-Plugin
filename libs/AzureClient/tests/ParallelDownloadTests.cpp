@@ -448,6 +448,27 @@ TEST(DownloadVersionValidatorTests, SingleResponseWithoutETag_Succeeds) {
     EXPECT_EQ(ReadFile(out.Path), content);
 }
 
+TEST(ParallelDownloadTests, Download_ChunkSizeAboveBufferCap_IsClampedToCap) {
+    constexpr std::uint64_t BufferCapBytes = std::uint64_t{256} * 1024U * 1024U;
+    FakeHttpClient httpClient;
+    const std::string content = MakeContent(6);
+    EnqueueForRange(httpClient, RangeHeader(0, BufferCapBytes), RangeResponse(0, content, content.size(), ""));
+    BlobClient client{httpClient, BuildOptions()};
+
+    TempFile out;
+    auto operation = StartAwaitable(
+        httpClient,
+        client.DownloadToAsync(
+            out.Path, Parallel(ChunkSize{std::numeric_limits<std::size_t>::max()}, AVEVA::AzureClient::Concurrency{4U})));
+    httpClient.CompleteAll();
+    httpClient.Poll();
+
+    // The oversized chunk size was cut to the cap, so the first range asked for at most 256 MiB.
+    ASSERT_TRUE(operation.Done());
+    ExpectSuccess(operation.Result(), content.size());
+    EXPECT_EQ(ReadFile(out.Path), content);
+}
+
 TEST(ParallelDownloadTests, Download_ChunkFailure_CancelsInFlightChunksAndReportsOnce) {
     FakeHttpClient httpClient;
     const std::string content = MakeContent(20);

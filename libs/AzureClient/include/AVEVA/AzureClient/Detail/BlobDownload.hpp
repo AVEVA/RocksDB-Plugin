@@ -261,7 +261,9 @@ template <HttpClientLike THttp, class TCred, DownloadSinkLike TSink> class Downl
                    AzureRequestOptions requestOptions, TSink sink, std::chrono::steady_clock::time_point start)
         : m_httpClient(httpClient), m_target(target), m_options(std::move(options)),
           m_requestOptions(std::move(requestOptions)), m_deadline(m_requestOptions, start), m_sink(std::move(sink)),
-          m_chunkSize(m_options.ChunkSize.Value()),
+          // A chunk is buffered whole, so one chunk may never exceed the buffering cap.
+          m_chunkSize(gsl::narrow_cast<std::size_t>(
+              std::min<std::uint64_t>(m_options.ChunkSize.Value(), MaxBufferedDownloadBytes))),
           m_concurrency(std::min(m_options.Concurrency.Value(),
                                  std::max<std::size_t>(1U, MaxBufferedDownloadBytes / m_chunkSize))) {}
 

@@ -203,7 +203,8 @@ struct DownloadToOptions {
     Models::BlobRequestConditions Conditions;
 
     /// <summary>
-    /// The size of each ranged request, in bytes; no upper bound.
+    /// The size of each ranged request, in bytes. Values above 256 MiB (the most the client buffers at once) are
+    /// treated as 256 MiB.
     /// </summary>
     AzureClient::ChunkSize ChunkSize{DefaultChunkSize};
 
